@@ -146,7 +146,7 @@ Dry run is the default unless `--apply` is provided.
 ```bash
 python findings_to_jira.py \
   --findings findings.csv \
-  --config jira-rollup-config.json \
+  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
   --state jira-rollup-state.json \
   --results-out jira-rollup-results.csv \
   --plan-out jira-rollup-plan.json
@@ -159,7 +159,7 @@ Creates Jira issues for findings that are not already in local state or Jira.
 ```bash
 python findings_to_jira.py \
   --findings findings.csv \
-  --config jira-rollup-config.json \
+  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
   --state jira-rollup-state.json \
   --results-out jira-rollup-results.csv \
   --plan-out jira-rollup-plan.json \
@@ -173,7 +173,7 @@ When `--hierarchy-plan` is supplied, the script publishes hierarchy nodes instea
 ```bash
 python findings_to_jira.py \
   --hierarchy-plan jira-hierarchy-plan.json \
-  --config jira-rollup-config.json \
+  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
   --state jira-rollup-state.json \
   --results-out jira-hierarchy-publish-test-results.csv \
   --plan-out jira-hierarchy-publish-test-plan.json
@@ -186,7 +186,7 @@ Creates Epic/Story/Vulnerability issues and any configured issue links.
 ```bash
 python findings_to_jira.py \
   --hierarchy-plan jira-hierarchy-plan.json \
-  --config jira-rollup-config.json \
+  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
   --state jira-rollup-state.json \
   --results-out jira-hierarchy-publish-test-results.csv \
   --plan-out jira-hierarchy-publish-test-plan.json \
@@ -208,7 +208,7 @@ Use the full SHA-256 rollup hash when testing a known Jira duplicate.
 ```bash
 python findings_to_jira.py \
   --findings findings.csv \
-  --config jira-rollup-config.json \
+  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
   --state jira-rollup-state.json \
   --results-out jira-rollup-results-duplicate-test.csv \
   --plan-out jira-rollup-plan-duplicate-test.json \
