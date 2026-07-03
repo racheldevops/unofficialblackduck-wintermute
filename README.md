@@ -1,6 +1,6 @@
 # unofficialblackduck-harness
 
-This repository contains an unofficial enhancement to Black Duck parent/child project finding alert workflows. It supplements how child findings are created in Jira so they can be linked correctly with their parent project.
+This repository contains an unofficial enhancement to Black Duck SCA parent/child project finding alert workflows. It supplements how child findings are created in Jira so they can be linked correctly with their parent project.
 
 # setup
 
