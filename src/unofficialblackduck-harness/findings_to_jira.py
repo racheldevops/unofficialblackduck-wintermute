@@ -2255,7 +2255,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--config",
-        default="jira-rollup-config.json",
+        default="./config/jira-rollup-config.json",
         help="Jira publisher config JSON. Default: jira-rollup-config.json.",
     )
     parser.add_argument(

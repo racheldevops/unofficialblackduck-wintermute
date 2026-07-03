@@ -1,0 +1,59 @@
+{
+  "jira": {
+    "url": "https://useyourjirahere.atlassian.net",
+    "project_key": "KAN",
+    "issue_type": "Task",
+    "api_version": "2",
+    "auth_mode": "basic",
+    "verify_tls": false
+  },
+  "issue": {
+    "summary_template": "[Black Duck] {severity} {vulnerability} in {component} - {parent_project} {parent_version}",
+    "labels": [
+      "blackduck",
+      "subproject_rollup"
+    ],
+    "priority_by_severity": {
+      "CRITICAL": "Highest",
+      "HIGH": "High",
+      "MEDIUM": "Medium",
+      "LOW": "Low"
+    },
+    "additional_fields": {}
+  },
+  "dedupe": {
+    "label_prefix": "bd_rollup_",
+    "hash_length": 24
+  },
+  "ai": {
+    "enabled": false,
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini",
+    "api_key_env": "OPENAI_API_KEY"
+  },
+  "hierarchy": {
+    "epic_issue_type": "Epic",
+    "story_issue_type": "Story",
+    "vulnerability_issue_type": "Subtask",
+    "story_parent_mode": "jira_parent",
+    "vulnerability_parent_mode": "jira_parent",
+    "issue_link_type": "Relates",
+    "epic_link_field": "",
+    "labels": {
+      "epic": [
+        "bd_rollup_parent"
+      ],
+      "story": [
+        "bd_rollup_child"
+      ],
+      "vulnerability": [
+        "bd_rollup_vuln"
+      ]
+    },
+    "additional_fields": {
+      "epic": {},
+      "story": {},
+      "vulnerability": {}
+    }
+  }
+}
