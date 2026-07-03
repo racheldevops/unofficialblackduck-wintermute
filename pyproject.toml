@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unofficialblackduck-harness"
+version = "0.1.0"
+description = "Utility scripts for Black Duck vulnerability rollups and Jira publishing workflows."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [
+    { name = "racheldevops" }
+]
+dependencies = []
+
+[project.scripts]
+blackduck-find-parents = "find_parent_projects:main"
+blackduck-vuln-rollup = "subp_vuln_rollup:main"
+blackduck-hierarchy-plan = "findings_hierarchy_plan:main"
+blackduck-findings-to-jira = "findings_to_jira:main"
+
+[tool.setuptools]
+py-modules = [
+    "find_parent_projects",
+    "subp_vuln_rollup",
+    "findings_hierarchy_plan",
+    "findings_to_jira"
+]
+
+[tool.setuptools.package-dir]
+"" = "src/unofficialblackduck-harness"
