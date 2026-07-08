@@ -19,13 +19,19 @@ blackduck-find-parents = "find_parent_projects:main"
 blackduck-vuln-rollup = "subp_vuln_rollup:main"
 blackduck-hierarchy-plan = "findings_hierarchy_plan:main"
 blackduck-findings-to-jira = "findings_to_jira:main"
+blackduck-policy-vuln-find = "policy_vuln_find:main"
+blackduck-policy-vuln-pull = "policy_vuln_pull:main"
+blackduck-findings-to-datadog = "findings_to_datadog:main"
 
 [tool.setuptools]
 py-modules = [
     "find_parent_projects",
     "subp_vuln_rollup",
     "findings_hierarchy_plan",
-    "findings_to_jira"
+    "findings_to_jira",
+    "policy_vuln_find",
+    "policy_vuln_pull",
+    "findings_to_datadog"
 ]
 
 [tool.setuptools.package-dir]
