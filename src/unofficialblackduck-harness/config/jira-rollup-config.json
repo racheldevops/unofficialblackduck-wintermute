@@ -33,7 +33,7 @@
   },
   "hierarchy": {
     "epic_issue_type": "Epic",
-    "story_issue_type": "Story",
+    "story_issue_type": "Task",
     "vulnerability_issue_type": "Subtask",
     "story_parent_mode": "jira_parent",
     "vulnerability_parent_mode": "jira_parent",
@@ -41,10 +41,10 @@
     "epic_link_field": "",
     "labels": {
       "epic": [
-        "bd_rollup_parent"
+        "bd_rollup_cve"
       ],
       "story": [
-        "bd_rollup_child"
+        "bd_rollup_project_version"
       ],
       "vulnerability": [
         "bd_rollup_vuln"

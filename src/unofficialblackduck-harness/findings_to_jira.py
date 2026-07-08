@@ -78,15 +78,15 @@ DEFAULT_CONFIG = {
     },
     "hierarchy": {
         "epic_issue_type": "Epic",
-        "story_issue_type": "Story",
-        "vulnerability_issue_type": "Task",
+        "story_issue_type": "Task",
+        "vulnerability_issue_type": "Subtask",
         "story_parent_mode": "jira_parent",
-        "vulnerability_parent_mode": "issue_link",
+        "vulnerability_parent_mode": "jira_parent",
         "issue_link_type": "Relates",
         "epic_link_field": "",
         "labels": {
-            "epic": ["bd_rollup_parent"],
-            "story": ["bd_rollup_child"],
+            "epic": ["bd_rollup_cve"],
+            "story": ["bd_rollup_project_version"],
             "vulnerability": ["bd_rollup_vuln"],
         },
         "additional_fields": {
@@ -1143,9 +1143,9 @@ def hierarchy_issue_type_for_node(
         return str(hierarchy_config.get("epic_issue_type") or "Epic")
 
     if node_type == "story":
-        return str(hierarchy_config.get("story_issue_type") or "Story")
+        return str(hierarchy_config.get("story_issue_type") or "Task")
 
-    return str(hierarchy_config.get("vulnerability_issue_type") or "Task")
+    return str(hierarchy_config.get("vulnerability_issue_type") or "Subtask")
 
 
 def hierarchy_labels_for_node(
@@ -1351,7 +1351,7 @@ def hierarchy_parent_mode_for_node(
         return str(hierarchy_config.get("story_parent_mode") or "jira_parent")
 
     if node_type == "vulnerability":
-        return str(hierarchy_config.get("vulnerability_parent_mode") or "issue_link")
+        return str(hierarchy_config.get("vulnerability_parent_mode") or "jira_parent")
 
     return ""
 
@@ -1889,7 +1889,7 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
     print(f"Input nodes:             {len(all_nodes)}")
     print(f"Processed nodes:         {len(nodes)}")
     print(f"Epic nodes:              {node_type_counts['epic']}")
-    print(f"Story nodes:             {node_type_counts['story']}")
+    print(f"Task  nodes:             {node_type_counts['story']}")
     print(f"Vulnerability nodes:     {node_type_counts['vulnerability']}")
     print(f"Dry run:                 {dry_run}")
     print(f"Would create:            {planned_create_count}")
