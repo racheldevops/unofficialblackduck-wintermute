@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -61,7 +62,9 @@ FAILURE_FIELDNAMES = [
 ]
 
 CACHE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
 MAX_WORKERS = 8
+MAX_COMPONENT_WORKERS = 16
 
 
 @dataclass(frozen=True)
@@ -86,12 +89,19 @@ class PullSettings:
     group_by: str
     skip_policy_rules: bool
     include_policy_rule_details: bool
+    component_workers: int
 
 
 @dataclass(frozen=True)
 class PullTarget:
     index: int
     candidate: dict[str, str]
+
+
+@dataclass
+class ComponentPullResult:
+    findings: list[dict[str, str]]
+    failures: list[dict[str, str]]
 
 
 @dataclass
@@ -644,7 +654,11 @@ class BlackDuckClient:
         if self.bearer_token:
             headers["Authorization"] = f"Bearer {self.bearer_token}"
 
-        for attempt in range(self.retries + 1):
+        token_refreshed = False
+        attempt = 0
+        max_attempt = self.retries
+
+        while attempt <= max_attempt:
             request = Request(url, headers=headers, method="GET")
 
             try:
@@ -666,19 +680,43 @@ class BlackDuckClient:
             except (HTTPError, URLError, TimeoutError, OSError) as error:
                 if isinstance(error, HTTPError):
                     body = error.read().decode("utf-8", errors="replace")
-                    retryable = error.code in {429, 500, 502, 503, 504}
                     message = f"HTTP {error.code} {error.reason}: {body[:1000]}"
+
+                    if error.code == 401 and not token_refreshed:
+                        token_refreshed = True
+                        max_attempt += 1
+
+                        if self.debug:
+                            print(
+                                f"GET {url} returned HTTP 401; refreshing Black Duck bearer token and retrying once.",
+                                file=sys.stderr,
+                            )
+
+                        try:
+                            self.authenticate()
+                        except RuntimeError as auth_error:
+                            raise RuntimeError(
+                                f"GET {url} failed: HTTP 401 Unauthorized and bearer-token refresh failed: {auth_error}"
+                            ) from error
+
+                        if self.bearer_token:
+                            headers["Authorization"] = f"Bearer {self.bearer_token}"
+
+                        continue
+
+                    retryable = error.code in {429, 500, 502, 503, 504}
                 else:
                     retryable = True
                     message = str(error)
 
-                if not retryable or attempt >= self.retries:
+                if not retryable or attempt >= max_attempt:
                     raise RuntimeError(f"GET {url} failed: {message}") from error
 
                 if self.debug:
                     print(f"Retrying GET {url}: {message}", file=sys.stderr)
 
                 time.sleep(self.retry_delay * (attempt + 1))
+                attempt += 1
 
         raise RuntimeError(f"GET {url} failed unexpectedly")
 
@@ -760,6 +798,35 @@ def read_candidates(path: str) -> list[dict[str, str]]:
         return [dict(row) for row in reader]
 
 
+def read_candidates_with_fieldnames(path: str) -> tuple[list[dict[str, str]], list[str]]:
+    if path.endswith(".json"):
+        rows = read_candidates(path)
+        fieldnames = sorted({key for row in rows for key in row})
+        return rows, fieldnames
+
+    with open(path, newline="", encoding="utf-8") as input_file:
+        reader = csv.DictReader(input_file)
+
+        if not reader.fieldnames:
+            raise RuntimeError(f"{path} has no header row")
+
+        return [dict(row) for row in reader], list(reader.fieldnames)
+
+
+def write_candidates_csv(path: str, rows: list[dict[str, str]], fieldnames: list[str]) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp_path = f"{path}.tmp"
+
+    with open(tmp_path, "w", newline="", encoding="utf-8") as output_file:
+        writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fieldnames})
+
+    os.replace(tmp_path, path)
+
+
 def candidate_matches(row: dict[str, str], args: argparse.Namespace) -> bool:
     if args.project_name and row.get("project") != args.project_name:
         return False
@@ -774,6 +841,26 @@ def candidate_matches(row: dict[str, str], args: argparse.Namespace) -> bool:
         return False
 
     return True
+
+
+def candidate_identity(candidate: dict[str, str]) -> str:
+    explicit = str(candidate.get("candidate_external_id") or "").strip()
+
+    if explicit:
+        return explicit
+
+    key = str(candidate.get("candidate_key") or "").strip()
+
+    if not key:
+        key = "|".join(
+            [
+                candidate.get("project", ""),
+                candidate.get("project_version", ""),
+                canonical_href(candidate.get("project_version_href", "")),
+            ]
+        )
+
+    return sha256_hex(key)
 
 
 def get_vulnerable_components(
@@ -889,25 +976,34 @@ def build_finding_key(
     return "|".join([project, project_version, component, component_version, vulnerability])
 
 
-def collect_for_candidate(
+def failure_for_candidate(
+    candidate: dict[str, str],
+    stage: str,
+    error: Exception | str,
+) -> dict[str, str]:
+    return {
+        "project": candidate.get("project", ""),
+        "project_version": candidate.get("project_version", ""),
+        "project_version_href": candidate.get("project_version_href", ""),
+        "candidate_external_id": candidate_identity(candidate),
+        "stage": stage,
+        "error": str(error),
+    }
+
+
+def collect_for_component(
     client: BlackDuckClient,
     candidate: dict[str, str],
+    component: dict[str, Any],
     settings: PullSettings,
-) -> list[dict[str, str]]:
+    fetch_policy_rules: bool,
+) -> ComponentPullResult:
     project = candidate.get("project", "")
     project_version = candidate.get("project_version", "")
     project_href = candidate.get("project_href", "")
     project_version_href = canonical_href(candidate.get("project_version_href", ""))
 
-    if not project_version_href:
-        raise RuntimeError("candidate row has no project_version_href")
-
-    components = get_vulnerable_components(client, project_version_href)
-    findings: list[dict[str, str]] = []
-
-    fetch_policy_rules = should_fetch_policy_rules(settings)
-
-    for component in components:
+    try:
         component_name = str(first_value_by_key(component, ["componentName", "name"]) or "")
         component_version = str(
             first_value_by_key(
@@ -937,7 +1033,7 @@ def collect_for_candidate(
         matched_policy, policy_name, policy_href = policy_match(policy_rules, settings)
 
         if not matched_policy:
-            continue
+            return ComponentPullResult(findings=[], failures=[])
 
         vulnerabilities_url = get_link(component, ("vulnerabilities", "vulnerability"))
         vulnerability_items: list[dict[str, Any]] = []
@@ -948,6 +1044,8 @@ def collect_for_candidate(
                 vulnerability_items.extend(extracted or [item])
         else:
             vulnerability_items.extend(extract_vulnerability_candidates(component, settings.score_field))
+
+        findings: list[dict[str, str]] = []
 
         for vulnerability in vulnerability_items:
             vulnerability_id = vulnerability_identifier(vulnerability)
@@ -1001,7 +1099,7 @@ def collect_for_candidate(
                     "project_group_key": group_key,
                     "project_group_external_id": sha256_hex(group_key),
                     "candidate_key": candidate.get("candidate_key", ""),
-                    "candidate_external_id": candidate.get("candidate_external_id", ""),
+                    "candidate_external_id": candidate_identity(candidate),
                     "component": component_name,
                     "component_version": component_version,
                     "component_origin_id": component_origin_id,
@@ -1025,32 +1123,132 @@ def collect_for_candidate(
                 }
             )
 
-    return findings
+        return ComponentPullResult(findings=findings, failures=[])
+
+    except Exception as error:
+        component_label = " ".join(
+            str(part or "").strip()
+            for part in [
+                first_value_by_key(component, ["componentName", "name"]),
+                first_value_by_key(component, ["componentVersionName", "componentVersion", "versionName"]),
+            ]
+            if str(part or "").strip()
+        ) or canonical_href(get_self_href(component)) or "unknown component"
+
+        return ComponentPullResult(
+            findings=[],
+            failures=[
+                failure_for_candidate(
+                    candidate,
+                    "component-details",
+                    f"{component_label}: {error}",
+                )
+            ],
+        )
 
 
-def failure_for_candidate(
+def collect_for_candidate(
+    client: BlackDuckClient,
     candidate: dict[str, str],
-    stage: str,
-    error: Exception | str,
-) -> dict[str, str]:
-    return {
-        "project": candidate.get("project", ""),
-        "project_version": candidate.get("project_version", ""),
-        "project_version_href": candidate.get("project_version_href", ""),
-        "candidate_external_id": candidate.get("candidate_external_id", ""),
-        "stage": stage,
-        "error": str(error),
-    }
+    settings: PullSettings,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    project_version_href = canonical_href(candidate.get("project_version_href", ""))
+
+    if not project_version_href:
+        raise RuntimeError("candidate row has no project_version_href")
+
+    components = get_vulnerable_components(client, project_version_href)
+    fetch_policy_rules = should_fetch_policy_rules(settings)
+
+    if settings.debug:
+        print(
+            f"Candidate {candidate.get('project', '')} / {candidate.get('project_version', '')}: "
+            f"{len(components):,} vulnerable component(s), component_workers={settings.component_workers}",
+            file=sys.stderr,
+        )
+
+    findings: list[dict[str, str]] = []
+    failures: list[dict[str, str]] = []
+
+    if settings.component_workers <= 1 or len(components) <= 1:
+        for component in components:
+            result = collect_for_component(
+                client=client,
+                candidate=candidate,
+                component=component,
+                settings=settings,
+                fetch_policy_rules=fetch_policy_rules,
+            )
+            findings.extend(result.findings)
+            failures.extend(result.failures)
+        return findings, failures
+
+    max_workers = min(settings.component_workers, len(components))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_component = {
+            executor.submit(
+                collect_for_component,
+                client,
+                candidate,
+                component,
+                settings,
+                fetch_policy_rules,
+            ): component
+            for component in components
+        }
+
+        for future in future_to_component:
+            try:
+                result = future.result()
+            except Exception as error:
+                component = future_to_component[future]
+                component_label = canonical_href(get_self_href(component)) or "unknown component"
+                result = ComponentPullResult(
+                    findings=[],
+                    failures=[
+                        failure_for_candidate(
+                            candidate,
+                            "component-details",
+                            f"{component_label}: {error}",
+                        )
+                    ],
+                )
+
+            findings.extend(result.findings)
+            failures.extend(result.failures)
+
+    return findings, failures
 
 
-def pull_one_candidate(
+def is_auth_failure_text(value: object) -> bool:
+    text = str(value or "").lower()
+
+    return (
+        "http 401" in text
+        or "401 unauthorized" in text
+        or "unauthorized" in text
+        or "bearer-token refresh" in text
+    )
+
+
+def result_has_auth_failures(result: CandidatePullResult) -> bool:
+    if is_auth_failure_text(result.error):
+        return True
+
+    for failure in result.failures:
+        if is_auth_failure_text(failure.get("error", "")):
+            return True
+
+    return False
+
+
+def build_candidate_client(
     settings: PullSettings,
     api_cache: ApiResponseCache | None,
-    target: PullTarget,
-) -> CandidatePullResult:
-    start_seconds = time.monotonic()
-
-    client = BlackDuckClient(
+    bearer_token: str | None = None,
+) -> BlackDuckClient:
+    return BlackDuckClient(
         base_url=settings.base_url,
         api_token=settings.api_token,
         insecure=settings.insecure,
@@ -1060,30 +1258,91 @@ def pull_one_candidate(
         page_limit=settings.page_limit,
         debug=settings.debug,
         api_cache=api_cache,
-        bearer_token=settings.bearer_token,
+        bearer_token=bearer_token if bearer_token is not None else settings.bearer_token,
     )
 
-    try:
-        findings = collect_for_candidate(client, target.candidate, settings)
-        return CandidatePullResult(
-            index=target.index,
-            candidate=target.candidate,
-            findings=findings,
-            failures=[],
-            elapsed_seconds=time.monotonic() - start_seconds,
-            status="ok",
-        )
-    except Exception as error:
-        return CandidatePullResult(
-            index=target.index,
-            candidate=target.candidate,
-            findings=[],
-            failures=[failure_for_candidate(target.candidate, "collect-details", error)],
-            elapsed_seconds=time.monotonic() - start_seconds,
-            status="failed",
-            error=str(error),
+
+def pull_one_candidate(
+    settings: PullSettings,
+    api_cache: ApiResponseCache | None,
+    target: PullTarget,
+) -> CandidatePullResult:
+    start_seconds = time.monotonic()
+    max_auth_retry_count = 2
+    last_result: CandidatePullResult | None = None
+
+    for auth_retry_index in range(max_auth_retry_count + 1):
+        client = build_candidate_client(settings, api_cache)
+
+        if auth_retry_index > 0:
+            try:
+                client.authenticate()
+            except Exception as auth_error:
+                result = CandidatePullResult(
+                    index=target.index,
+                    candidate=target.candidate,
+                    findings=[],
+                    failures=[
+                        failure_for_candidate(
+                            target.candidate,
+                            "refresh-auth",
+                            auth_error,
+                        )
+                    ],
+                    elapsed_seconds=time.monotonic() - start_seconds,
+                    status="failed",
+                    error=str(auth_error),
+                )
+                last_result = result
+
+                if auth_retry_index >= max_auth_retry_count:
+                    return result
+
+                time.sleep(settings.retry_delay * auth_retry_index)
+                continue
+
+        try:
+            findings, failures = collect_for_candidate(client, target.candidate, settings)
+            result = CandidatePullResult(
+                index=target.index,
+                candidate=target.candidate,
+                findings=findings,
+                failures=failures,
+                elapsed_seconds=time.monotonic() - start_seconds,
+                status="partial" if failures else "ok",
+            )
+        except Exception as error:
+            result = CandidatePullResult(
+                index=target.index,
+                candidate=target.candidate,
+                findings=[],
+                failures=[failure_for_candidate(target.candidate, "collect-details", error)],
+                elapsed_seconds=time.monotonic() - start_seconds,
+                status="failed",
+                error=str(error),
+            )
+
+        last_result = result
+
+        if not result_has_auth_failures(result):
+            return result
+
+        if auth_retry_index >= max_auth_retry_count:
+            return result
+
+        print(
+            f"Warning: auth-related failure while pulling "
+            f"{target.candidate.get('project', '')} / "
+            f"{target.candidate.get('project_version', '')}; "
+            f"refreshing bearer token and retrying candidate "
+            f"{auth_retry_index + 1}/{max_auth_retry_count}.",
+            file=sys.stderr,
         )
 
+        time.sleep(settings.retry_delay * (auth_retry_index + 1))
+
+    assert last_result is not None
+    return last_result
 
 def atomic_write_json(path: str, payload: Any) -> None:
     if path == "-":
@@ -1153,6 +1412,18 @@ def sort_findings(findings: list[dict[str, str]]) -> list[dict[str, str]]:
     )
 
 
+def sort_failures(failures: list[dict[str, str]]) -> list[dict[str, str]]:
+    return sorted(
+        failures,
+        key=lambda row: (
+            row.get("project", "").lower(),
+            row.get("project_version", "").lower(),
+            row.get("stage", ""),
+            row.get("error", ""),
+        ),
+    )
+
+
 def runtime_limit_reached(args: argparse.Namespace, start_seconds: float) -> bool:
     if args.max_runtime_minutes is None:
         return False
@@ -1183,13 +1454,149 @@ def print_progress(
     )
 
 
+def state_path_for_args(args: argparse.Namespace) -> str:
+    if args.state:
+        return args.state
+
+    if args.out and args.out != "-":
+        return f"{args.out}.state.json"
+
+    return "policy_vuln_pull_state.json"
+
+
+def settings_signature(args: argparse.Namespace) -> str:
+    payload = {
+        "bd_url": str(args.bd_url or "").rstrip("/"),
+        "threshold": args.threshold,
+        "score_operator": args.score_operator,
+        "score_field": args.score_field,
+        "require_exploit_available": bool(args.require_exploit_available),
+        "require_reachable": bool(args.require_reachable),
+        "reachability_mode": args.reachability_mode,
+        "policy_name": args.policy_name or "",
+        "policy_rule_id": args.policy_rule_id or "",
+        "group_by": args.group_by,
+        "skip_policy_rules": bool(args.skip_policy_rules),
+        "include_policy_rule_details": bool(args.include_policy_rule_details),
+    }
+    return sha256_hex(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+
+def fresh_state(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "schema_version": STATE_SCHEMA_VERSION,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "settings_signature": settings_signature(args),
+        "completed_candidates": {},
+    }
+
+
+def load_state(path: str, args: argparse.Namespace) -> dict[str, Any]:
+    if not args.resume or not path or not os.path.exists(path):
+        return fresh_state(args)
+
+    try:
+        with open(path, encoding="utf-8") as input_file:
+            state = json.load(input_file)
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"Warning: failed reading resume state {path}: {error}; starting fresh.", file=sys.stderr)
+        return fresh_state(args)
+
+    if not isinstance(state, dict) or state.get("schema_version") != STATE_SCHEMA_VERSION:
+        print(f"Warning: resume state {path} has incompatible schema; starting fresh.", file=sys.stderr)
+        return fresh_state(args)
+
+    if str(state.get("settings_signature") or "") != settings_signature(args):
+        print(
+            f"Warning: resume state {path} was created with different pull settings; starting fresh.",
+            file=sys.stderr,
+        )
+        return fresh_state(args)
+
+    state.setdefault("completed_candidates", {})
+    return state
+
+
+def save_state(path: str, state: dict[str, Any]) -> None:
+    if not path:
+        return
+
+    state["updated_at"] = now_iso()
+    tmp_path = f"{path}.tmp"
+
+    with open(tmp_path, "w", encoding="utf-8") as output_file:
+        json.dump(state, output_file, indent=2, sort_keys=True)
+
+    os.replace(tmp_path, path)
+
+
+def state_entry_from_result(result: CandidatePullResult) -> dict[str, Any]:
+    return {
+        "candidate_external_id": candidate_identity(result.candidate),
+        "candidate": result.candidate,
+        "status": result.status,
+        "error": result.error,
+        "elapsed_seconds": round(result.elapsed_seconds, 3),
+        "completed_at": now_iso(),
+        "finding_count": len(result.findings),
+        "failure_count": len(result.failures),
+        "findings": result.findings,
+        "failures": result.failures,
+    }
+
+
+def load_completed_from_state(
+    state: dict[str, Any],
+    candidates: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]], set[str], set[str]]:
+    wanted_candidate_ids = {candidate_identity(candidate) for candidate in candidates}
+    completed_candidates = state.setdefault("completed_candidates", {})
+
+    findings: list[dict[str, str]] = []
+    failures: list[dict[str, str]] = []
+    seen_finding_ids: set[str] = set()
+    completed_candidate_ids: set[str] = set()
+
+    for candidate_id, entry in completed_candidates.items():
+        if candidate_id not in wanted_candidate_ids:
+            continue
+
+        if not isinstance(entry, dict):
+            continue
+
+        completed_candidate_ids.add(candidate_id)
+
+        for finding in entry.get("findings") or []:
+            if not isinstance(finding, dict):
+                continue
+
+            finding_id = str(finding.get("finding_external_id") or "")
+            if not finding_id or finding_id in seen_finding_ids:
+                continue
+
+            seen_finding_ids.add(finding_id)
+            findings.append({str(key): str(value or "") for key, value in finding.items()})
+
+        for failure in entry.get("failures") or []:
+            if isinstance(failure, dict):
+                failures.append({str(key): str(value or "") for key, value in failure.items()})
+
+    return findings, failures, seen_finding_ids, completed_candidate_ids
+
+
 def persist_checkpoint(
     api_cache: ApiResponseCache | None,
+    state_path: str,
+    state: dict[str, Any],
     findings: list[dict[str, str]],
     failures: list[dict[str, str]],
     args: argparse.Namespace,
     partial_out: str,
 ) -> None:
+    save_state(state_path, state)
+    print(f"Saved resume state: {state_path}", file=sys.stderr)
+
     if api_cache is not None:
         api_cache.save()
 
@@ -1199,7 +1606,7 @@ def persist_checkpoint(
 
     if args.failures_out:
         partial_failures = f"{args.failures_out}.partial"
-        write_failures(partial_failures, failures)
+        write_failures(partial_failures, sort_failures(failures))
         print(f"Wrote partial failures: {partial_failures}", file=sys.stderr)
 
 
@@ -1236,15 +1643,71 @@ def build_settings(args: argparse.Namespace, bearer_token: str) -> PullSettings:
         group_by=args.group_by,
         skip_policy_rules=bool(args.skip_policy_rules),
         include_policy_rule_details=bool(args.include_policy_rule_details),
+        component_workers=args.component_workers,
     )
 
 
+def maybe_print_heartbeat(
+    args: argparse.Namespace,
+    last_heartbeat_seconds: float,
+    run_start_seconds: float,
+    completed_count: int,
+    total: int,
+    finding_count: int,
+    failure_count: int,
+    pending: dict[Future[CandidatePullResult], PullTarget],
+    active_started_at: dict[Future[CandidatePullResult], float],
+    force: bool = False,
+) -> float:
+    if args.heartbeat_every <= 0:
+        return last_heartbeat_seconds
+
+    now_seconds = time.monotonic()
+
+    if not force and (now_seconds - last_heartbeat_seconds) < args.heartbeat_every:
+        return last_heartbeat_seconds
+
+    elapsed = format_duration(now_seconds - run_start_seconds)
+    active_count = len(pending)
+    remaining = max(0, total - completed_count)
+
+    active_rows: list[tuple[float, PullTarget]] = []
+    for future, target in pending.items():
+        active_rows.append((now_seconds - active_started_at.get(future, now_seconds), target))
+
+    active_rows.sort(key=lambda item: item[0], reverse=True)
+    longest = format_duration(active_rows[0][0]) if active_rows else "0m 0s"
+    active_labels = [
+        f"#{target.index} {target.candidate.get('project', '')} / "
+        f"{target.candidate.get('project_version', '')} active={format_duration(age)}"
+        for age, target in active_rows[: min(5, len(active_rows))]
+    ]
+
+    print(
+        f"[heartbeat] completed={completed_count}/{total}, active={active_count}, "
+        f"findings={finding_count}, failures={failure_count}, remaining={remaining}, "
+        f"longest_active={longest}, elapsed={elapsed}",
+        file=sys.stderr,
+    )
+
+    for label in active_labels:
+        print(f"[heartbeat]   {label}", file=sys.stderr)
+
+    return now_seconds
+
+
 def process(args: argparse.Namespace) -> int:
+    if args.shard_count > 1 and not args.shard_worker:
+        return run_sharded(args)
+
     run_start_seconds = time.monotonic()
 
     partial_out = args.partial_out
     if partial_out is None:
         partial_out = "" if args.out == "-" else f"{args.out}.partial"
+
+    state_path = state_path_for_args(args)
+    state = load_state(state_path, args)
 
     api_cache = (
         None
@@ -1288,18 +1751,32 @@ def process(args: argparse.Namespace) -> int:
         if args.limit_candidates is not None:
             candidates = candidates[: args.limit_candidates]
 
+        findings, failures, seen_finding_ids, completed_candidate_ids = load_completed_from_state(
+            state,
+            candidates,
+        )
+
         targets = [
             PullTarget(index=index, candidate=candidate)
             for index, candidate in enumerate(candidates, start=1)
+            if candidate_identity(candidate) not in completed_candidate_ids
         ]
+
+        completed_count = len(completed_candidate_ids)
 
         print(
             f"Loaded {len(candidates):,} candidate(s) from {args.candidates}.",
             file=sys.stderr,
         )
         print(
-            f"Pulling with workers={args.workers}, threshold={args.score_operator} {args.threshold}, "
-            f"score_field={args.score_field}, require_exploit_available={args.require_exploit_available}.",
+            f"Resume state: {state_path}; already completed={completed_count:,}; "
+            f"remaining to schedule={len(targets):,}.",
+            file=sys.stderr,
+        )
+        print(
+            f"Pulling with workers={args.workers}, component_workers={args.component_workers}, "
+            f"threshold={args.score_operator} {args.threshold}, score_field={args.score_field}, "
+            f"require_exploit_available={args.require_exploit_available}.",
             file=sys.stderr,
         )
 
@@ -1310,16 +1787,17 @@ def process(args: argparse.Namespace) -> int:
         else:
             print("Policy rule detail traversal disabled unless policy filters are supplied.", file=sys.stderr)
 
-        findings: list[dict[str, str]] = []
-        failures: list[dict[str, str]] = []
-        seen_finding_ids: set[str] = set()
-        completed_count = 0
         runtime_limited = False
         finding_limit_reached = False
         interrupted = False
+        last_heartbeat_seconds = 0.0
 
         def apply_result(result: CandidatePullResult) -> None:
             nonlocal finding_limit_reached
+
+            candidate_id = candidate_identity(result.candidate)
+            state.setdefault("completed_candidates", {})[candidate_id] = state_entry_from_result(result)
+            save_state(state_path, state)
 
             failures.extend(result.failures)
 
@@ -1327,6 +1805,13 @@ def process(args: argparse.Namespace) -> int:
                 print(
                     f"Warning: failed pulling {result.candidate.get('project', '')} / "
                     f"{result.candidate.get('project_version', '')}: {result.error}",
+                    file=sys.stderr,
+                )
+            elif result.status == "partial":
+                print(
+                    f"Warning: partial pull for {result.candidate.get('project', '')} / "
+                    f"{result.candidate.get('project_version', '')}: "
+                    f"{len(result.failures)} component-level failure(s)",
                     file=sys.stderr,
                 )
 
@@ -1359,7 +1844,7 @@ def process(args: argparse.Namespace) -> int:
 
                     if args.debug:
                         print(
-                            f"[{target.index}/{len(targets)}] Pulling "
+                            f"[{target.index}/{len(candidates)}] Pulling "
                             f"{target.candidate.get('project')} / {target.candidate.get('project_version')}",
                             file=sys.stderr,
                         )
@@ -1370,7 +1855,7 @@ def process(args: argparse.Namespace) -> int:
 
                     print_progress(
                         completed=completed_count,
-                        total=len(targets),
+                        total=len(candidates),
                         finding_count=len(findings),
                         failure_count=len(failures),
                         start_seconds=run_start_seconds,
@@ -1378,11 +1863,12 @@ def process(args: argparse.Namespace) -> int:
                     )
 
                     if completed_count % args.cache_save_every == 0:
-                        persist_checkpoint(api_cache, findings, failures, args, partial_out)
+                        persist_checkpoint(api_cache, state_path, state, findings, failures, args, partial_out)
 
             elif targets:
                 executor: ThreadPoolExecutor | None = ThreadPoolExecutor(max_workers=args.workers)
                 pending: dict[Future[CandidatePullResult], PullTarget] = {}
+                active_started_at: dict[Future[CandidatePullResult], float] = {}
                 next_index = 0
 
                 def submit_more() -> None:
@@ -1403,13 +1889,14 @@ def process(args: argparse.Namespace) -> int:
 
                         if args.debug:
                             print(
-                                f"[schedule {next_index}/{len(targets)}] Pulling "
+                                f"[schedule {target.index}/{len(candidates)}] Pulling "
                                 f"{target.candidate.get('project')} / {target.candidate.get('project_version')}",
                                 file=sys.stderr,
                             )
 
                         future = executor.submit(pull_one_candidate, settings, api_cache, target)
                         pending[future] = target
+                        active_started_at[future] = time.monotonic()
 
                 try:
                     submit_more()
@@ -1418,12 +1905,25 @@ def process(args: argparse.Namespace) -> int:
                         done, _ = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
 
                         if not done:
+                            last_heartbeat_seconds = maybe_print_heartbeat(
+                                args=args,
+                                last_heartbeat_seconds=last_heartbeat_seconds,
+                                run_start_seconds=run_start_seconds,
+                                completed_count=completed_count,
+                                total=len(candidates),
+                                finding_count=len(findings),
+                                failure_count=len(failures),
+                                pending=pending,
+                                active_started_at=active_started_at,
+                            )
+
                             if runtime_limit_reached(args, run_start_seconds):
                                 runtime_limited = True
                             continue
 
                         for future in done:
                             target = pending.pop(future)
+                            active_started_at.pop(future, None)
 
                             try:
                                 result = future.result()
@@ -1443,7 +1943,7 @@ def process(args: argparse.Namespace) -> int:
 
                             print_progress(
                                 completed=completed_count,
-                                total=len(targets),
+                                total=len(candidates),
                                 finding_count=len(findings),
                                 failure_count=len(failures),
                                 start_seconds=run_start_seconds,
@@ -1451,7 +1951,7 @@ def process(args: argparse.Namespace) -> int:
                             )
 
                             if completed_count % args.cache_save_every == 0:
-                                persist_checkpoint(api_cache, findings, failures, args, partial_out)
+                                persist_checkpoint(api_cache, state_path, state, findings, failures, args, partial_out)
 
                         if runtime_limit_reached(args, run_start_seconds):
                             runtime_limited = True
@@ -1459,16 +1959,23 @@ def process(args: argparse.Namespace) -> int:
                         if not runtime_limited and not finding_limit_reached:
                             submit_more()
 
+                except KeyboardInterrupt:
+                    interrupted = True
+                    for future in pending:
+                        future.cancel()
+                    raise
+
                 finally:
                     if executor is not None:
-                        executor.shutdown(wait=True, cancel_futures=False)
+                        executor.shutdown(wait=not interrupted, cancel_futures=interrupted)
 
         except KeyboardInterrupt:
             interrupted = True
-            print("Interrupted; saving API cache and partial output...", file=sys.stderr)
+            print("Interrupted; saving API cache, resume state, and partial output...", file=sys.stderr)
+
+        persist_checkpoint(api_cache, state_path, state, findings, failures, args, partial_out)
 
         if interrupted:
-            persist_checkpoint(api_cache, findings, failures, args, partial_out)
             return 130
 
         if runtime_limited:
@@ -1486,7 +1993,7 @@ def process(args: argparse.Namespace) -> int:
 
         print_progress(
             completed=completed_count,
-            total=len(targets),
+            total=len(candidates),
             finding_count=len(findings),
             failure_count=len(failures),
             start_seconds=run_start_seconds,
@@ -1495,6 +2002,7 @@ def process(args: argparse.Namespace) -> int:
         )
 
         findings = sort_findings(findings)
+        failures = sort_failures(failures)
 
         write_findings(args.out, findings, args.json)
         write_failures(args.failures_out or "", failures)
@@ -1505,7 +2013,7 @@ def process(args: argparse.Namespace) -> int:
             remove_partial_output(f"{args.failures_out}.partial")
 
         elapsed_seconds = time.monotonic() - run_start_seconds
-        remaining_count = max(0, len(targets) - completed_count)
+        remaining_count = max(0, len(candidates) - completed_count)
 
         print(
             f"Pulled {len(findings):,} high-risk finding(s) from "
@@ -1523,6 +2031,287 @@ def process(args: argparse.Namespace) -> int:
     finally:
         if api_cache is not None:
             api_cache.save()
+
+
+def merge_findings_files(paths: list[str], output_path: str, json_mode: bool) -> int:
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+
+        if path.endswith(".json"):
+            with open(path, encoding="utf-8") as input_file:
+                payload = json.load(input_file)
+            shard_rows = payload if isinstance(payload, list) else []
+        else:
+            with open(path, newline="", encoding="utf-8") as input_file:
+                reader = csv.DictReader(input_file)
+                shard_rows = [dict(row) for row in reader]
+
+        for row in shard_rows:
+            if not isinstance(row, dict):
+                continue
+
+            finding_id = str(row.get("finding_external_id") or row.get("finding_key") or "")
+
+            if not finding_id:
+                finding_id = sha256_hex(json.dumps(row, sort_keys=True, default=str))
+
+            if finding_id in seen:
+                continue
+
+            seen.add(finding_id)
+            rows.append({str(key): str(value or "") for key, value in row.items()})
+
+    write_findings(output_path, sort_findings(rows), json_mode)
+    return len(rows)
+
+
+def merge_failure_files(paths: list[str], output_path: str) -> int:
+    if not output_path:
+        return 0
+
+    rows: list[dict[str, str]] = []
+
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+
+        with open(path, newline="", encoding="utf-8") as input_file:
+            reader = csv.DictReader(input_file)
+            rows.extend({str(key): str(value or "") for key, value in row.items()} for row in reader)
+
+    write_failures(output_path, sort_failures(rows))
+    return len(rows)
+
+
+def run_sharded(args: argparse.Namespace) -> int:
+    run_start_seconds = time.monotonic()
+    os.makedirs(args.shard_dir, exist_ok=True)
+
+    rows, fieldnames = read_candidates_with_fieldnames(args.candidates)
+    rows = [row for row in rows if candidate_matches(row, args)]
+
+    if args.limit_candidates is not None:
+        rows = rows[: args.limit_candidates]
+
+    if not rows:
+        raise RuntimeError("No candidates matched filters; nothing to shard")
+
+    shard_count = min(args.shard_count, len(rows))
+    shard_rows: list[list[dict[str, str]]] = [[] for _ in range(shard_count)]
+
+    for index, row in enumerate(rows):
+        shard_rows[index % shard_count].append(row)
+
+    shard_candidate_paths: list[str] = []
+    shard_findings_paths: list[str] = []
+    shard_failures_paths: list[str] = []
+    shard_state_paths: list[str] = []
+    shard_cache_paths: list[str] = []
+    processes: list[tuple[int, subprocess.Popen[bytes]]] = []
+
+    base_out = os.path.basename(args.out if args.out != "-" else "policy_findings.csv")
+    base_failures = os.path.basename(args.failures_out or "policy_pull_failures.csv")
+    base_cache = os.path.basename(args.api_cache)
+    script_path = os.path.abspath(__file__)
+
+    for shard_index, shard in enumerate(shard_rows, start=1):
+        shard_name = f"part{shard_index:02d}-of-{shard_count:02d}"
+        shard_candidate_path = os.path.join(args.shard_dir, f"policy_candidate_projects.{shard_name}.csv")
+        shard_findings_path = os.path.join(args.shard_dir, f"{base_out}.{shard_name}")
+        shard_failures_path = os.path.join(args.shard_dir, f"{base_failures}.{shard_name}")
+        shard_state_path = os.path.join(args.shard_dir, f"{base_out}.{shard_name}.state.json")
+        shard_cache_path = os.path.join(args.shard_dir, f"{base_cache}.{shard_name}")
+
+        write_candidates_csv(shard_candidate_path, shard, fieldnames)
+
+        shard_candidate_paths.append(shard_candidate_path)
+        shard_findings_paths.append(shard_findings_path)
+        shard_failures_paths.append(shard_failures_path)
+        shard_state_paths.append(shard_state_path)
+        shard_cache_paths.append(shard_cache_path)
+
+    print(
+        f"Sharded {len(rows):,} candidate(s) into {shard_count} shard(s) in {args.shard_dir}.",
+        file=sys.stderr,
+    )
+    print(
+        f"Each shard uses workers={args.workers}, component_workers={args.component_workers}; "
+        f"maximum theoretical API lanes ~= {shard_count * args.workers * args.component_workers}.",
+        file=sys.stderr,
+    )
+
+    env = os.environ.copy()
+    env["BLACKDUCK_URL"] = args.bd_url
+    env["BLACKDUCK_API_TOKEN"] = args.api_token
+
+    for shard_index in range(shard_count):
+        command = [
+            sys.executable,
+            script_path,
+            "--shard-worker",
+            "--candidates",
+            shard_candidate_paths[shard_index],
+            "--out",
+            shard_findings_paths[shard_index],
+            "--failures-out",
+            shard_failures_paths[shard_index],
+            "--state",
+            shard_state_paths[shard_index],
+            "--threshold",
+            str(args.threshold),
+            "--score-operator",
+            args.score_operator,
+            "--score-field",
+            args.score_field,
+            "--group-by",
+            args.group_by,
+            "--workers",
+            str(args.workers),
+            "--component-workers",
+            str(args.component_workers),
+            "--page-limit",
+            str(args.page_limit),
+            "--timeout",
+            str(args.timeout),
+            "--retries",
+            str(args.retries),
+            "--retry-delay",
+            str(args.retry_delay),
+            "--progress-every",
+            str(args.progress_every),
+            "--cache-save-every",
+            str(args.cache_save_every),
+            "--heartbeat-every",
+            str(args.heartbeat_every),
+            "--partial-out",
+            f"{shard_findings_paths[shard_index]}.partial",
+        ]
+
+        if not args.no_api_cache:
+            command.extend(
+                [
+                    "--api-cache",
+                    shard_cache_paths[shard_index],
+                    "--api-cache-max-age-hours",
+                    str(args.api_cache_max_age_hours),
+                    "--api-cache-max-entries",
+                    str(args.api_cache_max_entries),
+                ]
+            )
+        else:
+            command.append("--no-api-cache")
+
+        if args.refresh_api_cache:
+            command.append("--refresh-api-cache")
+        if args.insecure:
+            command.append("--insecure")
+        if args.json:
+            command.append("--json")
+        if args.debug:
+            command.append("--debug")
+        if args.resume:
+            command.append("--resume")
+        else:
+            command.append("--no-resume")
+        if args.require_exploit_available:
+            command.append("--require-exploit-available")
+        else:
+            command.append("--no-require-exploit-available")
+        if args.require_reachable:
+            command.append("--require-reachable")
+        if args.reachability_mode:
+            command.extend(["--reachability-mode", args.reachability_mode])
+        if args.policy_name:
+            command.extend(["--policy-name", args.policy_name])
+        if args.policy_rule_id:
+            command.extend(["--policy-rule-id", args.policy_rule_id])
+        if args.skip_policy_rules:
+            command.append("--skip-policy-rules")
+        if args.include_policy_rule_details:
+            command.append("--include-policy-rule-details")
+        if args.limit_findings is not None:
+            print(
+                "Warning: --limit-findings is not applied globally in sharded mode; "
+                "omit sharding when using --limit-findings for precise tests.",
+                file=sys.stderr,
+            )
+
+        print(f"[shard {shard_index + 1}/{shard_count}] starting: {shard_candidate_paths[shard_index]}", file=sys.stderr)
+        processes.append((shard_index + 1, subprocess.Popen(command, env=env)))
+
+    last_heartbeat_seconds = 0.0
+    interrupted = False
+
+    try:
+        while processes:
+            remaining: list[tuple[int, subprocess.Popen[bytes]]] = []
+
+            for shard_index, process_handle in processes:
+                return_code = process_handle.poll()
+
+                if return_code is None:
+                    remaining.append((shard_index, process_handle))
+                else:
+                    print(f"[shard {shard_index}/{shard_count}] exited with code {return_code}", file=sys.stderr)
+
+            processes = remaining
+
+            now_seconds = time.monotonic()
+            if args.heartbeat_every > 0 and (now_seconds - last_heartbeat_seconds) >= args.heartbeat_every:
+                running = ", ".join(str(shard_index) for shard_index, _ in processes) or "none"
+                print(
+                    f"[shard heartbeat] running_shards={running}, "
+                    f"remaining_processes={len(processes)}, elapsed={format_duration(now_seconds - run_start_seconds)}",
+                    file=sys.stderr,
+                )
+                last_heartbeat_seconds = now_seconds
+
+            if processes:
+                time.sleep(1.0)
+
+    except KeyboardInterrupt:
+        interrupted = True
+        print("Interrupted; terminating shard processes. Shard state files remain for resume.", file=sys.stderr)
+
+        for _, process_handle in processes:
+            process_handle.terminate()
+
+        deadline = time.monotonic() + 20.0
+
+        for _, process_handle in processes:
+            remaining_seconds = max(0.1, deadline - time.monotonic())
+            try:
+                process_handle.wait(timeout=remaining_seconds)
+            except subprocess.TimeoutExpired:
+                process_handle.kill()
+
+    if interrupted:
+        return 130
+
+    return_codes: list[int] = []
+    for shard_index in range(1, shard_count + 1):
+        state_path = shard_state_paths[shard_index - 1]
+        if not os.path.exists(state_path):
+            print(f"Warning: shard {shard_index} state file missing: {state_path}", file=sys.stderr)
+
+    finding_count = merge_findings_files(shard_findings_paths, args.out, args.json)
+    failure_count = merge_failure_files(shard_failures_paths, args.failures_out or "")
+
+    elapsed_seconds = time.monotonic() - run_start_seconds
+    print(
+        f"Shard merge complete: findings={finding_count:,}, failures={failure_count:,}, "
+        f"out={args.out}, failures_out={args.failures_out or ''}, elapsed={format_duration(elapsed_seconds)}.",
+        file=sys.stderr,
+    )
+
+    for _, process_handle in processes:
+        return_codes.append(process_handle.returncode or 0)
+
+    return 1 if failure_count else 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -1555,6 +2344,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--refresh-api-cache", action="store_true")
     parser.add_argument("--api-cache-max-age-hours", type=float, default=20.0)
     parser.add_argument("--api-cache-max-entries", type=int, default=5000)
+    parser.add_argument("--state", help="Resume state path. Default: <out>.state.json.")
+    parser.set_defaults(resume=True)
+    parser.add_argument("--resume", dest="resume", action="store_true", help="Resume completed candidates from state. Default: enabled.")
+    parser.add_argument("--no-resume", dest="resume", action="store_false", help="Ignore resume state and start fresh.")
     parser.add_argument("--limit-candidates", type=int)
     parser.add_argument("--limit-findings", type=int)
     parser.add_argument(
@@ -1564,10 +2357,25 @@ def parse_args() -> argparse.Namespace:
         help="Concurrent candidate detail pulls. Values above 8 are clamped to 8. Default: 4.",
     )
     parser.add_argument(
+        "--component-workers",
+        type=int,
+        default=1,
+        help=(
+            "Concurrent vulnerable-component/vulnerability-link pulls inside each candidate. "
+            "Use 1 for old behavior. Try 2-4 for heavy candidates. Values above 16 are clamped."
+        ),
+    )
+    parser.add_argument(
         "--progress-every",
         type=int,
         default=10,
         help="Print progress after every N completed candidate pulls. Default: 10.",
+    )
+    parser.add_argument(
+        "--heartbeat-every",
+        type=float,
+        default=60.0,
+        help="Print heartbeat status every N seconds while work is active. Use 0 to disable. Default: 60.",
     )
     parser.add_argument(
         "--cache-save-every",
@@ -1595,6 +2403,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Follow policy-rules links even when no policy filter is supplied. Slower, but populates policy detail fields.",
     )
+    parser.add_argument(
+        "--shard-count",
+        type=int,
+        default=1,
+        help=(
+            "Split candidates and run this many independent pull subprocesses, then merge outputs. "
+            "Use carefully; each shard also uses --workers and --component-workers."
+        ),
+    )
+    parser.add_argument(
+        "--shard-dir",
+        default=".policy_vuln_pull_shards",
+        help="Directory for shard candidate files, outputs, caches, and state. Default: .policy_vuln_pull_shards.",
+    )
+    parser.add_argument("--shard-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--retries", type=int, default=1)
     parser.add_argument("--retry-delay", type=float, default=2.0)
@@ -1626,14 +2449,32 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.workers > MAX_WORKERS:
         print(f"Warning: --workers {args.workers} exceeds max {MAX_WORKERS}; clamping to {MAX_WORKERS}.", file=sys.stderr)
         args.workers = MAX_WORKERS
+    if args.component_workers <= 0:
+        raise RuntimeError("--component-workers must be greater than 0")
+    if args.component_workers > MAX_COMPONENT_WORKERS:
+        print(
+            f"Warning: --component-workers {args.component_workers} exceeds max "
+            f"{MAX_COMPONENT_WORKERS}; clamping to {MAX_COMPONENT_WORKERS}.",
+            file=sys.stderr,
+        )
+        args.component_workers = MAX_COMPONENT_WORKERS
     if args.progress_every <= 0:
         raise RuntimeError("--progress-every must be greater than 0")
+    if args.heartbeat_every < 0:
+        raise RuntimeError("--heartbeat-every must be 0 or greater")
     if args.cache_save_every <= 0:
         raise RuntimeError("--cache-save-every must be greater than 0")
     if args.max_runtime_minutes is not None and args.max_runtime_minutes <= 0:
         raise RuntimeError("--max-runtime-minutes must be greater than 0")
     if (args.policy_name or args.policy_rule_id) and args.skip_policy_rules:
         raise RuntimeError("--skip-policy-rules cannot be used with --policy-name or --policy-rule-id")
+    if args.shard_count <= 0:
+        raise RuntimeError("--shard-count must be greater than 0")
+    if args.shard_count > 32:
+        print("Warning: --shard-count above 32 is unsafe; clamping to 32.", file=sys.stderr)
+        args.shard_count = 32
+    if args.shard_count > 1 and args.out == "-":
+        raise RuntimeError("--shard-count cannot be used with --out -")
 
 
 def main() -> int:
