@@ -341,6 +341,20 @@ blackduck-policy-vuln-find \
 
 Automation should inspect `policy_candidate_trigger.json`. If `should_trigger_pull` is true, run the pull and Datadog publish stages.
 
+Example trigger shape:
+
+```json
+{
+  "should_trigger_pull": true,
+  "candidate_count": 12,
+  "added_count": 2,
+  "removed_count": 0,
+  "changed_count": 1,
+  "unchanged_count": 9,
+  "recommended_next_command": "blackduck-policy-vuln-pull --candidates policy_candidate_projects.csv --out policy_findings.csv"
+}
+```
+
 ### 2. Intensive vulnerability pull
 
 ```bash
@@ -353,20 +367,34 @@ blackduck-policy-vuln-pull \
   --failures-out policy_pull_failures.csv
 ```
 
+Default high-risk criteria are:
+
+```text
+score > 8.9
+exploit_available == true
+```
+
 Reachability is captured when fields are available, but is not required by default. Future AI-based reachability can be added behind `--reachability-mode ai`.
 
 Optional policy filtering is supported with `--policy-name` or `--policy-rule-id`, but the direct high-risk criteria are sufficient when policy matching is not needed.
 
 ### 3. Datadog dry run
 
+The default Datadog grouping is now vulnerability rollup. It sends one summarized event per CVE/vulnerability across all affected Black Duck project versions.
+
+`--event-mode vulnerability` is shown explicitly here for clarity.
+
 ```bash
 blackduck-findings-to-datadog \
   --findings policy_findings.csv \
-  --event-mode project \
+  --event-mode vulnerability \
   --site datadoghq.com \
   --service blackduck \
   --source blackduck \
-  --env prod
+  --env prod \
+  --state datadog-findings-state.json \
+  --results-out datadog-publish-results.csv \
+  --plan-out datadog-publish-plan.json
 ```
 
 ### 4. Datadog apply
@@ -374,16 +402,152 @@ blackduck-findings-to-datadog \
 ```bash
 blackduck-findings-to-datadog \
   --findings policy_findings.csv \
-  --event-mode project \
+  --event-mode vulnerability \
   --site datadoghq.com \
   --service blackduck \
   --source blackduck \
   --env prod \
+  --state datadog-findings-state.json \
+  --results-out datadog-publish-results.csv \
+  --plan-out datadog-publish-plan.json \
   --apply
 ```
 
-Project event mode groups findings by Black Duck project. If findings disappear from the latest pull, the Datadog publisher marks them resolved in local state and sends success/recovery events.
+For a safe production smoke test, limit sends first:
 
+```bash
+blackduck-findings-to-datadog \
+  --findings policy_findings.csv \
+  --event-mode vulnerability \
+  --site datadoghq.com \
+  --service blackduck \
+  --source blackduck \
+  --env prod \
+  --max-send 10 \
+  --apply
+```
+
+### Datadog event modes
+
+| Mode | Behavior |
+|---|---|
+| `vulnerability` | One summarized event per CVE/vulnerability across all affected project versions. Default. |
+| `project` | One grouped event per Black Duck project. |
+| `finding` | One event per individual finding. |
+| `both` | Project summary events plus finding detail events. |
+
+Vulnerability mode is usually the best on-call shape because it collapses one widespread CVE into one Datadog Event instead of sending one event for every project/component occurrence.
+
+### Vulnerability rollup event shape
+
+A vulnerability rollup event looks like:
+
+```text
+Title:
+[Black Duck] CRITICAL CVE-2024-12345 affects 12 project version(s)
+
+Body:
+Black Duck vulnerability rollup event.
+
+Vulnerability: CVE-2024-12345
+Highest severity: CRITICAL
+Active finding count: 37
+Max score: 10.0
+Affected project/version count: 12
+Affected component count: 4
+Critical count: 37
+High count: 0
+Medium count: 0
+Low count: 0
+
+Affected Black Duck project versions shown: 12 of 12
+- service-a 1.2.3
+- service-b 4.5.6
+
+Affected components shown: 4 of 4
+- openssl 1.0.2
+- example-lib 3.1.4
+
+Sample project/component findings shown: 3 of 37
+- service-a 1.2.3 | openssl 1.0.2 | severity=CRITICAL | score=10.0
+- service-b 4.5.6 | openssl 1.0.2 | severity=CRITICAL | score=10.0
+
+Black Duck vulnerability links shown: 3 of 3
+- https://blackduck.example.com/...
+
+Event key: vulnerability_open:<vulnerability_group_external_id>
+Aggregation key: bd_vulnerability_<vulnerability_group_external_id>
+Note: Datadog Events have a small text cap, so this event is intentionally summarized.
+```
+
+Common tags include:
+
+```text
+source:blackduck
+service:blackduck
+env:prod
+bd_group:vulnerability
+bd_vulnerability:<normalized_vulnerability>
+bd_severity:<normalized_highest_severity>
+bd_status:open
+```
+
+### Event body limits
+
+Vulnerability rollup events are intentionally summarized to fit Datadog Event text limits.
+
+Useful tuning flags:
+
+```bash
+--event-project-limit 25
+--event-component-limit 8
+--event-finding-limit 3
+--event-vulnerability-link-limit 3
+```
+
+Example:
+
+```bash
+blackduck-findings-to-datadog \
+  --findings policy_findings.csv \
+  --event-mode vulnerability \
+  --event-project-limit 50 \
+  --event-component-limit 12 \
+  --event-finding-limit 5 \
+  --event-vulnerability-link-limit 5 \
+  --site datadoghq.com \
+  --service blackduck \
+  --source blackduck \
+  --env prod
+```
+
+### Resolution behavior
+
+Datadog Events are append-only. This tool treats closure as a recovery or success event plus a local state update.
+
+In `--event-mode vulnerability`, a vulnerability group is resolved when it was active in `datadog-findings-state.json` but no current findings match that vulnerability in the latest `policy_findings.csv`.
+
+A resolved vulnerability event looks like:
+
+```text
+Title:
+[Black Duck] Resolved: CVE-2024-12345 no longer has matching exploitable high-risk findings
+
+Body:
+No current findings matched the configured Black Duck criteria for this vulnerability in the latest run.
+
+Vulnerability group external ID: <vulnerability_group_external_id>
+```
+
+Use `--no-send-resolved` to disable recovery events.
+
+### State
+
+```text
+datadog-findings-state.json
+```
+
+Tracks active and resolved findings, project groups, vulnerability groups, and Datadog event responses.
 ## License
 
 Use at your own risk, this is not an officially supported pathway.
