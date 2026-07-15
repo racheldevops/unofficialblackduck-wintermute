@@ -114,11 +114,11 @@ def normalize_severity(value: Any) -> str:
 def severity_alert_type(severity: Any) -> str:
     normalized = normalize_severity(severity)
 
-    if normalized in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
-        return normalized.lower()
+    if normalized in {"CRITICAL", "HIGH"}:
+        return "error"
 
-    if normalized:
-        return normalized.lower()
+    if normalized == "MEDIUM":
+        return "warning"
 
     return "info"
 
@@ -598,6 +598,7 @@ def project_event(
     return {
         "title": truncate(title, 4000),
         "text": truncate(text, 4000),
+        "date_happened": int(time.time()),
         "alert_type": alert_type,
         "source_type_name": args.source,
         "aggregation_key": f"bd_project_{group_id}",
@@ -665,11 +666,49 @@ def finding_event(
     return {
         "title": truncate(title, 4000),
         "text": truncate(text, 4000),
+        "date_happened": int(time.time()),
         "alert_type": alert_type,
         "source_type_name": args.source,
         "aggregation_key": f"bd_project_{group_id}",
         "tags": sorted(set(tags)),
     }
+
+
+
+def compact_display_value(value: Any, max_length: int = 180) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s+https?://\S+", "", text)
+    text = re.sub(r"https?://\S+", "", text).strip()
+    text = re.sub(r"\s+", " ", text)
+
+    if not text:
+        return "unknown"
+
+    return truncate(text, max_length)
+
+
+def add_limited_section(
+    lines: list[str],
+    title: str,
+    items: list[Any],
+    limit: int,
+    empty_message: str = "- none provided",
+) -> None:
+    total_count = len(items)
+    safe_limit = max(0, int(limit or 0))
+    shown_items = items[:safe_limit]
+
+    lines.extend(["", f"{title} shown: {len(shown_items)} of {total_count}"])
+
+    if shown_items:
+        lines.extend(f"- {item}" for item in shown_items)
+    else:
+        lines.append(empty_message)
+
+    hidden_count = total_count - len(shown_items)
+
+    if hidden_count > 0:
+        lines.append(f"- ... and {hidden_count} more not shown")
 
 
 def vulnerability_event(
@@ -697,43 +736,31 @@ def vulnerability_event(
         affected_project_version_count = int(summary.get("affected_project_version_count") or 0)
         affected_component_count = int(summary.get("affected_component_count") or 0)
 
+        project_limit = int(getattr(args, "event_project_limit", 25) or 0)
+        component_limit = int(getattr(args, "event_component_limit", 8) or 0)
+        finding_limit = int(getattr(args, "event_finding_limit", 3) or 0)
+        vulnerability_link_limit = int(getattr(args, "event_vulnerability_link_limit", 3) or 0)
+
         title = (
             f"[Black Duck] {highest_severity} {vulnerability} affects "
             f"{affected_project_version_count} project version(s)"
         )
 
-        lines = [
-            "Black Duck vulnerability rollup event.",
-            "",
-            f"Vulnerability: {vulnerability}",
-            f"Highest severity: {highest_severity}",
-            f"Active finding count: {summary['finding_count']}",
-            f"Max score: {summary['max_score']}",
-            f"Affected project/version count: {affected_project_version_count}",
-            f"Affected component count: {affected_component_count}",
-            f"Critical count: {summary['critical_count']}",
-            f"High count: {summary['high_count']}",
-            f"Medium count: {summary['medium_count']}",
-            f"Low count: {summary['low_count']}",
-            "",
-            "Affected Black Duck projects/project versions:",
+        project_versions = [
+            compact_display_value(item, max_length=220)
+            for item in summary.get("project_versions", [])
         ]
 
-        project_links = summary.get("project_links", [])
+        components = sorted_unique(
+            compact_display_value(item, max_length=180)
+            for item in summary.get("components", [])
+        )
 
-        if project_links:
-            lines.extend(f"- {link}" for link in project_links[:50])
-        else:
-            lines.append("- none provided")
-
-        lines.extend(["", "Affected components:"])
-
-        components = summary.get("components", [])
-
-        if components:
-            lines.extend(f"- {component}" for component in components[:50])
-        else:
-            lines.append("- none provided")
+        vulnerability_links = [
+            str(item)
+            for item in summary.get("vulnerability_links", [])
+            if str(item or "").strip()
+        ]
 
         detail_rows: list[str] = []
         seen_detail_rows: set[str] = set()
@@ -749,28 +776,11 @@ def vulnerability_event(
             ),
         ):
             detail = (
-                f"- {format_project_version_label(finding)} | "
-                f"{format_component_label(finding)} | "
+                f"{compact_display_value(format_project_version_label(finding), max_length=140)} | "
+                f"{compact_display_value(format_component_label(finding), max_length=140)} | "
                 f"severity={normalize_severity(finding.get('severity', '')) or 'UNKNOWN'} | "
                 f"score={finding.get('score', '')}"
             )
-
-            project_href = str(finding.get("project_href") or "").strip()
-            project_version_href = str(finding.get("project_version_href") or "").strip()
-            blackduck_url = str(finding.get("blackduck_url") or "").strip()
-            bom_component_url = str(finding.get("bom_component_url") or "").strip()
-
-            if project_href:
-                detail += f" | project={project_href}"
-
-            if project_version_href:
-                detail += f" | version={project_version_href}"
-
-            if blackduck_url:
-                detail += f" | vulnerability={blackduck_url}"
-
-            if bom_component_url:
-                detail += f" | component={bom_component_url}"
 
             if detail in seen_detail_rows:
                 continue
@@ -778,26 +788,64 @@ def vulnerability_event(
             seen_detail_rows.add(detail)
             detail_rows.append(detail)
 
-            if len(detail_rows) >= 50:
-                break
+        lines = [
+            "Black Duck vulnerability rollup event.",
+            "",
+            f"Vulnerability: {vulnerability}",
+            f"Highest severity: {highest_severity}",
+            f"Active finding count: {summary['finding_count']}",
+            f"Max score: {summary['max_score']}",
+            f"Affected project/version count: {affected_project_version_count}",
+            f"Affected component count: {affected_component_count}",
+            f"Critical count: {summary['critical_count']}",
+            f"High count: {summary['high_count']}",
+            f"Medium count: {summary['medium_count']}",
+            f"Low count: {summary['low_count']}",
+        ]
 
-        lines.extend(["", "Project/component findings:"])
-        lines.extend(detail_rows if detail_rows else ["- none provided"])
-
-        vulnerability_links = summary.get("vulnerability_links", [])
-
-        if vulnerability_links:
-            lines.extend(["", "Black Duck vulnerability links:"])
-            lines.extend(f"- {link}" for link in vulnerability_links[:20])
+        add_limited_section(
+            lines=lines,
+            title="Affected Black Duck project versions",
+            items=project_versions,
+            limit=project_limit,
+        )
+        add_limited_section(
+            lines=lines,
+            title="Affected components",
+            items=components,
+            limit=component_limit,
+        )
+        add_limited_section(
+            lines=lines,
+            title="Sample project/component findings",
+            items=detail_rows,
+            limit=finding_limit,
+        )
+        add_limited_section(
+            lines=lines,
+            title="Black Duck vulnerability links",
+            items=vulnerability_links,
+            limit=vulnerability_link_limit,
+        )
 
         if summary["policies"]:
-            lines.extend(["", "Matched policies:"])
-            lines.extend(f"- {name}" for name in summary["policies"][:20])
+            policy_items = [
+                compact_display_value(item, max_length=180)
+                for item in summary["policies"]
+            ]
+            add_limited_section(
+                lines=lines,
+                title="Matched policies",
+                items=policy_items,
+                limit=10,
+            )
 
         lines.extend(
             [
                 "",
-                f"Vulnerability group external ID: {vulnerability_id}",
+                f"Event key: vulnerability_open:{vulnerability_id}",
+                f"Aggregation key: bd_vulnerability_{vulnerability_id}",
+                "Note: Datadog Events have a small text cap, so this event is intentionally summarized.",
             ]
         )
 
@@ -817,12 +865,12 @@ def vulnerability_event(
     return {
         "title": truncate(title, 4000),
         "text": truncate(text, 4000),
+        "date_happened": int(time.time()),
         "alert_type": alert_type,
         "source_type_name": args.source,
         "aggregation_key": f"bd_vulnerability_{vulnerability_id}",
         "tags": sorted(set(tags)),
     }
-
 
 class DatadogClient:
     def __init__(
@@ -1488,6 +1536,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-send-resolved", dest="send_resolved", action="store_false")
     parser.add_argument("--max-send", type=int)
     parser.add_argument(
+        "--event-project-limit",
+        type=int,
+        default=25,
+        help=(
+            "Maximum affected project/version rows included in each vulnerability rollup "
+            "Datadog Event body. Default: 25."
+        ),
+    )
+    parser.add_argument(
+        "--event-component-limit",
+        type=int,
+        default=8,
+        help=(
+            "Maximum affected component rows included in each vulnerability rollup "
+            "Datadog Event body. Default: 8."
+        ),
+    )
+    parser.add_argument(
+        "--event-finding-limit",
+        type=int,
+        default=3,
+        help=(
+            "Maximum sample project/component finding rows included in each vulnerability "
+            "rollup Datadog Event body. Default: 3."
+        ),
+    )
+    parser.add_argument(
+        "--event-vulnerability-link-limit",
+        type=int,
+        default=3,
+        help=(
+            "Maximum Black Duck vulnerability links included in each vulnerability rollup "
+            "Datadog Event body. Default: 3."
+        ),
+    )
+    parser.add_argument(
         "--progress-every",
         type=int,
         default=25,
@@ -1523,6 +1607,18 @@ def validate_args(args: argparse.Namespace) -> None:
 
     if args.max_send is not None and args.max_send < 1:
         raise RuntimeError("--max-send must be greater than 0")
+
+    if args.event_project_limit < 0:
+        raise RuntimeError("--event-project-limit must be 0 or greater")
+
+    if args.event_component_limit < 0:
+        raise RuntimeError("--event-component-limit must be 0 or greater")
+
+    if args.event_finding_limit < 0:
+        raise RuntimeError("--event-finding-limit must be 0 or greater")
+
+    if args.event_vulnerability_link_limit < 0:
+        raise RuntimeError("--event-vulnerability-link-limit must be 0 or greater")
 
     if args.progress_every < 0:
         raise RuntimeError("--progress-every must be 0 or greater")
