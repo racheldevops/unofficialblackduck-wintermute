@@ -12,9 +12,10 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 from urllib.parse import urlparse, urlunparse
 
+from harness.paths import ensure_parent_dir, jira_output_path
 
-SCHEMA_VERSION = 2
 
+SCHEMA_VERSION = 3
 HIERARCHY_MODE_VULNERABILITY_PROJECT = "vulnerability-project"
 HIERARCHY_MODE_PROJECT_SUBPROJECT_VULNERABILITY = "project-subproject-vulnerability"
 
@@ -35,6 +36,12 @@ REQUIRED_FINDING_FIELDS = [
     "severity",
     "blackduck_url",
     "rollup_key",
+]
+
+OPTIONAL_FINDING_FIELDS = [
+    "component_version_href",
+    "cvss_vector",
+    "entity",
 ]
 
 KNOWN_SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
@@ -130,14 +137,37 @@ def csv_join(values: Iterable[str]) -> str:
     return ";".join(sorted_unique(values))
 
 
-def normalize_finding(row: dict[str, Any]) -> dict[str, str]:
+def looks_like_resource_url(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+
+    return (
+        text.startswith("http://")
+        or text.startswith("https://")
+        or text.startswith("/api/")
+    )
+
+def normalize_finding(
+        row: dict[str, Any],
+) -> dict[str, str]:
     finding = {
         field: str(row.get(field, "") or "").strip()
-        for field in REQUIRED_FINDING_FIELDS
+        for field in (
+            REQUIRED_FINDING_FIELDS + OPTIONAL_FINDING_FIELDS
+        )
     }
 
     if not finding["vulnerability"]:
         finding["vulnerability"] = "UNKNOWN"
+
+    if looks_like_resource_url(
+        finding["component_version"]
+    ):
+        if not finding["component_version_href"]:
+            finding["component_version_href"] = (
+                finding["component_version"]
+            )
+
+        finding["component_version"] = ""
 
     if not finding["rollup_key"]:
         finding["rollup_key"] = "|".join(
@@ -147,17 +177,28 @@ def normalize_finding(row: dict[str, Any]) -> dict[str, str]:
                 finding["subproject"],
                 finding["subproject_version"],
                 finding["component"],
-                finding["component_version"],
+                (
+                    finding["component_version"]
+                    or finding["component_version_href"]
+                ),
                 finding["vulnerability"],
             ]
         )
 
-    finding["severity"] = normalize_severity(finding["severity"])
-    finding["parent_version_href"] = canonical_href(finding["parent_version_href"])
-    finding["subproject_version_href"] = canonical_href(finding["subproject_version_href"])
+    finding["severity"] = normalize_severity(
+        finding["severity"]
+    )
+    finding["parent_version_href"] = canonical_href(
+        finding["parent_version_href"]
+    )
+    finding["subproject_version_href"] = canonical_href(
+        finding["subproject_version_href"]
+    )
+    finding["component_version_href"] = canonical_href(
+        finding["component_version_href"]
+    )
 
     return finding
-
 
 def read_findings(path: str) -> list[dict[str, str]]:
     if path == "-":
@@ -606,16 +647,34 @@ def build_cve_project_task_description(
         lookup_label: str,
 ) -> str:
     highest_severity = highest_severity_from_stats(stats)
-    parent_contexts = sorted_unique(parent_context_label(finding) for finding in group_findings)
-    rollup_keys = sorted_unique(finding.get("rollup_key", "") for finding in group_findings)
+    parent_contexts = sorted_unique(
+        parent_context_label(finding)
+        for finding in group_findings
+    )
+    rollup_keys = sorted_unique(
+        finding.get("rollup_key", "")
+        for finding in group_findings
+    )
+    cvss_vectors = sorted_unique(
+        finding.get("cvss_vector", "")
+        for finding in group_findings
+    )
 
-    component_rows: list[tuple[str, str, str, str, str]] = []
-    seen_components: set[tuple[str, str, str, str, str]] = set()
+    component_rows: list[
+        tuple[str, str, str, str, str, str]
+    ] = []
+    seen_components: set[
+        tuple[str, str, str, str, str, str]
+    ] = set()
 
-    for finding in sorted(group_findings, key=vulnerability_sort_key):
+    for finding in sorted(
+        group_findings,
+        key=vulnerability_sort_key,
+    ):
         row = (
             finding.get("component", ""),
             finding.get("component_version", ""),
+            finding.get("component_version_href", ""),
             finding.get("severity", ""),
             finding.get("score", ""),
             finding.get("blackduck_url", ""),
@@ -636,22 +695,59 @@ def build_cve_project_task_description(
         f"Affected project version URL: {affected_href}",
         "",
         f"Severity: {highest_severity}",
-        f"Max score: {stats.get('max_score', '')}",
-        "",
-        "Affected components:",
-        "| Component | Version | Severity | Score | Black Duck URL |",
     ]
 
+    if cvss_vectors:
+        lines.extend(
+            [
+                "CVSS vector:",
+                "{noformat}",
+                "\n".join(cvss_vectors),
+                "{noformat}",
+            ]
+        )
+    else:
+        lines.append("CVSS vector: not provided")
+
+    lines.extend(
+        [
+            f"Max score: {stats.get('max_score', '')}",
+            "",
+            "Affected components:",
+            "| Component | Version | Component URL | "
+            "Severity | Score | Vulnerability URL |",
+        ]
+    )
+
     if component_rows:
-        for component, component_version, severity, score, blackduck_url in component_rows:
+        for (
+            component,
+            component_version,
+            component_version_href,
+            severity,
+            score,
+            blackduck_url,
+        ) in component_rows:
             lines.append(
-                f"| {component} | {component_version} | {severity} | {score} | {blackduck_url} |"
+                f"| {component} | {component_version} | "
+                f"{component_version_href} | {severity} | "
+                f"{score} | {blackduck_url} |"
             )
     else:
-        lines.append("| none provided |  |  |  |  |")
+        lines.append(
+            "| none provided |  |  |  |  |  |"
+        )
 
     lines.extend(["", "Parent rollup context:"])
-    lines.extend(f"- {item}" for item in parent_contexts) if parent_contexts else lines.append("- none provided")
+
+    if parent_contexts:
+        lines.extend(
+            f"- {item}"
+            for item in parent_contexts
+        )
+    else:
+        lines.append("- none provided")
+
     lines.extend(
         [
             "",
@@ -665,7 +761,15 @@ def build_cve_project_task_description(
             "Rollup keys:",
         ]
     )
-    lines.extend(f"- {item}" for item in rollup_keys) if rollup_keys else lines.append("- none provided")
+
+    if rollup_keys:
+        lines.extend(
+            f"- {item}"
+            for item in rollup_keys
+        )
+    else:
+        lines.append("- none provided")
+
     lines.extend(
         [
             "",
@@ -676,7 +780,6 @@ def build_cve_project_task_description(
     )
 
     return "\n".join(lines)
-
 
 def build_project_subproject_vulnerability_nodes(
         findings: list[dict[str, str]],
@@ -836,20 +939,31 @@ def build_vulnerability_project_nodes(
         findings: list[dict[str, str]],
         hash_length: int,
 ) -> list[dict[str, Any]]:
-    vulnerability_groups: dict[str, list[dict[str, str]]] = defaultdict(list)
-    task_groups: dict[tuple[str, str, str, str], list[dict[str, str]]] = defaultdict(list)
-    tasks_by_vulnerability: dict[str, set[tuple[str, str, str, str]]] = defaultdict(set)
+    vulnerability_groups: dict[
+        str,
+        list[dict[str, str]],
+    ] = defaultdict(list)
+    task_groups: dict[
+        tuple[str, str, str, str],
+        list[dict[str, str]],
+    ] = defaultdict(list)
+    tasks_by_vulnerability: dict[
+        str,
+        set[tuple[str, str, str, str]],
+    ] = defaultdict(set)
 
     for finding in findings:
-        vuln = vulnerability_key(finding)
+        vulnerability = vulnerability_key(finding)
         task_key = vulnerability_project_task_key(finding)
 
-        vulnerability_groups[vuln].append(finding)
+        vulnerability_groups[vulnerability].append(finding)
         task_groups[task_key].append(finding)
-        tasks_by_vulnerability[vuln].add(task_key)
+        tasks_by_vulnerability[vulnerability].add(task_key)
 
     epic_external_ids = {
-        vulnerability: vulnerability_epic_external_id(vulnerability)
+        vulnerability: vulnerability_epic_external_id(
+            vulnerability
+        )
         for vulnerability in vulnerability_groups
     }
     task_external_ids = {
@@ -859,46 +973,84 @@ def build_vulnerability_project_nodes(
 
     nodes: list[dict[str, Any]] = []
 
-    for vulnerability in sorted(vulnerability_groups, key=lambda value: value.lower()):
+    for vulnerability in sorted(
+        vulnerability_groups,
+        key=lambda value: value.lower(),
+    ):
         group_findings = vulnerability_groups[vulnerability]
         external_id = epic_external_ids[vulnerability]
-        lookup_label = node_lookup_label(external_id, hash_length)
-        stats = compute_stats(group_findings)
-        stats["affected_project_version_count"] = len(tasks_by_vulnerability[vulnerability])
-        stats["child_count"] = len(tasks_by_vulnerability[vulnerability])
-        highest_severity = highest_severity_from_stats(stats)
-
-        affected_versions = sorted_unique(
-            format_project_version(finding["subproject"], finding["subproject_version"])
-            for finding in group_findings
+        lookup_label = node_lookup_label(
+            external_id,
+            hash_length,
         )
-        parent_projects = sorted_unique(parent_context_label(finding) for finding in group_findings)
-        blackduck_urls = sorted_unique(finding.get("blackduck_url", "") for finding in group_findings)
-        components = sorted_unique(component_label(finding) for finding in group_findings)
+        stats = compute_stats(group_findings)
+
+        task_count = len(
+            tasks_by_vulnerability[vulnerability]
+        )
+        stats["affected_project_version_count"] = task_count
+        stats["child_count"] = task_count
+
+        highest_severity = highest_severity_from_stats(stats)
 
         context = {
             "vulnerability": vulnerability,
             "severity": highest_severity,
-            "affected_project_count": str(len(tasks_by_vulnerability[vulnerability])),
-            "affected_project_version_count": str(len(tasks_by_vulnerability[vulnerability])),
-            "affected_project_versions": affected_versions,
-            "parent_projects": parent_projects,
-            "blackduck_urls": blackduck_urls,
-            "components": components,
+            "affected_project_count": str(task_count),
+            "affected_project_version_count": str(task_count),
+            "affected_project_versions": sorted_unique(
+                format_project_version(
+                    finding["subproject"],
+                    finding["subproject_version"],
+                )
+                for finding in group_findings
+            ),
+            "parent_projects": sorted_unique(
+                parent_context_label(finding)
+                for finding in group_findings
+            ),
+            "blackduck_urls": sorted_unique(
+                finding.get("blackduck_url", "")
+                for finding in group_findings
+            ),
+            "components": sorted_unique(
+                component_label(finding)
+                for finding in group_findings
+            ),
+            "entities": sorted_unique(
+                finding.get("entity", "")
+                for finding in group_findings
+            ),
+            "cvss_vectors": sorted_unique(
+                finding.get("cvss_vector", "")
+                for finding in group_findings
+            ),
         }
 
-        labels = set(base_labels("bd_rollup_cve", lookup_label))
+        labels = set(
+            base_labels(
+                "bd_rollup_cve",
+                lookup_label,
+            )
+        )
+
         if highest_severity:
-            labels.add(severity_label(highest_severity))
+            labels.add(
+                severity_label(highest_severity)
+            )
 
         nodes.append(
             {
-                "hierarchy_mode": HIERARCHY_MODE_VULNERABILITY_PROJECT,
+                "hierarchy_mode": (
+                    HIERARCHY_MODE_VULNERABILITY_PROJECT
+                ),
                 "node_type": "epic",
                 "external_id": external_id,
                 "lookup_label": lookup_label,
                 "parent_external_id": "",
-                "summary": build_cve_epic_summary(vulnerability),
+                "summary": build_cve_epic_summary(
+                    vulnerability
+                ),
                 "description": build_cve_epic_description(
                     vulnerability=vulnerability,
                     group_findings=group_findings,
@@ -912,16 +1064,35 @@ def build_vulnerability_project_nodes(
             }
         )
 
-    for key in sorted(task_groups, key=lambda item: sort_tuple(item)):
-        vulnerability, affected_project, affected_version, affected_href = key
+    for key in sorted(
+        task_groups,
+        key=lambda item: sort_tuple(item),
+    ):
+        (
+            vulnerability,
+            affected_project,
+            affected_version,
+            affected_href,
+        ) = key
+
         group_findings = task_groups[key]
         external_id = task_external_ids[key]
-        lookup_label = node_lookup_label(external_id, hash_length)
-        cve_lookup_label = node_lookup_label(epic_external_ids[vulnerability], hash_length)
+        lookup_label = node_lookup_label(
+            external_id,
+            hash_length,
+        )
+        cve_lookup_label = node_lookup_label(
+            epic_external_ids[vulnerability],
+            hash_length,
+        )
         project_version_lookup_label = node_lookup_label(
             node_external_id(
                 "bd_project_version",
-                [affected_project, affected_version, affected_href],
+                [
+                    affected_project,
+                    affected_version,
+                    affected_href,
+                ],
             ),
             hash_length,
         )
@@ -929,19 +1100,14 @@ def build_vulnerability_project_nodes(
         stats = compute_stats(group_findings)
         highest_severity = highest_severity_from_stats(stats)
 
-        parent_projects = sorted_unique(parent_context_label(finding) for finding in group_findings)
-        parent_project_values = sorted_unique(finding.get("parent_project", "") for finding in group_findings)
-        parent_version_values = sorted_unique(finding.get("parent_version", "") for finding in group_findings)
-        parent_version_hrefs = sorted_unique(finding.get("parent_version_href", "") for finding in group_findings)
-        subproject_paths = sorted_unique(finding.get("subproject_path", "") for finding in group_findings)
-        relationship_methods = sorted_unique(
-            finding.get("relationship_detection_method", "")
+        entity_values = sorted_unique(
+            finding.get("entity", "")
             for finding in group_findings
         )
-        components = sorted_unique(finding.get("component", "") for finding in group_findings)
-        component_versions = sorted_unique(finding.get("component_version", "") for finding in group_findings)
-        blackduck_urls = sorted_unique(finding.get("blackduck_url", "") for finding in group_findings)
-        rollup_keys = sorted_unique(finding.get("rollup_key", "") for finding in group_findings)
+        cvss_vectors = sorted_unique(
+            finding.get("cvss_vector", "")
+            for finding in group_findings
+        )
 
         context = {
             "vulnerability": vulnerability,
@@ -952,45 +1118,96 @@ def build_vulnerability_project_nodes(
             "subproject": affected_project,
             "subproject_version": affected_version,
             "subproject_version_href": affected_href,
-            "subproject_path": csv_join(subproject_paths),
-            "parent_project": csv_join(parent_project_values),
-            "parent_version": csv_join(parent_version_values),
-            "parent_version_href": csv_join(parent_version_hrefs),
-            "parent_projects": parent_projects,
-            "relationship_detection_methods": relationship_methods,
-            "components": components,
-            "component_versions": component_versions,
-            "blackduck_urls": blackduck_urls,
-            "rollup_keys": rollup_keys,
+            "subproject_path": csv_join(
+                finding.get("subproject_path", "")
+                for finding in group_findings
+            ),
+            "parent_project": csv_join(
+                finding.get("parent_project", "")
+                for finding in group_findings
+            ),
+            "parent_version": csv_join(
+                finding.get("parent_version", "")
+                for finding in group_findings
+            ),
+            "parent_version_href": csv_join(
+                finding.get("parent_version_href", "")
+                for finding in group_findings
+            ),
+            "parent_projects": sorted_unique(
+                parent_context_label(finding)
+                for finding in group_findings
+            ),
+            "relationship_detection_methods": sorted_unique(
+                finding.get(
+                    "relationship_detection_method",
+                    "",
+                )
+                for finding in group_findings
+            ),
+            "components": sorted_unique(
+                finding.get("component", "")
+                for finding in group_findings
+            ),
+            "component_versions": sorted_unique(
+                finding.get("component_version", "")
+                for finding in group_findings
+            ),
+            "blackduck_urls": sorted_unique(
+                finding.get("blackduck_url", "")
+                for finding in group_findings
+            ),
+            "rollup_keys": sorted_unique(
+                finding.get("rollup_key", "")
+                for finding in group_findings
+            ),
+            "entity": csv_join(entity_values),
+            "entities": entity_values,
+            "cvss_vector": csv_join(cvss_vectors),
+            "cvss_vectors": cvss_vectors,
         }
 
-        labels = set(base_labels("bd_rollup_project_version", lookup_label))
+        labels = set(
+            base_labels(
+                "bd_rollup_project_version",
+                lookup_label,
+            )
+        )
         labels.add(cve_lookup_label)
         labels.add(project_version_lookup_label)
+
         if highest_severity:
-            labels.add(severity_label(highest_severity))
+            labels.add(
+                severity_label(highest_severity)
+            )
 
         nodes.append(
             {
-                "hierarchy_mode": HIERARCHY_MODE_VULNERABILITY_PROJECT,
+                "hierarchy_mode": (
+                    HIERARCHY_MODE_VULNERABILITY_PROJECT
+                ),
                 "node_type": "story",
                 "external_id": external_id,
                 "lookup_label": lookup_label,
-                "parent_external_id": epic_external_ids[vulnerability],
+                "parent_external_id": (
+                    epic_external_ids[vulnerability]
+                ),
                 "summary": build_cve_project_task_summary(
                     vulnerability=vulnerability,
                     affected_project=affected_project,
                     affected_version=affected_version,
                 ),
-                "description": build_cve_project_task_description(
-                    vulnerability=vulnerability,
-                    affected_project=affected_project,
-                    affected_version=affected_version,
-                    affected_href=affected_href,
-                    group_findings=group_findings,
-                    stats=stats,
-                    external_id=external_id,
-                    lookup_label=lookup_label,
+                "description": (
+                    build_cve_project_task_description(
+                        vulnerability=vulnerability,
+                        affected_project=affected_project,
+                        affected_version=affected_version,
+                        affected_href=affected_href,
+                        group_findings=group_findings,
+                        stats=stats,
+                        external_id=external_id,
+                        lookup_label=lookup_label,
+                    )
                 ),
                 "labels": sorted(labels),
                 "context": context,
@@ -999,7 +1216,6 @@ def build_vulnerability_project_nodes(
         )
 
     return nodes
-
 
 def build_nodes(
         findings: list[dict[str, str]],
@@ -1029,15 +1245,29 @@ def count_nodes(nodes: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
-def write_json_file(path: str, payload: dict[str, Any]) -> None:
+def write_json_file(
+        path: str,
+        payload: dict[str, Any],
+) -> None:
+    ensure_parent_dir(path)
+
     if path == "-":
-        json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+        json.dump(
+            payload,
+            sys.stdout,
+            indent=2,
+            sort_keys=True,
+        )
         print()
         return
 
     with open(path, "w", encoding="utf-8") as output_file:
-        json.dump(payload, output_file, indent=2, sort_keys=True)
-
+        json.dump(
+            payload,
+            output_file,
+            indent=2,
+            sort_keys=True,
+        )
 
 def csv_cell(value: Any) -> str:
     if value is None:
@@ -1052,7 +1282,9 @@ def csv_cell(value: Any) -> str:
     return str(value)
 
 
-def node_summary_row(node: dict[str, Any]) -> dict[str, Any]:
+def node_summary_row(
+        node: dict[str, Any],
+) -> dict[str, Any]:
     context = node.get("context", {})
     stats = node.get("stats", {})
 
@@ -1060,25 +1292,54 @@ def node_summary_row(node: dict[str, Any]) -> dict[str, Any]:
         "hierarchy_mode": node.get("hierarchy_mode", ""),
         "node_type": node.get("node_type", ""),
         "external_id": node.get("external_id", ""),
-        "parent_external_id": node.get("parent_external_id", ""),
+        "parent_external_id": node.get(
+            "parent_external_id",
+            "",
+        ),
         "lookup_label": node.get("lookup_label", ""),
         "summary": node.get("summary", ""),
         "vulnerability": context.get("vulnerability", ""),
-        "affected_project": context.get("affected_project", ""),
-        "affected_version": context.get("affected_version", ""),
-        "affected_project_version_href": context.get("affected_project_version_href", ""),
+        "entity": context.get("entity", ""),
+        "cvss_vector": context.get("cvss_vector", ""),
+        "affected_project": context.get(
+            "affected_project",
+            "",
+        ),
+        "affected_version": context.get(
+            "affected_version",
+            "",
+        ),
+        "affected_project_version_href": context.get(
+            "affected_project_version_href",
+            "",
+        ),
         "parent_project": context.get("parent_project", ""),
         "parent_version": context.get("parent_version", ""),
-        "parent_version_href": context.get("parent_version_href", ""),
+        "parent_version_href": context.get(
+            "parent_version_href",
+            "",
+        ),
         "subproject": context.get("subproject", ""),
-        "subproject_version": context.get("subproject_version", ""),
-        "subproject_version_href": context.get("subproject_version_href", ""),
+        "subproject_version": context.get(
+            "subproject_version",
+            "",
+        ),
+        "subproject_version_href": context.get(
+            "subproject_version_href",
+            "",
+        ),
         "subproject_path": context.get("subproject_path", ""),
         "child_count": stats.get("child_count", ""),
         "finding_count": stats.get("finding_count", ""),
         "component_count": stats.get("component_count", ""),
-        "vulnerability_count": stats.get("vulnerability_count", ""),
-        "affected_project_version_count": stats.get("affected_project_version_count", ""),
+        "vulnerability_count": stats.get(
+            "vulnerability_count",
+            "",
+        ),
+        "affected_project_version_count": stats.get(
+            "affected_project_version_count",
+            "",
+        ),
         "critical_count": stats.get("critical_count", ""),
         "high_count": stats.get("high_count", ""),
         "medium_count": stats.get("medium_count", ""),
@@ -1089,10 +1350,14 @@ def node_summary_row(node: dict[str, Any]) -> dict[str, Any]:
         "average_score": stats.get("average_score", ""),
     }
 
-
-def write_summary_csv(path: str, nodes: list[dict[str, Any]]) -> None:
+def write_summary_csv(
+        path: str,
+        nodes: list[dict[str, Any]],
+) -> None:
     if not path:
         return
+
+    ensure_parent_dir(path)
 
     fieldnames = [
         "hierarchy_mode",
@@ -1102,6 +1367,8 @@ def write_summary_csv(path: str, nodes: list[dict[str, Any]]) -> None:
         "lookup_label",
         "summary",
         "vulnerability",
+        "entity",
+        "cvss_vector",
         "affected_project",
         "affected_version",
         "affected_project_version_href",
@@ -1137,21 +1404,35 @@ def write_summary_csv(path: str, nodes: list[dict[str, Any]]) -> None:
         output_file = sys.stdout
         close_after = False
     else:
-        output_file = open(path, "w", newline="", encoding="utf-8")
+        output_file = open(
+            path,
+            "w",
+            newline="",
+            encoding="utf-8",
+        )
         close_after = True
 
     try:
-        writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+        writer = csv.DictWriter(
+            output_file,
+            fieldnames=fieldnames,
+        )
         writer.writeheader()
 
         for row in rows:
-            writer.writerow({field: csv_cell(row.get(field, "")) for field in fieldnames})
+            writer.writerow(
+                {
+                    field: csv_cell(row.get(field, ""))
+                    for field in fieldnames
+                }
+            )
     finally:
         if close_after:
             output_file.close()
 
-
-def node_csv_row(node: dict[str, Any]) -> dict[str, Any]:
+def node_csv_row(
+        node: dict[str, Any],
+) -> dict[str, Any]:
     context = node.get("context", {})
     stats = node.get("stats", {})
 
@@ -1159,35 +1440,70 @@ def node_csv_row(node: dict[str, Any]) -> dict[str, Any]:
         "hierarchy_mode": node.get("hierarchy_mode", ""),
         "node_type": node.get("node_type", ""),
         "external_id": node.get("external_id", ""),
-        "parent_external_id": node.get("parent_external_id", ""),
+        "parent_external_id": node.get(
+            "parent_external_id",
+            "",
+        ),
         "lookup_label": node.get("lookup_label", ""),
         "summary": node.get("summary", ""),
         "labels": ";".join(node.get("labels", [])),
         "parent_project": context.get("parent_project", ""),
         "parent_version": context.get("parent_version", ""),
-        "parent_version_href": context.get("parent_version_href", ""),
+        "parent_version_href": context.get(
+            "parent_version_href",
+            "",
+        ),
         "subproject": context.get("subproject", ""),
-        "subproject_version": context.get("subproject_version", ""),
-        "subproject_version_href": context.get("subproject_version_href", ""),
+        "subproject_version": context.get(
+            "subproject_version",
+            "",
+        ),
+        "subproject_version_href": context.get(
+            "subproject_version_href",
+            "",
+        ),
         "subproject_path": context.get("subproject_path", ""),
-        "affected_project": context.get("affected_project", ""),
-        "affected_version": context.get("affected_version", ""),
-        "affected_project_version_href": context.get("affected_project_version_href", ""),
+        "affected_project": context.get(
+            "affected_project",
+            "",
+        ),
+        "affected_version": context.get(
+            "affected_version",
+            "",
+        ),
+        "affected_project_version_href": context.get(
+            "affected_project_version_href",
+            "",
+        ),
         "component": context.get("component", ""),
-        "component_version": context.get("component_version", ""),
+        "component_version": context.get(
+            "component_version",
+            "",
+        ),
         "components": context.get("components", ""),
-        "component_versions": context.get("component_versions", ""),
+        "component_versions": context.get(
+            "component_versions",
+            "",
+        ),
         "vulnerability": context.get("vulnerability", ""),
         "severity": context.get("severity", ""),
         "score": context.get("score", ""),
+        "cvss_vector": context.get("cvss_vector", ""),
+        "entity": context.get("entity", ""),
         "blackduck_url": context.get("blackduck_url", ""),
         "blackduck_urls": context.get("blackduck_urls", ""),
         "rollup_key": context.get("rollup_key", ""),
         "rollup_keys": context.get("rollup_keys", ""),
         "finding_count": stats.get("finding_count", ""),
         "component_count": stats.get("component_count", ""),
-        "vulnerability_count": stats.get("vulnerability_count", ""),
-        "affected_project_version_count": stats.get("affected_project_version_count", ""),
+        "vulnerability_count": stats.get(
+            "vulnerability_count",
+            "",
+        ),
+        "affected_project_version_count": stats.get(
+            "affected_project_version_count",
+            "",
+        ),
         "critical_count": stats.get("critical_count", ""),
         "high_count": stats.get("high_count", ""),
         "medium_count": stats.get("medium_count", ""),
@@ -1198,10 +1514,14 @@ def node_csv_row(node: dict[str, Any]) -> dict[str, Any]:
         "average_score": stats.get("average_score", ""),
     }
 
-
-def write_nodes_csv(path: str, nodes: list[dict[str, Any]]) -> None:
+def write_nodes_csv(
+        path: str,
+        nodes: list[dict[str, Any]],
+) -> None:
     if not path:
         return
+
+    ensure_parent_dir(path)
 
     fieldnames = [
         "hierarchy_mode",
@@ -1228,6 +1548,8 @@ def write_nodes_csv(path: str, nodes: list[dict[str, Any]]) -> None:
         "vulnerability",
         "severity",
         "score",
+        "cvss_vector",
+        "entity",
         "blackduck_url",
         "blackduck_urls",
         "rollup_key",
@@ -1250,20 +1572,32 @@ def write_nodes_csv(path: str, nodes: list[dict[str, Any]]) -> None:
         output_file = sys.stdout
         close_after = False
     else:
-        output_file = open(path, "w", newline="", encoding="utf-8")
+        output_file = open(
+            path,
+            "w",
+            newline="",
+            encoding="utf-8",
+        )
         close_after = True
 
     try:
-        writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+        writer = csv.DictWriter(
+            output_file,
+            fieldnames=fieldnames,
+        )
         writer.writeheader()
 
         for node in nodes:
             row = node_csv_row(node)
-            writer.writerow({field: csv_cell(row.get(field, "")) for field in fieldnames})
+            writer.writerow(
+                {
+                    field: csv_cell(row.get(field, ""))
+                    for field in fieldnames
+                }
+            )
     finally:
         if close_after:
             output_file.close()
-
 
 def build_plan_payload(
         args: argparse.Namespace,
@@ -1299,15 +1633,16 @@ def build_plan_payload(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Create a normalized Jira hierarchy plan from Black Duck rollup findings. "
-            "This script does not call Jira."
+            "Create a normalized Jira hierarchy plan from "
+            "Black Duck rollup findings. This script does not "
+            "call Jira."
         )
     )
 
     parser.add_argument(
         "--findings",
-        default="findings.csv",
-        help="Input findings CSV from subp_vuln_rollup.py. Default: findings.csv.",
+        default=jira_output_path("findings.csv"),
+        help="Input findings CSV from the vulnerability rollup.",
     )
     parser.add_argument(
         "--hierarchy-mode",
@@ -1316,70 +1651,63 @@ def parse_args() -> argparse.Namespace:
             HIERARCHY_MODE_PROJECT_SUBPROJECT_VULNERABILITY,
         ],
         default=HIERARCHY_MODE_VULNERABILITY_PROJECT,
-        help=(
-            "Hierarchy model. Default: vulnerability-project. "
-            "Use project-subproject-vulnerability for the legacy parent/subproject/finding model."
-        ),
+        help="Jira hierarchy model.",
     )
     parser.add_argument(
         "--plan-out",
-        default="jira-hierarchy-plan.json",
-        help="Output hierarchy plan JSON. Default: jira-hierarchy-plan.json.",
+        default=jira_output_path(
+            "jira-hierarchy-plan.json"
+        ),
+        help="Output hierarchy plan JSON.",
     )
     parser.add_argument(
         "--summary-out",
-        default="jira-hierarchy-summary.csv",
-        help=(
-            "Output summary CSV for epic/story nodes. "
-            "Use an empty string to skip. Default: jira-hierarchy-summary.csv."
+        default=jira_output_path(
+            "jira-hierarchy-summary.csv"
         ),
+        help="Epic and Task summary CSV output.",
     )
     parser.add_argument(
         "--nodes-out",
-        default="jira-hierarchy-nodes.csv",
-        help=(
-            "Output flattened nodes CSV. "
-            "Use an empty string to skip. Default: jira-hierarchy-nodes.csv."
+        default=jira_output_path(
+            "jira-hierarchy-nodes.csv"
         ),
+        help="Flattened hierarchy node CSV output.",
     )
     parser.add_argument(
         "--only-parent-project",
-        help="Only include findings for this parent project.",
+        help="Only include this parent project.",
     )
     parser.add_argument(
         "--only-parent-version",
-        help="Only include findings for this parent version.",
+        help="Only include this parent version.",
     )
     parser.add_argument(
         "--only-subproject",
-        help="Only include findings for this subproject.",
+        help="Only include this affected subproject.",
     )
     parser.add_argument(
         "--only-vulnerability",
-        help="Only include findings for this vulnerability ID.",
+        help="Only include this vulnerability ID.",
     )
     parser.add_argument(
         "--limit",
         type=int,
-        help="Limit number of deduped, filtered findings processed.",
+        help="Limit deduplicated findings processed.",
     )
     parser.add_argument(
         "--hash-length",
         type=int,
         default=24,
-        help=(
-            "Hash length used in deterministic Jira lookup labels. "
-            "External IDs always use full SHA-256. Default: 24."
-        ),
+        help="Hash length used in Jira lookup labels.",
     )
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Print debug details to stderr.",
+        help="Print debugging details.",
     )
 
     return parser.parse_args()
-
 
 def validate_args(args: argparse.Namespace) -> None:
     if args.limit is not None and args.limit < 1:

@@ -20,6 +20,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from harness.paths import datadog_output_path, ensure_parent_dir
+
 
 FIELDNAMES = [
     "project",
@@ -537,6 +539,7 @@ class ApiResponseCache:
             entries.pop(key, None)
 
     def save(self) -> None:
+        ensure_parent_dir(self.path)
         with self.lock:
             self.prune_locked()
             self.data["updated_at"] = now_iso()
@@ -814,6 +817,7 @@ def read_candidates_with_fieldnames(path: str) -> tuple[list[dict[str, str]], li
 
 
 def write_candidates_csv(path: str, rows: list[dict[str, str]], fieldnames: list[str]) -> None:
+    ensure_parent_dir(path)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp_path = f"{path}.tmp"
 
@@ -1345,6 +1349,7 @@ def pull_one_candidate(
     return last_result
 
 def atomic_write_json(path: str, payload: Any) -> None:
+    ensure_parent_dir(path)
     if path == "-":
         json.dump(payload, sys.stdout, indent=2, sort_keys=True)
         print()
@@ -1357,6 +1362,7 @@ def atomic_write_json(path: str, payload: Any) -> None:
 
 
 def write_findings(path: str, rows: list[dict[str, str]], json_mode: bool) -> None:
+    ensure_parent_dir(path)
     if json_mode:
         atomic_write_json(path, rows)
         return
@@ -1385,6 +1391,7 @@ def write_findings(path: str, rows: list[dict[str, str]], json_mode: bool) -> No
 
 
 def write_failures(path: str, rows: list[dict[str, str]]) -> None:
+    ensure_parent_dir(path)
     if not path:
         return
 
@@ -1458,11 +1465,10 @@ def state_path_for_args(args: argparse.Namespace) -> str:
     if args.state:
         return args.state
 
-    if args.out and args.out != "-":
-        return f"{args.out}.state.json"
-
-    return "policy_vuln_pull_state.json"
-
+    return datadog_output_path(
+        "state",
+        "policy_vuln_pull_state.json",
+    )
 
 def settings_signature(args: argparse.Namespace) -> str:
     payload = {
@@ -1519,6 +1525,7 @@ def load_state(path: str, args: argparse.Namespace) -> dict[str, Any]:
 
 
 def save_state(path: str, state: dict[str, Any]) -> None:
+    ensure_parent_dir(path)
     if not path:
         return
 
@@ -2151,7 +2158,8 @@ def run_sharded(args: argparse.Namespace) -> int:
     for shard_index in range(shard_count):
         command = [
             sys.executable,
-            script_path,
+            "-m",
+                "harness.datadog.policy_vuln_pull",
             "--shard-worker",
             "--candidates",
             shard_candidate_paths[shard_index],
@@ -2320,7 +2328,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--bd-url", default=os.getenv("BLACKDUCK_URL"), required=os.getenv("BLACKDUCK_URL") is None)
     parser.add_argument("--api-token", default=os.getenv("BLACKDUCK_API_TOKEN"), required=os.getenv("BLACKDUCK_API_TOKEN") is None)
-    parser.add_argument("--candidates", default="policy_candidate_projects.csv")
+    parser.add_argument(
+        "--candidates",
+        default=datadog_output_path(
+            "policy_candidate_projects.csv"
+        ),
+        help="Candidate project/version input path.",
+    )
     parser.add_argument("--project-name")
     parser.add_argument("--project-name-contains")
     parser.add_argument("--version-name")
@@ -2336,15 +2350,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policy-name")
     parser.add_argument("--policy-rule-id")
     parser.add_argument("--group-by", choices=["project", "project-version"], default="project")
-    parser.add_argument("--out", default="policy_findings.csv")
+    parser.add_argument(
+        "--out",
+        default=datadog_output_path("policy_findings.csv"),
+        help="Detailed findings output path.",
+    )
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("--failures-out")
-    parser.add_argument("--api-cache", default="policy_vuln_pull_cache.json")
+    parser.add_argument(
+        "--failures-out",
+        default=datadog_output_path(
+            "policy_pull_failures.csv"
+        ),
+        help="Candidate and component failure report.",
+    )
+    parser.add_argument(
+        "--api-cache",
+        default=datadog_output_path(
+            "cache",
+            "policy_vuln_pull_cache.json",
+        ),
+        help="Persistent Black Duck API cache path.",
+    )
     parser.add_argument("--no-api-cache", action="store_true")
     parser.add_argument("--refresh-api-cache", action="store_true")
     parser.add_argument("--api-cache-max-age-hours", type=float, default=20.0)
     parser.add_argument("--api-cache-max-entries", type=int, default=5000)
-    parser.add_argument("--state", help="Resume state path. Default: <out>.state.json.")
+    parser.add_argument(
+        "--state",
+        default=datadog_output_path(
+            "state",
+            "policy_vuln_pull_state.json",
+        ),
+        help="Resume state path.",
+    )
     parser.set_defaults(resume=True)
     parser.add_argument("--resume", dest="resume", action="store_true", help="Resume completed candidates from state. Default: enabled.")
     parser.add_argument("--no-resume", dest="resume", action="store_false", help="Ignore resume state and start fresh.")
@@ -2414,8 +2452,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--shard-dir",
-        default=".policy_vuln_pull_shards",
-        help="Directory for shard candidate files, outputs, caches, and state. Default: .policy_vuln_pull_shards.",
+        default=datadog_output_path(
+            "shards",
+            "policy_vuln_pull",
+        ),
+        help="Shard inputs, outputs, caches, and state directory.",
     )
     parser.add_argument("--shard-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--timeout", type=int, default=30)

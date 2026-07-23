@@ -19,6 +19,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from harness.paths import ensure_parent_dir, jira_output_path
+
 
 PROJECT_VERSION_RE = re.compile(
     r"/api/projects/[0-9a-fA-F-]+/versions/[0-9a-fA-F-]+"
@@ -1015,6 +1017,256 @@ def first_value_by_key(value: Any, keys: list[str]) -> Any:
     return None
 
 
+def custom_field_value_text(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+
+    if isinstance(value, (str, int, float)):
+        return str(value).strip()
+
+    if isinstance(value, list):
+        rendered = {
+            custom_field_value_text(item)
+            for item in value
+        }
+        return ";".join(sorted(item for item in rendered if item))
+
+    if isinstance(value, dict):
+        for key in (
+            "displayValue",
+            "displayName",
+            "value",
+            "label",
+            "name",
+        ):
+            if key in value:
+                rendered = custom_field_value_text(value.get(key))
+                if rendered:
+                    return rendered
+
+        rendered = {
+            custom_field_value_text(item)
+            for item in value.values()
+        }
+        return ";".join(sorted(item for item in rendered if item))
+
+    return str(value).strip()
+
+
+def custom_field_candidate_name(item: dict[str, Any]) -> str:
+    for key in (
+        "fieldName",
+        "customFieldName",
+        "name",
+        "label",
+        "displayName",
+    ):
+        value = item.get(key)
+
+        if value not in (None, "") and not isinstance(value, (dict, list)):
+            return str(value).strip()
+
+    for key in (
+        "customField",
+        "field",
+        "definition",
+        "customFieldDefinition",
+    ):
+        nested = item.get(key)
+
+        if not isinstance(nested, dict):
+            continue
+
+        for name_key in (
+            "fieldName",
+            "customFieldName",
+            "name",
+            "label",
+            "displayName",
+        ):
+            value = nested.get(name_key)
+
+            if value not in (None, "") and not isinstance(
+                value,
+                (dict, list),
+            ):
+                return str(value).strip()
+
+    return ""
+
+
+def custom_field_candidate_value(item: dict[str, Any]) -> str:
+    for key in (
+        "values",
+        "value",
+        "fieldValue",
+        "customFieldValue",
+        "selectedValues",
+        "selectedValue",
+        "displayValue",
+    ):
+        if key not in item:
+            continue
+
+        rendered = custom_field_value_text(item.get(key))
+
+        if rendered:
+            return rendered
+
+    return ""
+
+
+def find_named_custom_field(
+        value: Any,
+        field_name: str,
+) -> tuple[bool, str]:
+    wanted = str(field_name or "").strip().casefold()
+
+    if not wanted:
+        return False, ""
+
+    if isinstance(value, dict):
+        candidate_name = custom_field_candidate_name(value)
+
+        if candidate_name.casefold() == wanted:
+            return True, custom_field_candidate_value(value)
+
+        for key, item in value.items():
+            if str(key).strip().casefold() == wanted:
+                return True, custom_field_value_text(item)
+
+        for item in value.values():
+            found, rendered = find_named_custom_field(item, field_name)
+
+            if found:
+                return True, rendered
+
+    elif isinstance(value, list):
+        for item in value:
+            found, rendered = find_named_custom_field(item, field_name)
+
+            if found:
+                return True, rendered
+
+    return False, ""
+
+
+def read_project_custom_field(
+        client: BlackDuckClient,
+        version_href: str,
+        version: dict[str, Any],
+        field_name: str,
+) -> str:
+    field_name = str(field_name or "").strip()
+
+    if not field_name:
+        return ""
+
+    project_href = project_href_from_version_href(
+        canonical_href(version_href)
+    )
+
+    if not project_href:
+        if client.debug:
+            print(
+                f"Could not derive project href from version href: "
+                f"{version_href}",
+                file=sys.stderr,
+            )
+        return ""
+
+    cache = getattr(client, "_project_custom_field_cache", None)
+
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(client, "_project_custom_field_cache", cache)
+
+    cache_key = (
+        canonical_href(project_href),
+        field_name.casefold(),
+    )
+
+    if cache_key in cache:
+        return str(cache[cache_key] or "")
+
+    try:
+        project = client.get(project_href)
+    except RuntimeError as error:
+        if client.debug:
+            print(
+                f"Could not read project while resolving custom field "
+                f"{field_name!r}: {error}",
+                file=sys.stderr,
+            )
+
+        cache[cache_key] = ""
+        return ""
+
+    for resource in (project, version):
+        found, rendered = find_named_custom_field(
+            resource,
+            field_name,
+        )
+
+        if found:
+            cache[cache_key] = rendered
+            return rendered
+
+    linked_url = get_link(
+        project,
+        (
+            "custom-fields",
+            "customFields",
+            "custom-field-values",
+            "customFieldValues",
+        ),
+    )
+
+    candidate_urls = [
+        candidate
+        for candidate in (
+            linked_url,
+            f"{canonical_href(project_href)}/custom-fields",
+        )
+        if candidate
+    ]
+
+    seen_urls: set[str] = set()
+
+    for candidate_url in candidate_urls:
+        candidate_url = canonical_href(candidate_url)
+
+        if candidate_url in seen_urls:
+            continue
+
+        seen_urls.add(candidate_url)
+
+        try:
+            custom_fields = client.paged_get(candidate_url)
+        except RuntimeError as error:
+            if client.debug:
+                print(
+                    f"Could not read Black Duck project custom fields "
+                    f"from {candidate_url}: {error}",
+                    file=sys.stderr,
+                )
+            continue
+
+        found, rendered = find_named_custom_field(
+            custom_fields,
+            field_name,
+        )
+
+        if found:
+            cache[cache_key] = rendered
+            return rendered
+
+    cache[cache_key] = ""
+    return ""
+
 def to_float(value: Any) -> float | None:
     if value is None:
         return None
@@ -1138,16 +1390,24 @@ def summarize_vulnerabilities_for_component(
     summary_cache_key: tuple[str, str, float] | None = None
 
     if vulnerabilities_url:
-        summary_cache_key = (vulnerabilities_url, score_field, threshold)
-        cached_summaries = client.vulnerability_summary_cache.get(summary_cache_key)
+        summary_cache_key = (
+            vulnerabilities_url,
+            score_field,
+            threshold,
+        )
+        cached_summaries = client.vulnerability_summary_cache.get(
+            summary_cache_key
+        )
 
         if cached_summaries is not None:
             if client.debug:
                 print(
-                    f"Reusing parsed vulnerability summary cache: {vulnerabilities_url} "
-                    f"({len(cached_summaries)} matching vulnerability item(s))",
+                    f"Reusing parsed vulnerability summary cache: "
+                    f"{vulnerabilities_url} "
+                    f"({len(cached_summaries)} matching item(s))",
                     file=sys.stderr,
                 )
+
             return cached_summaries
 
     vulnerabilities: list[dict[str, Any]] = []
@@ -1161,7 +1421,9 @@ def summarize_vulnerabilities_for_component(
                     vulnerability_item,
                     score_field,
                 )
-                vulnerabilities.extend(extracted or [vulnerability_item])
+                vulnerabilities.extend(
+                    extracted or [vulnerability_item]
+                )
         except RuntimeError as error:
             raise RuntimeError(
                 f"Failed reading vulnerabilities for component "
@@ -1169,35 +1431,168 @@ def summarize_vulnerabilities_for_component(
             ) from error
     else:
         vulnerabilities.extend(
-            extract_vulnerability_candidates(vulnerable_component, score_field)
+            extract_vulnerability_candidates(
+                vulnerable_component,
+                score_field,
+            )
         )
 
     summaries: list[dict[str, Any]] = []
 
     for vulnerability in vulnerabilities:
-        score = to_float(first_value_by_key(vulnerability, [score_field]))
+        score = to_float(
+            first_value_by_key(vulnerability, [score_field])
+        )
 
         if score is None or score < threshold:
             continue
+
+        cvss_vector = first_value_by_key(
+            vulnerability,
+            [
+                "cvssVector",
+                "cvss3Vector",
+                "cvss31Vector",
+                "cvssV3Vector",
+                "cvssV31Vector",
+                "cvss2Vector",
+                "vector",
+            ],
+        )
 
         summaries.append(
             {
                 "vulnerability": vulnerability_identifier(vulnerability),
                 "score": score,
                 "severity": vulnerability_severity(vulnerability),
+                "cvss_vector": str(cvss_vector or ""),
                 "blackduck_url": (
-                        get_link(vulnerability, ("self",))
-                        or get_self_href(vulnerability)
-                        or ""
+                    get_link(vulnerability, ("self",))
+                    or get_self_href(vulnerability)
+                    or ""
                 ),
             }
         )
 
     if summary_cache_key is not None:
-        client.vulnerability_summary_cache[summary_cache_key] = summaries
+        client.vulnerability_summary_cache[
+            summary_cache_key
+        ] = summaries
 
     return summaries
 
+def looks_like_resource_url(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+
+    return (
+        text.startswith("http://")
+        or text.startswith("https://")
+        or text.startswith("/api/")
+    )
+
+
+def component_version_href_from_resource(
+        resource: dict[str, Any],
+) -> str:
+    direct_candidates = [
+        resource.get("componentVersionHref"),
+        resource.get("componentVersionUrl"),
+        resource.get("componentVersion"),
+    ]
+
+    for candidate in direct_candidates:
+        if isinstance(candidate, str):
+            if looks_like_resource_url(candidate):
+                if "/api/components/" in candidate and "/versions/" in candidate:
+                    return canonical_href(candidate)
+
+        if isinstance(candidate, dict):
+            for href in iter_hrefs(candidate):
+                if "/api/components/" in href and "/versions/" in href:
+                    return canonical_href(href)
+
+    for link in resource.get("_meta", {}).get("links", []):
+        rel = str(link.get("rel") or "").lower()
+        href = str(link.get("href") or "")
+
+        if (
+            href
+            and rel in {
+                "component-version",
+                "componentversion",
+                "component_version",
+            }
+        ):
+            return canonical_href(href)
+
+    for href in iter_hrefs(resource):
+        if "/api/components/" in href and "/versions/" in href:
+            return canonical_href(href)
+
+    return ""
+
+
+def extract_component_version_details(
+        client: BlackDuckClient,
+        vulnerable_component: dict[str, Any],
+) -> tuple[str, str]:
+    display_value = first_value_by_key(
+        vulnerable_component,
+        [
+            "componentVersionName",
+            "versionName",
+        ],
+    )
+    display_name = str(display_value or "").strip()
+
+    if looks_like_resource_url(display_name):
+        display_name = ""
+
+    direct_version = vulnerable_component.get(
+        "componentVersion"
+    )
+
+    if not display_name and isinstance(
+        direct_version,
+        (str, int, float),
+    ):
+        direct_text = str(direct_version).strip()
+
+        if not looks_like_resource_url(direct_text):
+            display_name = direct_text
+
+    version_href = component_version_href_from_resource(
+        vulnerable_component
+    )
+
+    if version_href and not display_name:
+        try:
+            version_resource = client.get(version_href)
+        except RuntimeError as error:
+            if client.debug:
+                print(
+                    f"Could not resolve component version name "
+                    f"from {version_href}: {error}",
+                    file=sys.stderr,
+                )
+        else:
+            display_name = str(
+                version_resource.get("versionName")
+                or version_resource.get("name")
+                or first_value_by_key(
+                    version_resource,
+                    [
+                        "componentVersionName",
+                        "versionName",
+                    ],
+                )
+                or ""
+            ).strip()
+
+            if looks_like_resource_url(display_name):
+                display_name = ""
+
+    return display_name, version_href
 
 def collect_findings_for_subproject(
         client: BlackDuckClient,
@@ -1206,9 +1601,30 @@ def collect_findings_for_subproject(
         subproject_ref: dict[str, Any],
         threshold: float,
         score_field: str,
+        entity_custom_field: str,
+        require_entity: bool,
 ) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
-    seen_component_vulnerability_keys: set[tuple[str, str, str]] = set()
+    seen_component_vulnerability_keys: set[
+        tuple[str, str, str]
+    ] = set()
+
+    entity = read_project_custom_field(
+        client=client,
+        version_href=str(
+            subproject_ref.get("version_href") or ""
+        ),
+        version=subproject_ref["version"],
+        field_name=entity_custom_field,
+    )
+
+    if require_entity and entity_custom_field and not entity:
+        raise RuntimeError(
+            f"Black Duck project "
+            f"{subproject_ref.get('project_name', '')!r} "
+            f"does not have a populated "
+            f"{entity_custom_field!r} custom field"
+        )
 
     vulnerable_components = get_vulnerable_bom_components(
         client,
@@ -1217,14 +1633,21 @@ def collect_findings_for_subproject(
 
     for vulnerable_component in vulnerable_components:
         component_name = str(
-            first_value_by_key(vulnerable_component, ["componentName", "name"]) or ""
-        )
-        component_version = str(
             first_value_by_key(
                 vulnerable_component,
-                ["componentVersionName", "componentVersion", "versionName"],
+                [
+                    "componentName",
+                    "name",
+                ],
             )
             or ""
+        )
+        (
+            component_version,
+            component_version_href,
+        ) = extract_component_version_details(
+            client,
+            vulnerable_component,
         )
 
         vulnerabilities_url = get_link(
@@ -1238,35 +1661,62 @@ def collect_findings_for_subproject(
         if vulnerabilities_url:
             component_vulnerability_key = (
                 component_name,
-                component_version,
+                component_version or component_version_href,
                 vulnerabilities_url,
             )
 
-            if component_vulnerability_key in seen_component_vulnerability_keys:
+            if (
+                component_vulnerability_key
+                in seen_component_vulnerability_keys
+            ):
                 if client.debug:
                     print(
-                        f"Skipping duplicate vulnerable component URL for "
-                        f"{component_name} {component_version}: {vulnerabilities_url}",
+                        f"Skipping duplicate vulnerable component "
+                        f"URL for {component_name} "
+                        f"{component_version}: "
+                        f"{vulnerabilities_url}",
                         file=sys.stderr,
                     )
                 continue
 
-            seen_component_vulnerability_keys.add(component_vulnerability_key)
+            seen_component_vulnerability_keys.add(
+                component_vulnerability_key
+            )
 
-        vulnerability_summaries = summarize_vulnerabilities_for_component(
-            client=client,
-            vulnerable_component=vulnerable_component,
-            component_name=component_name,
-            component_version=component_version,
-            threshold=threshold,
-            score_field=score_field,
+        vulnerability_summaries = (
+            summarize_vulnerabilities_for_component(
+                client=client,
+                vulnerable_component=vulnerable_component,
+                component_name=component_name,
+                component_version=(
+                    component_version
+                    or component_version_href
+                ),
+                threshold=threshold,
+                score_field=score_field,
+            )
         )
 
         for vulnerability_summary in vulnerability_summaries:
-            vulnerability_id = str(vulnerability_summary["vulnerability"])
+            vulnerability_id = str(
+                vulnerability_summary["vulnerability"]
+            )
             score = float(vulnerability_summary["score"])
-            severity = str(vulnerability_summary["severity"])
-            vulnerability_url = str(vulnerability_summary["blackduck_url"])
+            severity = str(
+                vulnerability_summary["severity"]
+            )
+            cvss_vector = str(
+                vulnerability_summary.get("cvss_vector")
+                or ""
+            )
+            vulnerability_url = str(
+                vulnerability_summary["blackduck_url"]
+            )
+
+            version_identity = (
+                component_version
+                or component_version_href
+            )
 
             rollup_key = "|".join(
                 [
@@ -1275,7 +1725,7 @@ def collect_findings_for_subproject(
                     subproject_ref["project_name"],
                     subproject_ref["version_name"],
                     component_name,
-                    component_version,
+                    version_identity,
                     vulnerability_id,
                 ]
             )
@@ -1284,25 +1734,48 @@ def collect_findings_for_subproject(
                 {
                     "parent_project": parent_project,
                     "parent_version": parent_version,
-                    "parent_version_href": subproject_ref.get("parent_version_href", ""),
-                    "subproject_path": subproject_ref.get("path", ""),
-                    "subproject": subproject_ref["project_name"],
-                    "subproject_version": subproject_ref["version_name"],
-                    "subproject_version_href": subproject_ref.get("version_href", ""),
-                    "relationship_detection_method": subproject_ref.get("source", ""),
+                    "parent_version_href": (
+                        subproject_ref.get(
+                            "parent_version_href",
+                            "",
+                        )
+                    ),
+                    "subproject_path": subproject_ref.get(
+                        "path",
+                        "",
+                    ),
+                    "subproject": subproject_ref[
+                        "project_name"
+                    ],
+                    "subproject_version": subproject_ref[
+                        "version_name"
+                    ],
+                    "subproject_version_href": (
+                        subproject_ref.get(
+                            "version_href",
+                            "",
+                        )
+                    ),
+                    "relationship_detection_method": (
+                        subproject_ref.get("source", "")
+                    ),
                     "component": component_name,
                     "component_version": component_version,
+                    "component_version_href": (
+                        component_version_href
+                    ),
                     "vulnerability": vulnerability_id,
                     "score_field": score_field,
                     "score": score,
                     "severity": severity,
+                    "cvss_vector": cvss_vector,
+                    "entity": entity,
                     "blackduck_url": vulnerability_url,
                     "rollup_key": rollup_key,
                 }
             )
 
     return findings
-
 
 def dedupe_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     unique: list[dict[str, Any]] = []
@@ -1516,7 +1989,6 @@ def collect_findings_for_subprojects(
 ) -> tuple[list[dict[str, Any]], list[FailedRelationship]]:
     findings: list[dict[str, Any]] = []
     failures: list[FailedRelationship] = []
-
     total = len(subprojects)
 
     for index, subproject in enumerate(subprojects, start=1):
@@ -1528,12 +2000,19 @@ def collect_findings_for_subprojects(
 
         if args.debug:
             print(
-                f"[{index}/{total}] Checking {label} from {subproject.get('source')}",
+                f"[{index}/{total}] Checking {label} from "
+                f"{subproject.get('source')}",
                 file=sys.stderr,
             )
 
-        parent_project = str(subproject.get("parent_project") or default_parent_project)
-        parent_version = str(subproject.get("parent_version") or default_parent_version)
+        parent_project = str(
+            subproject.get("parent_project")
+            or default_parent_project
+        )
+        parent_version = str(
+            subproject.get("parent_version")
+            or default_parent_version
+        )
 
         start_seconds = time.monotonic()
 
@@ -1545,6 +2024,8 @@ def collect_findings_for_subprojects(
                 subproject_ref=subproject,
                 threshold=args.threshold,
                 score_field=args.score_field,
+                entity_custom_field=args.entity_custom_field,
+                require_entity=args.require_entity,
             )
 
             elapsed_seconds = time.monotonic() - start_seconds
@@ -1563,7 +2044,8 @@ def collect_findings_for_subprojects(
 
             print(
                 f"Warning: failed checking {label} after "
-                f"{format_duration(elapsed_seconds)}; continuing: {error}",
+                f"{format_duration(elapsed_seconds)}; continuing: "
+                f"{error}",
                 file=sys.stderr,
             )
 
@@ -1581,8 +2063,10 @@ def collect_findings_for_subprojects(
 
     return findings, failures
 
-
-def write_csv(findings: list[dict[str, Any]], output_path: str) -> None:
+def write_csv(
+        findings: list[dict[str, Any]],
+        output_path: str,
+) -> None:
     fieldnames = [
         "parent_project",
         "parent_version",
@@ -1594,33 +2078,53 @@ def write_csv(findings: list[dict[str, Any]], output_path: str) -> None:
         "relationship_detection_method",
         "component",
         "component_version",
+        "component_version_href",
         "vulnerability",
         "score_field",
         "score",
         "severity",
+        "cvss_vector",
+        "entity",
         "blackduck_url",
         "rollup_key",
     ]
+
+    ensure_parent_dir(output_path)
 
     if output_path == "-":
         output_file = sys.stdout
         close_after = False
     else:
-        output_file = open(output_path, "w", newline="", encoding="utf-8")
+        output_file = open(
+            output_path,
+            "w",
+            newline="",
+            encoding="utf-8",
+        )
         close_after = True
 
     try:
-        writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+        writer = csv.DictWriter(
+            output_file,
+            fieldnames=fieldnames,
+        )
         writer.writeheader()
 
         for finding in findings:
-            writer.writerow({field: finding.get(field, "") for field in fieldnames})
+            writer.writerow(
+                {
+                    field: finding.get(field, "")
+                    for field in fieldnames
+                }
+            )
     finally:
         if close_after:
             output_file.close()
 
-
-def write_failures_csv(failures: list[FailedRelationship], output_path: str) -> None:
+def write_failures_csv(
+        failures: list[FailedRelationship],
+        output_path: str,
+) -> None:
     fieldnames = [
         "parent_project",
         "parent_version",
@@ -1637,8 +2141,18 @@ def write_failures_csv(failures: list[FailedRelationship], output_path: str) -> 
         "error",
     ]
 
-    with open(output_path, "w", newline="", encoding="utf-8") as output_file:
-        writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+    ensure_parent_dir(output_path)
+
+    with open(
+        output_path,
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as output_file:
+        writer = csv.DictWriter(
+            output_file,
+            fieldnames=fieldnames,
+        )
         writer.writeheader()
 
         for failure in failures:
@@ -1651,15 +2165,20 @@ def write_failures_csv(failures: list[FailedRelationship], output_path: str) -> 
                     "child_version_href": failure.child_version_href,
                     "source": failure.source,
                     "stage": failure.stage,
-                    "elapsed_seconds": f"{failure.elapsed_seconds:.3f}",
-                    "elapsed_human": format_duration(failure.elapsed_seconds),
+                    "elapsed_seconds": (
+                        f"{failure.elapsed_seconds:.3f}"
+                    ),
+                    "elapsed_human": format_duration(
+                        failure.elapsed_seconds
+                    ),
                     "timeout_seconds": failure.timeout_seconds,
                     "retries": failure.retries,
-                    "attempts_per_request": failure.attempts_per_request,
+                    "attempts_per_request": (
+                        failure.attempts_per_request
+                    ),
                     "error": failure.error,
                 }
             )
-
 
 def format_duration(seconds: float) -> str:
     if seconds < 60:
@@ -1681,8 +2200,10 @@ def safe_filename(value: str, max_length: int = 120) -> str:
     return (cleaned or "retry")[:max_length]
 
 
-def build_retry_command(args: argparse.Namespace, failure: FailedRelationship) -> str:
-    script_name = os.path.basename(sys.argv[0]) or "subp_vuln_rollup.py"
+def build_retry_command(
+        args: argparse.Namespace,
+        failure: FailedRelationship,
+) -> str:
     retry_timeout = max(args.timeout * 3, 120)
     retry_retries = max(args.retries, 2)
 
@@ -1697,11 +2218,17 @@ def build_retry_command(args: argparse.Namespace, failure: FailedRelationship) -
             ]
         )
     )
-    retry_out = f"{retry_basename}.json" if args.json else f"{retry_basename}.csv"
+    retry_filename = (
+        f"{retry_basename}.json"
+        if args.json
+        else f"{retry_basename}.csv"
+    )
+    retry_out = jira_output_path("retries", retry_filename)
 
     parts: list[str] = [
-        "python",
-        script_name,
+        sys.executable,
+        "-m",
+        "harness.jira.subp_vuln_rollup",
     ]
 
     if args.parents_csv:
@@ -1731,12 +2258,28 @@ def build_retry_command(args: argparse.Namespace, failure: FailedRelationship) -
             parts.append("--resolve-bom-names")
 
     if failure.child_version_href:
-        parts.extend(["--only-child-href", failure.child_version_href])
+        parts.extend(
+            [
+                "--only-child-href",
+                failure.child_version_href,
+            ]
+        )
     else:
         if failure.child_project:
-            parts.extend(["--only-child-project", failure.child_project])
+            parts.extend(
+                [
+                    "--only-child-project",
+                    failure.child_project,
+                ]
+            )
+
         if failure.child_version:
-            parts.extend(["--only-child-version", failure.child_version])
+            parts.extend(
+                [
+                    "--only-child-version",
+                    failure.child_version,
+                ]
+            )
 
     parts.extend(
         [
@@ -1756,6 +2299,17 @@ def build_retry_command(args: argparse.Namespace, failure: FailedRelationship) -
             str(args.page_limit),
         ]
     )
+
+    if args.entity_custom_field:
+        parts.extend(
+            [
+                "--entity-custom-field",
+                args.entity_custom_field,
+            ]
+        )
+
+    if args.require_entity:
+        parts.append("--require-entity")
 
     if args.no_api_cache:
         parts.append("--no-api-cache")
@@ -1780,8 +2334,10 @@ def build_retry_command(args: argparse.Namespace, failure: FailedRelationship) -
     if args.debug:
         parts.append("--debug")
 
-    return " ".join(shlex.quote(str(part)) for part in parts)
-
+    return " ".join(
+        shlex.quote(str(part))
+        for part in parts
+    )
 
 def print_failed_relationship_summary(
         failures: list[FailedRelationship],
@@ -1837,8 +2393,8 @@ def print_failed_relationship_summary(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Roll up Black Duck vulnerabilities from manually added subprojects "
-            "to parent product project/version context."
+            "Roll up Black Duck vulnerabilities from manually added "
+            "subprojects to parent product project/version context."
         )
     )
 
@@ -1856,62 +2412,66 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--parents-csv",
-        help=(
-            "CSV from find_parent_projects.py. When supplied, this script uses "
-            "parent/child relationships from this file instead of discovering subprojects "
-            "from a single parent project/version."
-        ),
+        help="Relationship CSV from blackduck-find-parents.",
     )
     parser.add_argument(
         "--parent-project",
-        help=(
-            "Parent project name. Required when --parents-csv is not used. "
-            "Optional filter when --parents-csv is used."
-        ),
+        help="Parent project name or parent-project filter.",
     )
     parser.add_argument(
         "--parent-version",
-        help=(
-            "Parent project version. Required when --parents-csv is not used. "
-            "Optional filter when --parents-csv is used."
-        ),
+        help="Parent version name or parent-version filter.",
     )
-    parser.add_argument("--threshold", type=float, default=7.0)
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=7.0,
+    )
     parser.add_argument(
         "--score-field",
         default="overallScore",
-        help="Vulnerability score field to filter on. Default: overallScore.",
+        help="Vulnerability score field used for filtering.",
+    )
+    parser.add_argument(
+        "--entity-custom-field",
+        default="E+H Entity",
+        help=(
+            "Black Duck project custom-field name copied into findings. "
+            "Use an empty string to disable."
+        ),
+    )
+    parser.add_argument(
+        "--require-entity",
+        action="store_true",
+        help="Fail a subproject pull when Entity is missing or blank.",
     )
     parser.add_argument(
         "--depth",
         type=int,
         default=1,
-        help="How many levels of added projects to traverse in single-parent mode. Default: 1.",
+        help="Added-project traversal depth.",
     )
     parser.add_argument(
         "--resolve-bom-names",
         action="store_true",
-        help=(
-            "Single-parent mode fallback: if project-version links are not exposed on BOM rows, "
-            "try resolving BOM componentName/componentVersionName as BD project/version."
-        ),
+        help="Resolve BOM names as Black Duck project versions.",
     )
     parser.add_argument(
         "--only-child-project",
-        help="Only check child relationships with this child project name. Useful for retrying one failed child.",
+        help="Only check this child project.",
     )
     parser.add_argument(
         "--only-child-version",
-        help="Only check child relationships with this child version name. Useful for retrying one failed child.",
+        help="Only check this child version.",
     )
     parser.add_argument(
         "--only-child-href",
-        help="Only check the child relationship with this exact child version href. Best option for retrying one failed child.",
+        help="Only check this exact child version href.",
     )
     parser.add_argument(
         "--out",
-        default="-",
-        help="CSV output path. Use '-' for stdout. Default: stdout.",
+        default=jira_output_path("findings.csv"),
+        help="Findings CSV or JSON output path.",
     )
     parser.add_argument(
         "--json",
@@ -1920,76 +2480,76 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--failures-out",
-        help="Optional CSV output path for failed child relationships and elapsed attempt time.",
+        default=jira_output_path(
+            "subp_vuln_rollup_failures.csv"
+        ),
+        help="Failed child relationship CSV output path.",
     )
     parser.add_argument(
         "--insecure",
         action="store_true",
-        help="Disable TLS certificate validation. Useful for lab/on-prem testing only.",
+        help="Disable TLS certificate validation.",
     )
     parser.add_argument(
         "--timeout",
         type=int,
         default=30,
-        help="Fail-fast HTTP request timeout in seconds. Default: 30.",
+        help="HTTP timeout seconds.",
     )
     parser.add_argument(
         "--retries",
         type=int,
         default=1,
-        help="Retry count for timeout/temporary server errors. Default: 1.",
+        help="Retry count for transient errors.",
     )
     parser.add_argument(
         "--retry-delay",
         type=float,
         default=2.0,
-        help="Base retry delay in seconds. Default: 2.0.",
+        help="Base retry delay seconds.",
     )
     parser.add_argument(
         "--page-limit",
         type=int,
         default=100,
-        help="Black Duck API page size for paginated GETs. Default: 100.",
+        help="Black Duck API page size.",
     )
     parser.add_argument(
         "--api-cache",
-        default="subp_vuln_rollup_cache.json",
-        help=(
-            "Persistent raw API response cache path. Default: "
-            "subp_vuln_rollup_cache.json."
+        default=jira_output_path(
+            "cache",
+            "subp_vuln_rollup_cache.json",
         ),
+        help="Persistent Black Duck API response cache path.",
     )
     parser.add_argument(
         "--no-api-cache",
         action="store_true",
-        help="Disable persistent API response cache. In-run GET cache still applies.",
+        help="Disable the persistent API cache.",
     )
     parser.add_argument(
         "--refresh-api-cache",
         action="store_true",
-        help="Ignore existing persistent API cache and rebuild it from fresh API responses.",
+        help="Ignore and rebuild the existing API cache.",
     )
     parser.add_argument(
         "--api-cache-max-age-hours",
         type=float,
         default=20.0,
-        help=(
-            "Maximum age for persistent API cache entries. Default: 20 hours. "
-            "This is intentionally below 24h so daily midnight cron runs refresh "
-            "from Black Duck instead of reusing yesterday's vulnerability data. "
-            "Use -1 to never expire cache entries."
-        ),
+        help="Maximum persistent API cache entry age.",
     )
     parser.add_argument(
         "--api-cache-max-entries",
         type=int,
         default=5000,
-        help="Maximum persistent API cache entries to retain. Default: 5000.",
+        help="Maximum persistent API cache entry count.",
     )
-    parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+    )
 
     return parser.parse_args()
-
 
 def validate_args(args: argparse.Namespace) -> None:
     if args.timeout <= 0:
@@ -2008,28 +2568,77 @@ def validate_args(args: argparse.Namespace) -> None:
         raise RuntimeError("--depth must be 1 or greater")
 
     if args.api_cache_max_age_hours < -1:
-        raise RuntimeError("--api-cache-max-age-hours must be -1 or greater")
+        raise RuntimeError(
+            "--api-cache-max-age-hours must be -1 or greater"
+        )
 
     if args.api_cache_max_entries <= 0:
-        raise RuntimeError("--api-cache-max-entries must be greater than 0")
+        raise RuntimeError(
+            "--api-cache-max-entries must be greater than 0"
+        )
 
+    if args.require_entity and not args.entity_custom_field.strip():
+        raise RuntimeError(
+            "--require-entity requires --entity-custom-field"
+        )
+
+def resolve_rollup_input(
+        args: argparse.Namespace,
+) -> str:
+    if args.parents_csv:
+        if not os.path.isfile(args.parents_csv):
+            raise RuntimeError(
+                f"Parent relationship CSV does not exist: "
+                f"{args.parents_csv}"
+            )
+
+        return "parents-csv"
+
+    if args.parent_project and args.parent_version:
+        return "single-parent"
+
+    default_parents_csv = jira_output_path(
+        "parent_projects.csv"
+    )
+
+    if not os.path.isfile(default_parents_csv):
+        raise RuntimeError(
+            "No parent relationship input was supplied and the "
+            f"default file does not exist: {default_parents_csv}. "
+            "Run blackduck-find-parents first, provide "
+            "--parents-csv, or provide both --parent-project "
+            "and --parent-version."
+        )
+
+    args.parents_csv = default_parents_csv
+
+    if args.debug:
+        print(
+            f"No --parents-csv supplied; using default: "
+            f"{args.parents_csv}",
+            file=sys.stderr,
+        )
+
+    return "parents-csv"
 
 def save_api_cache(api_cache: ApiResponseCache | None) -> None:
     if api_cache is None:
         return
 
     try:
+        ensure_parent_dir(api_cache.path)
         api_cache.save()
     except (OSError, TypeError, ValueError) as error:
         print(
-            f"Warning: failed to write API cache {api_cache.path}: {error}",
+            f"Warning: failed to write API cache "
+            f"{api_cache.path}: {error}",
             file=sys.stderr,
         )
-
 
 def main() -> int:
     args = parse_args()
     validate_args(args)
+    resolve_rollup_input(args)
 
     api_cache: ApiResponseCache | None = None
 

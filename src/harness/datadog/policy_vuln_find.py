@@ -17,6 +17,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from harness.paths import datadog_output_path, ensure_parent_dir
+
 
 SCHEMA_VERSION = 1
 CACHE_SCHEMA_VERSION = 1
@@ -485,6 +487,7 @@ def load_cache(
 
 
 def save_cache(path: str, cache: dict[str, Any]) -> None:
+    ensure_parent_dir(path)
     cache["updated_at"] = now_iso()
     tmp_path = f"{path}.tmp"
 
@@ -863,6 +866,7 @@ def scan_one_candidate_version(
 
 
 def write_csv_file(path: str, rows: list[dict[str, str]], fieldnames: list[str]) -> None:
+    ensure_parent_dir(path)
     if path == "-":
         output_file = sys.stdout
         close_after = False
@@ -887,6 +891,7 @@ def write_csv_file(path: str, rows: list[dict[str, str]], fieldnames: list[str])
 
 
 def atomic_write_json(path: str, payload: Any) -> None:
+    ensure_parent_dir(path)
     if path == "-":
         json.dump(payload, sys.stdout, indent=2, sort_keys=True)
         print()
@@ -1360,7 +1365,7 @@ def process(args: argparse.Namespace) -> int:
             "workers": args.workers,
             "candidates_out": args.out,
             "changes_out": args.changes_out or "",
-            "recommended_next_command": f"blackduck-policy-vuln-pull --candidates {args.out} --out policy_findings.csv",
+            "recommended_next_command": f"blackduck-policy-vuln-pull --candidates {args.out} --out {datadog_output_path('policy_findings.csv')}",
         }
         atomic_write_json(args.trigger_out, trigger)
 
@@ -1396,11 +1401,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--phase")
     parser.add_argument("--policy-name")
     parser.add_argument("--policy-rule-id")
-    parser.add_argument("--out", default="policy_candidate_projects.csv")
+    parser.add_argument(
+        "--out",
+        default=datadog_output_path(
+            "policy_candidate_projects.csv"
+        ),
+        help="Candidate project/version output path.",
+    )
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("--changes-out")
-    parser.add_argument("--trigger-out")
-    parser.add_argument("--cache", default="policy_vuln_find_cache.json")
+    parser.add_argument(
+        "--changes-out",
+        default=datadog_output_path(
+            "policy_candidate_changes.csv"
+        ),
+        help="Candidate added, removed, and changed report.",
+    )
+    parser.add_argument(
+        "--trigger-out",
+        default=datadog_output_path(
+            "policy_candidate_trigger.json"
+        ),
+        help="Candidate pull trigger metadata JSON.",
+    )
+    parser.add_argument(
+        "--cache",
+        default=datadog_output_path(
+            "cache",
+            "policy_vuln_find_cache.json",
+        ),
+        help="Candidate scan cache path.",
+    )
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--refresh-all", action="store_true")
     parser.add_argument("--refresh-older-than-hours", type=float, default=6.0)

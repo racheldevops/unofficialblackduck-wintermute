@@ -17,6 +17,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from harness.paths import ensure_parent_dir, jira_output_path
+
 
 PROJECT_VERSION_RE = re.compile(
     r"/api/projects/[0-9a-fA-F-]+/versions/[0-9a-fA-F-]+"
@@ -763,6 +765,7 @@ def load_cache(path: str, base_url: str, resolve_bom_names: bool) -> dict[str, A
 
 
 def save_cache(path: str, cache: dict[str, Any]) -> None:
+    ensure_parent_dir(path)
     cache["updated_at"] = now_iso()
     tmp_path = f"{path}.tmp"
 
@@ -771,7 +774,6 @@ def save_cache(path: str, cache: dict[str, Any]) -> None:
 
     os.replace(tmp_path, path)
     print(f"Wrote cache: {path}", file=sys.stderr)
-
 
 def cache_entry_for_version(cache: dict[str, Any], version_info: VersionInfo) -> dict[str, Any] | None:
     entry = cache.get("entries", {}).get(version_info.version_href)
@@ -1054,6 +1056,8 @@ def prune_cache_to_current_inventory(
 
 
 def write_csv(relations: list[dict[str, str]], output_path: str) -> None:
+    ensure_parent_dir(output_path)
+
     if output_path == "-":
         output_file = sys.stdout
         close_after = False
@@ -1062,28 +1066,40 @@ def write_csv(relations: list[dict[str, str]], output_path: str) -> None:
         close_after = True
 
     try:
-        writer = csv.DictWriter(output_file, fieldnames=RELATION_FIELDNAMES)
+        writer = csv.DictWriter(
+            output_file,
+            fieldnames=RELATION_FIELDNAMES,
+        )
         writer.writeheader()
 
         for relation in relations:
-            row = {field: relation.get(field, "") for field in RELATION_FIELDNAMES}
+            row = {
+                field: relation.get(field, "")
+                for field in RELATION_FIELDNAMES
+            }
             writer.writerow(row)
     finally:
         if close_after:
             output_file.close()
-
 
 def write_changes_csv(
         old_relations: list[dict[str, str]],
         new_relations: list[dict[str, str]],
         output_path: str,
 ) -> None:
-    old_by_key = {relation_identity(relation): relation for relation in old_relations}
-    new_by_key = {relation_identity(relation): relation for relation in new_relations}
+    ensure_parent_dir(output_path)
+
+    old_by_key = {
+        relation_identity(relation): relation
+        for relation in old_relations
+    }
+    new_by_key = {
+        relation_identity(relation): relation
+        for relation in new_relations
+    }
 
     old_keys = set(old_by_key)
     new_keys = set(new_by_key)
-
     rows: list[dict[str, str]] = []
 
     for key in sorted(new_keys - old_keys):
@@ -1103,14 +1119,18 @@ def write_changes_csv(
         writer.writeheader()
 
         for row in rows:
-            writer.writerow({field: row.get(field, "") for field in fieldnames})
+            writer.writerow(
+                {
+                    field: row.get(field, "")
+                    for field in fieldnames
+                }
+            )
 
     print(
         f"Wrote relationship changes: {output_path} "
         f"({len(rows)} added/removed row(s))",
         file=sys.stderr,
     )
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -1137,12 +1157,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Also treat BOM rows as possible project/version references when "
-            "componentName/componentVersionName exactly match a Black Duck project/version."
+            "componentName/componentVersionName exactly match a Black Duck "
+            "project/version."
         ),
     )
     parser.add_argument(
         "--project-name-contains",
-        help="Optional filter to scan only projects whose names contain this text.",
+        help="Only scan projects whose names contain this text.",
     )
     parser.add_argument(
         "--max-projects",
@@ -1151,8 +1172,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--out",
-        default="parent_projects.csv",
-        help="CSV output path. Default: parent_projects.csv.",
+        default=jira_output_path("parent_projects.csv"),
+        help="Relationship CSV output path.",
     )
     parser.add_argument(
         "--json",
@@ -1161,12 +1182,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--changes-out",
-        help="Optional CSV path for added/removed relationship diff.",
+        default=jira_output_path("parent_project_changes.csv"),
+        help="CSV path for added and removed relationship changes.",
     )
     parser.add_argument(
         "--cache",
-        default="parent_projects_cache.json",
-        help="Cache path for incremental scans. Default: parent_projects_cache.json.",
+        default=jira_output_path(
+            "cache",
+            "parent_projects_cache.json",
+        ),
+        help="Incremental project relationship cache path.",
     )
     parser.add_argument(
         "--no-cache",
@@ -1176,74 +1201,70 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--refresh-all",
         action="store_true",
-        help="Ignore cached scan results and rescan all selected project versions.",
+        help="Ignore cached scan results and rescan all selected versions.",
     )
     parser.add_argument(
         "--refresh-older-than-days",
         type=float,
         default=7.0,
         help=(
-            "Rescan cached entries older than this many days. Default: 7. "
+            "Rescan cached entries older than this many days. "
             "Use -1 to disable age-based refresh."
         ),
     )
     parser.add_argument(
         "--no-refresh-failed",
         action="store_true",
-        help="Do not automatically retry project versions that failed in the previous run.",
+        help="Do not automatically retry previously failed versions.",
     )
     parser.add_argument(
         "--trust-cache-without-update-marker",
         action="store_true",
         help=(
-            "Allow reuse of cached entries even when Black Duck did not provide an "
-            "updated timestamp for the project version. Faster, but less reliable."
+            "Reuse cached entries when Black Duck provides no updated "
+            "timestamp."
         ),
     )
     parser.add_argument(
         "--insecure",
         action="store_true",
-        help="Disable TLS certificate validation. Useful for lab/on-prem testing only.",
+        help="Disable TLS certificate validation.",
     )
     parser.add_argument(
         "--ca-bundle",
-        help=(
-            "Path to a PEM CA bundle to validate the Black Duck TLS certificate. "
-            "Use this instead of --insecure for internal/self-signed CAs."
-        ),
+        help="PEM CA bundle used to validate the Black Duck certificate.",
     )
     parser.add_argument(
         "--timeout",
         type=int,
         default=60,
-        help="HTTP request timeout in seconds. Default: 60.",
+        help="HTTP timeout seconds.",
     )
     parser.add_argument(
         "--retries",
         type=int,
         default=2,
-        help="Retry count for timeout/temporary server errors. Default: 2.",
+        help="Retry count for transient failures.",
     )
     parser.add_argument(
         "--retry-delay",
         type=float,
         default=2.0,
-        help="Base retry delay in seconds. Default: 2.0.",
+        help="Base retry delay seconds.",
     )
     parser.add_argument(
         "--workers",
         type=int,
         default=1,
-        help="Number of concurrent project-version BOM checks. Use 1-4. Default: 1.",
+        help="Concurrent project-version BOM checks. Use 1-4.",
     )
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Print progress/debug details to stderr.",
+        help="Print progress and debugging information.",
     )
 
     return parser.parse_args()
-
 
 def main() -> int:
     args = parse_args()
@@ -1279,7 +1300,10 @@ def main() -> int:
     if args.no_cache:
         cache = new_cache(args.bd_url, args.resolve_bom_names)
         old_relations: list[dict[str, str]] = []
-        scan_plan = [(version_info, "no-cache") for version_info in inventory]
+        scan_plan = [
+            (version_info, "no-cache")
+            for version_info in inventory
+        ]
         reused_count = 0
     else:
         cache = load_cache(
@@ -1290,11 +1314,15 @@ def main() -> int:
 
         old_relations = collect_relations_from_cache(cache, inventory)
 
-        pruned_count = prune_cache_to_current_inventory(cache, inventory)
+        pruned_count = prune_cache_to_current_inventory(
+            cache,
+            inventory,
+        )
+
         if pruned_count:
             print(
-                f"Pruned {pruned_count} cache entrie(s) for project versions "
-                f"not present in the current inventory.",
+                f"Pruned {pruned_count} cache entrie(s) for project "
+                f"versions not present in the current inventory.",
                 file=sys.stderr,
             )
 
@@ -1304,7 +1332,9 @@ def main() -> int:
             refresh_all=args.refresh_all,
             refresh_failed=not args.no_refresh_failed,
             refresh_older_than_days=args.refresh_older_than_days,
-            trust_cache_without_update_marker=args.trust_cache_without_update_marker,
+            trust_cache_without_update_marker=(
+                args.trust_cache_without_update_marker
+            ),
         )
 
     print(
@@ -1330,7 +1360,10 @@ def main() -> int:
 
     parent_count = len(
         {
-            (relation["parent_project"], relation["parent_version"])
+            (
+                relation["parent_project"],
+                relation["parent_version"],
+            )
             for relation in relations
         }
     )
@@ -1340,6 +1373,7 @@ def main() -> int:
             json.dump(relations, sys.stdout, indent=2)
             print()
         else:
+            ensure_parent_dir(args.out)
             with open(args.out, "w", encoding="utf-8") as output_file:
                 json.dump(relations, output_file, indent=2)
     else:
@@ -1363,12 +1397,12 @@ def main() -> int:
 
     if not relations and not args.resolve_bom_names:
         print(
-            "No API-href relationships found. Try again with --resolve-bom-names.",
+            "No API-href relationships found. "
+            "Try again with --resolve-bom-names.",
             file=sys.stderr,
         )
 
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

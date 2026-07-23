@@ -17,6 +17,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from harness.paths import ensure_parent_dir, jira_output_path, package_path
+
 
 REQUIRED_FINDING_FIELDS = [
     "parent_project",
@@ -37,66 +39,77 @@ REQUIRED_FINDING_FIELDS = [
     "rollup_key",
 ]
 
-DEFAULT_CONFIG = {
-    "jira": {
-        "url": "",
-        "project_key": "",
-        "issue_type": "Task",
-        "api_version": "2",
-        "auth_mode": "basic",
-        "verify_tls": True,
-    },
-    "issue": {
-        "summary_template": (
-            "[Black Duck] {severity} {vulnerability} in {component} - "
-            "{parent_project} {parent_version}"
-        ),
-        "labels": ["blackduck", "subproject_rollup"],
-        "priority_by_severity": {
-            "CRITICAL": "Highest",
-            "HIGH": "High",
-            "MEDIUM": "Medium",
-            "LOW": "Low",
-        },
-        "status_by_severity": {
-            "CRITICAL": "Critical",
-            "HIGH": "High",
-            "MEDIUM": "Medium",
-            "LOW": "Low",
-        },
-        "additional_fields": {},
-    },
-    "dedupe": {
-        "label_prefix": "bd_rollup_",
-        "hash_length": 24,
-    },
-    "ai": {
-        "enabled": False,
-        "base_url": "https://api.openai.com/v1",
-        "model": "gpt-4o-mini",
-        "api_key_env": "OPENAI_API_KEY",
-    },
-    "hierarchy": {
-        "epic_issue_type": "Epic",
-        "story_issue_type": "Task",
-        "vulnerability_issue_type": "Subtask",
-        "story_parent_mode": "jira_parent",
-        "vulnerability_parent_mode": "jira_parent",
-        "issue_link_type": "Relates",
-        "epic_link_field": "",
-        "labels": {
-            "epic": ["bd_rollup_cve"],
-            "story": ["bd_rollup_project_version"],
-            "vulnerability": ["bd_rollup_vuln"],
-        },
-        "additional_fields": {
-            "epic": {},
-            "story": {},
-            "vulnerability": {},
-        },
-    },
-}
+OPTIONAL_FINDING_FIELDS = [
+    "component_version_href",
+    "cvss_vector",
+    "entity",
+]
 
+DEFAULT_CONFIG = {'jira': {'url': '',
+          'project_key': '',
+          'issue_type': 'Task',
+          'api_version': '2',
+          'auth_mode': 'basic',
+          'verify_tls': True},
+ 'issue': {'summary_template': 'Black Duck: {alert_severity} Alert - {subproject} - '
+                               'version {subproject_version} - {component} version '
+                               '{component_version}',
+           'labels': ['blackduck', 'subproject_rollup', 'BDAlert'],
+           'priority_by_severity': {'CRITICAL': 'Highest',
+                                    'HIGH': 'High',
+                                    'MEDIUM': 'Medium',
+                                    'LOW': 'Low'},
+           'status_by_severity': {'CRITICAL': 'Critical',
+                                  'HIGH': 'High',
+                                  'MEDIUM': 'Medium',
+                                  'LOW': 'Low'},
+           'additional_fields': {},
+           'alert_severity_by_severity': {'CRITICAL': 'BLOCKER',
+                                          'HIGH': 'HIGH',
+                                          'MEDIUM': 'MEDIUM',
+                                          'LOW': 'LOW',
+                                          'UNKNOWN': 'UNKNOWN'}},
+ 'dedupe': {'label_prefix': 'bd_rollup_', 'hash_length': 24},
+ 'ai': {'enabled': False,
+        'base_url': 'https://api.openai.com/v1',
+        'model': 'gpt-4o-mini',
+        'api_key_env': 'OPENAI_API_KEY'},
+ 'hierarchy': {'epic_issue_type': 'Epic',
+               'story_issue_type': 'Task',
+               'vulnerability_issue_type': 'Subtask',
+               'story_parent_mode': 'jira_parent',
+               'vulnerability_parent_mode': 'jira_parent',
+               'issue_link_type': 'Relates',
+               'epic_link_field': '',
+               'sync_existing_fields': False,
+               'labels': {'epic': ['bd_rollup_cve'],
+                          'story': ['bd_rollup_project_version'],
+                          'vulnerability': ['bd_rollup_vuln']},
+               'additional_fields': {'epic': {}, 'story': {}, 'vulnerability': {}},
+               'field_mappings': {'project_name': {'field_id': '',
+                                                   'source': 'affected_project',
+                                                   'node_types': ['story'],
+                                                   'value_type': 'text'},
+                                  'project_version': {'field_id': '',
+                                                      'source': 'affected_version',
+                                                      'node_types': ['story'],
+                                                      'value_type': 'text'},
+                                  'cvss_vector': {'field_id': '',
+                                                  'source': 'cvss_vector',
+                                                  'node_types': ['story'],
+                                                  'value_type': 'text'},
+                                  'cvss_score': {'field_id': '',
+                                                 'source': 'stats.max_score',
+                                                 'node_types': ['story'],
+                                                 'value_type': 'number'},
+                                  'entity': {'field_id': '',
+                                             'source': 'entity',
+                                             'node_types': ['story'],
+                                             'value_type': 'text'}},
+               'summary_templates': {'story': 'Black Duck: {alert_severity} Alert - '
+                                              '{affected_project} - version '
+                                              '{affected_version} - '
+                                              '{component_summary}'}}}
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -127,14 +140,22 @@ def load_json_file(path: str, default: dict[str, Any]) -> dict[str, Any]:
     return deep_merge(default, loaded)
 
 
-def save_json_file(path: str, payload: dict[str, Any]) -> None:
+def save_json_file(
+        path: str,
+        payload: dict[str, Any],
+) -> None:
+    ensure_parent_dir(path)
     tmp_path = f"{path}.tmp"
 
     with open(tmp_path, "w", encoding="utf-8") as output_file:
-        json.dump(payload, output_file, indent=2, sort_keys=True)
+        json.dump(
+            payload,
+            output_file,
+            indent=2,
+            sort_keys=True,
+        )
 
     os.replace(tmp_path, path)
-
 
 def load_state(path: str) -> dict[str, Any]:
     if not path or not os.path.exists(path):
@@ -231,8 +252,78 @@ def configured_status_for_severity(severity: str, config: dict[str, Any]) -> str
     return str(status_by_severity.get(str(severity or "").strip().upper()) or "").strip()
 
 
-def normalize_finding(row: dict[str, str]) -> dict[str, str]:
-    normalized = {field: str(row.get(field, "") or "").strip() for field in REQUIRED_FINDING_FIELDS}
+def looks_like_resource_url(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+
+    return (
+        text.startswith("http://")
+        or text.startswith("https://")
+        or text.startswith("/api/")
+    )
+
+
+def sanitize_jira_label_preserve_case(
+        value: str,
+) -> str:
+    value = str(value or "").strip()
+    value = re.sub(
+        r"[^A-Za-z0-9_-]+",
+        "_",
+        value,
+    )
+    value = re.sub(r"_+", "_", value)
+
+    return value.strip("_") or "unknown"
+
+
+def readable_vulnerability_label(
+        value: str,
+) -> str:
+    value = str(value or "").strip()
+
+    if not value or value.upper() == "UNKNOWN":
+        return ""
+
+    return sanitize_jira_label_preserve_case(value)
+
+def configured_alert_severity(
+        severity: str,
+        config: dict[str, Any],
+) -> str:
+    normalized = str(severity or "").strip().upper()
+    issue_config = config.get("issue", {})
+    mapping = issue_config.get(
+        "alert_severity_by_severity",
+        {},
+    )
+
+    if isinstance(mapping, dict):
+        mapped = str(mapping.get(normalized) or "").strip()
+
+        if mapped:
+            return mapped
+
+    return normalized or "UNKNOWN"
+
+def normalize_finding(
+        row: dict[str, str],
+) -> dict[str, str]:
+    normalized = {
+        field: str(row.get(field, "") or "").strip()
+        for field in (
+            REQUIRED_FINDING_FIELDS + OPTIONAL_FINDING_FIELDS
+        )
+    }
+
+    if looks_like_resource_url(
+        normalized["component_version"]
+    ):
+        if not normalized["component_version_href"]:
+            normalized["component_version_href"] = (
+                normalized["component_version"]
+            )
+
+        normalized["component_version"] = ""
 
     if not normalized["rollup_key"]:
         normalized["rollup_key"] = "|".join(
@@ -242,15 +333,19 @@ def normalize_finding(row: dict[str, str]) -> dict[str, str]:
                 normalized["subproject"],
                 normalized["subproject_version"],
                 normalized["component"],
-                normalized["component_version"],
+                (
+                    normalized["component_version"]
+                    or normalized["component_version_href"]
+                ),
                 normalized["vulnerability"],
             ]
         )
 
-    normalized["severity"] = normalized["severity"].upper()
+    normalized["severity"] = (
+        normalized["severity"].upper()
+    )
 
     return normalized
-
 
 def read_findings(path: str) -> list[dict[str, str]]:
     if path == "-":
@@ -290,7 +385,10 @@ def read_findings(path: str) -> list[dict[str, str]]:
     return deduped
 
 
-def finding_context(finding: dict[str, str], config: dict[str, Any]) -> dict[str, Any]:
+def finding_context(
+        finding: dict[str, str],
+        config: dict[str, Any],
+) -> dict[str, Any]:
     rollup_key = finding["rollup_key"]
     external_id = rollup_external_id(rollup_key)
     label = rollup_label(rollup_key, config)
@@ -299,9 +397,12 @@ def finding_context(finding: dict[str, str], config: dict[str, Any]) -> dict[str
     context["rollup_external_id"] = external_id
     context["rollup_label"] = label
     context["short_rollup_hash"] = external_id[:12]
+    context["alert_severity"] = configured_alert_severity(
+        finding.get("severity", ""),
+        config,
+    )
 
     return context
-
 
 def validate_rollup_key_hash(value: str) -> str:
     normalized = str(value or "").strip().lower()
@@ -491,20 +592,42 @@ def build_issue_payload(
     issue_config = config.get("issue", {})
     jira_config = config.get("jira", {})
 
-    summary_template = str(issue_config.get("summary_template") or DEFAULT_CONFIG["issue"]["summary_template"])
-    summary = truncate(safe_format(summary_template, context), 255)
+    summary_template = str(
+        issue_config.get("summary_template")
+        or DEFAULT_CONFIG["issue"]["summary_template"]
+    )
+    summary = truncate(
+        safe_format(summary_template, context),
+        255,
+    )
 
     base_labels = issue_config.get("labels", [])
+
     if not isinstance(base_labels, list):
         raise RuntimeError("issue.labels must be a list")
 
-    labels = [sanitize_jira_label(str(label)) for label in base_labels]
-    labels.append(context["rollup_label"])
+    labels = {
+        sanitize_jira_label_preserve_case(
+            str(label)
+        )
+        for label in base_labels
+        if str(label or "").strip()
+    }
+    labels.add(context["rollup_label"])
 
     if finding["severity"]:
-        labels.append(sanitize_jira_label(f"bd_sev_{finding['severity']}"))
+        labels.add(
+            sanitize_jira_label(
+                f"bd_sev_{finding['severity']}"
+            )
+        )
 
-    labels = sorted(set(label for label in labels if label))
+    vulnerability_label = readable_vulnerability_label(
+        finding.get("vulnerability", "")
+    )
+
+    if vulnerability_label:
+        labels.add(vulnerability_label)
 
     ai_description = maybe_generate_ai_description(
         finding=finding,
@@ -514,43 +637,66 @@ def build_issue_payload(
         debug=debug,
     )
 
-    description_text = ai_description or build_wiki_description(finding, context)
+    description_text = (
+        ai_description
+        or build_wiki_description(finding, context)
+    )
 
     fields: dict[str, Any] = {
         "project": {
             "key": str(jira_config["project_key"]),
         },
         "issuetype": {
-            "name": str(jira_config.get("issue_type") or "Task"),
+            "name": str(
+                jira_config.get("issue_type")
+                or "Task"
+            ),
         },
         "summary": summary,
-        "labels": labels,
+        "labels": sorted(
+            labels,
+            key=lambda value: value.lower(),
+        ),
     }
 
     if description_format == "adf":
-        fields["description"] = text_to_adf_paragraphs(description_text)
+        fields["description"] = text_to_adf_paragraphs(
+            description_text
+        )
     else:
         fields["description"] = description_text
 
-    priority_by_severity = issue_config.get("priority_by_severity", {})
+    priority_by_severity = issue_config.get(
+        "priority_by_severity",
+        {},
+    )
+
     if isinstance(priority_by_severity, dict):
-        priority_name = priority_by_severity.get(finding["severity"])
+        priority_name = priority_by_severity.get(
+            finding["severity"]
+        )
+
         if priority_name:
             fields["priority"] = {
                 "name": str(priority_name),
             }
 
-    additional_fields = issue_config.get("additional_fields", {})
+    additional_fields = issue_config.get(
+        "additional_fields",
+        {},
+    )
+
     if isinstance(additional_fields, dict):
-        rendered_additional_fields = render_value(additional_fields, context)
-        fields.update(rendered_additional_fields)
+        fields.update(
+            render_value(
+                additional_fields,
+                context,
+            )
+        )
 
-    payload = {
+    return {
         "fields": fields,
-    }
-
-    return payload, context["rollup_label"]
-
+    }, context["rollup_label"]
 
 class JiraClient:
     def __init__(
@@ -743,7 +889,10 @@ class JiraClient:
 
         return found_by_label
 
-    def create_issue(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def create_issue(
+            self,
+            payload: dict[str, Any],
+    ) -> dict[str, Any]:
         create_path = f"/rest/api/{self.api_version}/issue"
         return self.request_json(
             "POST",
@@ -751,6 +900,28 @@ class JiraClient:
             payload=payload,
             expected_statuses={200, 201},
         )
+
+    def update_issue_fields(
+            self,
+            issue_key: str,
+            fields: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not fields:
+            return {}
+
+        issue_path = (
+            f"/rest/api/{self.api_version}/issue/{issue_key}"
+        )
+        response = self.request_json(
+            "PUT",
+            issue_path,
+            payload={
+                "fields": fields,
+            },
+            expected_statuses={200, 204},
+        )
+
+        return response if isinstance(response, dict) else {}
 
     def get_issue_status(self, issue_key: str) -> str:
         issue_path = f"/rest/api/{self.api_version}/issue/{issue_key}"
@@ -957,9 +1128,14 @@ def update_state_issue(
     state["updated_at"] = now_iso()
 
 
-def write_results_csv(path: str, rows: list[dict[str, Any]]) -> None:
+def write_results_csv(
+        path: str,
+        rows: list[dict[str, Any]],
+) -> None:
     if not path:
         return
+
+    ensure_parent_dir(path)
 
     fieldnames = [
         "action",
@@ -975,17 +1151,31 @@ def write_results_csv(path: str, rows: list[dict[str, Any]]) -> None:
         "vulnerability",
         "severity",
         "score",
+        "cvss_vector",
+        "entity",
         "rollup_key",
         "message",
     ]
 
-    with open(path, "w", newline="", encoding="utf-8") as output_file:
-        writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+    with open(
+        path,
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as output_file:
+        writer = csv.DictWriter(
+            output_file,
+            fieldnames=fieldnames,
+        )
         writer.writeheader()
 
         for row in rows:
-            writer.writerow({field: row.get(field, "") for field in fieldnames})
-
+            writer.writerow(
+                {
+                    field: row.get(field, "")
+                    for field in fieldnames
+                }
+            )
 
 def load_hierarchy_plan(path: str) -> dict[str, Any]:
     if not path or not os.path.exists(path):
@@ -1155,38 +1345,72 @@ def hierarchy_labels_for_node(
     node_type = str(node.get("node_type") or "")
     hierarchy_config = config.get("hierarchy", {})
     issue_config = config.get("issue", {})
-
-    labels: list[str] = []
+    labels: set[str] = set()
 
     base_issue_labels = issue_config.get("labels", [])
+
     if isinstance(base_issue_labels, list):
-        labels.extend(str(label) for label in base_issue_labels)
+        labels.update(
+            sanitize_jira_label_preserve_case(
+                str(label)
+            )
+            for label in base_issue_labels
+            if str(label or "").strip()
+        )
 
     node_labels = node.get("labels", [])
+
     if isinstance(node_labels, list):
-        labels.extend(str(label) for label in node_labels)
-
-    hierarchy_label_map = hierarchy_config.get("labels", {})
-    if isinstance(hierarchy_label_map, dict):
-        configured_type_labels = hierarchy_label_map.get(node_type, [])
-        if isinstance(configured_type_labels, list):
-            labels.extend(str(label) for label in configured_type_labels)
-
-    labels.append(node_lookup_label(node))
-
-    context = node_context(node)
-    severity = str(context.get("severity") or "").strip().upper()
-    if severity:
-        labels.append(f"bd_sev_{severity}")
-
-    return sorted(
-        {
-            sanitize_jira_label(label)
-            for label in labels
+        labels.update(
+            sanitize_jira_label_preserve_case(
+                str(label)
+            )
+            for label in node_labels
             if str(label or "").strip()
-        }
+        )
+
+    hierarchy_label_map = hierarchy_config.get(
+        "labels",
+        {},
     )
 
+    if isinstance(hierarchy_label_map, dict):
+        configured_type_labels = (
+            hierarchy_label_map.get(node_type, [])
+        )
+
+        if isinstance(configured_type_labels, list):
+            labels.update(
+                sanitize_jira_label_preserve_case(
+                    str(label)
+                )
+                for label in configured_type_labels
+                if str(label or "").strip()
+            )
+
+    labels.add(node_lookup_label(node))
+
+    context = node_context(node)
+    severity = str(
+        context.get("severity") or ""
+    ).strip().upper()
+
+    if severity:
+        labels.add(
+            sanitize_jira_label(f"bd_sev_{severity}")
+        )
+
+    vulnerability_label = readable_vulnerability_label(
+        str(context.get("vulnerability") or "")
+    )
+
+    if vulnerability_label:
+        labels.add(vulnerability_label)
+
+    return sorted(
+        labels,
+        key=lambda value: value.lower(),
+    )
 
 def hierarchy_node_description(node: dict[str, Any]) -> str:
     description = str(node.get("description") or "").strip()
@@ -1255,6 +1479,120 @@ def hierarchy_additional_fields_for_node(
     return render_value(additional_fields, hierarchy_render_context(node))
 
 
+def hierarchy_mapped_source_value(
+        node: dict[str, Any],
+        source: str,
+) -> Any:
+    source = str(source or "").strip()
+
+    if source.startswith("stats."):
+        return node_stats(node).get(
+            source.split(".", 1)[1],
+            "",
+        )
+
+    if source.startswith("context."):
+        return node_context(node).get(
+            source.split(".", 1)[1],
+            "",
+        )
+
+    if source in node_context(node):
+        return node_context(node).get(source, "")
+
+    return node.get(source, "")
+
+
+def hierarchy_managed_fields_for_node(
+        node: dict[str, Any],
+        config: dict[str, Any],
+) -> dict[str, Any]:
+    hierarchy_config = config.get("hierarchy", {})
+    mappings = hierarchy_config.get("field_mappings", {})
+
+    if not isinstance(mappings, dict):
+        return {}
+
+    node_type = str(node.get("node_type") or "")
+    fields: dict[str, Any] = {}
+
+    for logical_name, raw_mapping in mappings.items():
+        if isinstance(raw_mapping, str):
+            mapping: dict[str, Any] = {
+                "field_id": raw_mapping,
+                "source": logical_name,
+                "value_type": "text",
+            }
+        elif isinstance(raw_mapping, dict):
+            mapping = raw_mapping
+        else:
+            continue
+
+        field_id = str(
+            mapping.get("field_id") or ""
+        ).strip()
+
+        if not field_id:
+            continue
+
+        node_types = mapping.get(
+            "node_types",
+            ["story"],
+        )
+
+        if isinstance(node_types, list):
+            allowed_node_types = {
+                str(value)
+                for value in node_types
+            }
+
+            if node_type not in allowed_node_types:
+                continue
+
+        source_name = str(
+            mapping.get("source") or logical_name
+        )
+        value = hierarchy_mapped_source_value(
+            node,
+            source_name,
+        )
+
+        if value is None:
+            continue
+
+        if isinstance(value, str) and not value.strip():
+            continue
+
+        if isinstance(value, list) and not value:
+            continue
+
+        value_type = str(
+            mapping.get("value_type") or "text"
+        ).strip().lower()
+
+        if value_type == "number":
+            try:
+                fields[field_id] = float(value)
+            except (TypeError, ValueError):
+                continue
+        elif value_type == "option":
+            fields[field_id] = {
+                "value": str(value),
+            }
+        elif value_type == "array":
+            if isinstance(value, list):
+                fields[field_id] = value
+            else:
+                fields[field_id] = [
+                    item.strip()
+                    for item in str(value).split(";")
+                    if item.strip()
+                ]
+        else:
+            fields[field_id] = str(value)
+
+    return fields
+
 def hierarchy_severity_for_node(node: dict[str, Any]) -> str:
     context = node_context(node)
     severity = str(context.get("severity") or "").strip().upper()
@@ -1292,6 +1630,126 @@ def hierarchy_target_status_for_node(
     )
 
 
+def hierarchy_component_summary(
+        node: dict[str, Any],
+) -> str:
+    context = node_context(node)
+    stats = node_stats(node)
+
+    try:
+        component_count = int(
+            stats.get("component_count") or 0
+        )
+    except (TypeError, ValueError):
+        component_count = 0
+
+    raw_components = context.get("components", [])
+    raw_versions = context.get("component_versions", [])
+
+    if isinstance(raw_components, list):
+        components = [
+            str(value).strip()
+            for value in raw_components
+            if str(value or "").strip()
+        ]
+    else:
+        components = [
+            value.strip()
+            for value in str(
+                raw_components or ""
+            ).split(";")
+            if value.strip()
+        ]
+
+    if isinstance(raw_versions, list):
+        versions = [
+            str(value).strip()
+            for value in raw_versions
+            if (
+                str(value or "").strip()
+                and not looks_like_resource_url(value)
+            )
+        ]
+    else:
+        versions = [
+            value.strip()
+            for value in str(
+                raw_versions or ""
+            ).split(";")
+            if (
+                value.strip()
+                and not looks_like_resource_url(value)
+            )
+        ]
+
+    if component_count == 1:
+        component = (
+            components[0]
+            if len(components) == 1
+            else str(
+                context.get("component") or ""
+            ).strip()
+        )
+        version = (
+            versions[0]
+            if len(versions) == 1
+            else str(
+                context.get("component_version")
+                or ""
+            ).strip()
+        )
+
+        if looks_like_resource_url(version):
+            version = ""
+
+        component = component or "affected component"
+
+        if version:
+            return f"{component} version {version}"
+
+        return component
+
+    if component_count > 1:
+        return f"{component_count} affected components"
+
+    return "affected component"
+
+def hierarchy_summary_for_node(
+        node: dict[str, Any],
+        config: dict[str, Any],
+) -> str:
+    hierarchy_config = config.get("hierarchy", {})
+    templates = hierarchy_config.get(
+        "summary_templates",
+        {},
+    )
+    node_type = str(node.get("node_type") or "")
+
+    if not isinstance(templates, dict):
+        templates = {}
+
+    template = str(templates.get(node_type) or "").strip()
+
+    if not template:
+        return truncate(
+            str(node.get("summary") or node_external_id(node)),
+            255,
+        )
+
+    context = hierarchy_render_context(node)
+    context["alert_severity"] = configured_alert_severity(
+        hierarchy_severity_for_node(node),
+        config,
+    )
+    context["component_summary"] = (
+        hierarchy_component_summary(node)
+    )
+
+    return truncate(
+        safe_format(template, context),
+        255,
+    )
+
 def build_hierarchy_issue_payload(
         node: dict[str, Any],
         config: dict[str, Any],
@@ -1300,11 +1758,16 @@ def build_hierarchy_issue_payload(
     jira_config = config.get("jira", {})
     issue_config = config.get("issue", {})
 
-    project_key = str(jira_config.get("project_key") or "").strip()
-    if not project_key:
-        raise RuntimeError("jira.project_key must be set in the config file")
+    project_key = str(
+        jira_config.get("project_key") or ""
+    ).strip()
 
-    summary = truncate(str(node.get("summary") or node_external_id(node)), 255)
+    if not project_key:
+        raise RuntimeError(
+            "jira.project_key must be set in the config file"
+        )
+
+    summary = hierarchy_summary_for_node(node, config)
     description_text = hierarchy_node_description(node)
 
     fields: dict[str, Any] = {
@@ -1312,33 +1775,55 @@ def build_hierarchy_issue_payload(
             "key": project_key,
         },
         "issuetype": {
-            "name": hierarchy_issue_type_for_node(node, config),
+            "name": hierarchy_issue_type_for_node(
+                node,
+                config,
+            ),
         },
         "summary": summary,
-        "labels": hierarchy_labels_for_node(node, config),
+        "labels": hierarchy_labels_for_node(
+            node,
+            config,
+        ),
     }
 
     if description_format == "adf":
-        fields["description"] = text_to_adf_paragraphs(description_text)
+        fields["description"] = text_to_adf_paragraphs(
+            description_text
+        )
     else:
         fields["description"] = description_text
 
     severity = hierarchy_severity_for_node(node)
-    priority_by_severity = issue_config.get("priority_by_severity", {})
+    priority_by_severity = issue_config.get(
+        "priority_by_severity",
+        {},
+    )
 
     if severity and isinstance(priority_by_severity, dict):
         priority_name = priority_by_severity.get(severity)
+
         if priority_name:
             fields["priority"] = {
                 "name": str(priority_name),
             }
 
-    fields.update(hierarchy_additional_fields_for_node(node, config))
+    fields.update(
+        hierarchy_additional_fields_for_node(
+            node,
+            config,
+        )
+    )
+    fields.update(
+        hierarchy_managed_fields_for_node(
+            node,
+            config,
+        )
+    )
 
     return {
         "fields": fields,
     }
-
 
 def hierarchy_parent_mode_for_node(
         node: dict[str, Any],
@@ -1447,9 +1932,14 @@ def update_state_link(
     state["updated_at"] = now_iso()
 
 
-def write_hierarchy_results_csv(path: str, rows: list[dict[str, Any]]) -> None:
+def write_hierarchy_results_csv(
+        path: str,
+        rows: list[dict[str, Any]],
+) -> None:
     if not path:
         return
+
+    ensure_parent_dir(path)
 
     fieldnames = [
         "action",
@@ -1469,30 +1959,59 @@ def write_hierarchy_results_csv(path: str, rows: list[dict[str, Any]]) -> None:
         "vulnerability",
         "severity",
         "score",
+        "cvss_vector",
+        "entity",
         "message",
     ]
 
-    with open(path, "w", newline="", encoding="utf-8") as output_file:
-        writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+    with open(
+        path,
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as output_file:
+        writer = csv.DictWriter(
+            output_file,
+            fieldnames=fieldnames,
+        )
         writer.writeheader()
 
         for row in rows:
-            writer.writerow({field: row.get(field, "") for field in fieldnames})
+            writer.writerow(
+                {
+                    field: row.get(field, "")
+                    for field in fieldnames
+                }
+            )
 
-
-def process_hierarchy_plan(args: argparse.Namespace) -> int:
+def process_hierarchy_plan(
+        args: argparse.Namespace,
+) -> int:
     config = load_json_file(args.config, DEFAULT_CONFIG)
     state = load_state(args.state)
+
+    hierarchy_config = config.get("hierarchy", {})
+    sync_existing_fields = bool(
+        args.sync_existing_fields
+        or hierarchy_config.get(
+            "sync_existing_fields",
+            False,
+        )
+    )
 
     plan = load_hierarchy_plan(args.hierarchy_plan)
     all_nodes = list(plan.get("nodes", []))
     nodes = filter_hierarchy_nodes(all_nodes, args)
 
     jira_config = config.get("jira", {})
-    project_key = str(jira_config.get("project_key") or "").strip()
+    project_key = str(
+        jira_config.get("project_key") or ""
+    ).strip()
 
     if not project_key:
-        raise RuntimeError("jira.project_key must be set in the config file")
+        raise RuntimeError(
+            "jira.project_key must be set in the config file"
+        )
 
     jira_client = build_jira_client(
         config=config,
@@ -1507,7 +2026,8 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
     if not jira_client.enabled():
         dry_run = True
         print(
-            "Jira URL/auth not fully configured; running in dry-run mode.",
+            "Jira URL/auth not fully configured; "
+            "running in dry-run mode.",
             file=sys.stderr,
         )
 
@@ -1515,7 +2035,6 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
         node_external_id(node): node
         for node in nodes
     }
-
     labels_by_external_id = {
         external_id: node_lookup_label(node)
         for external_id, node in node_by_external_id.items()
@@ -1524,9 +2043,16 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
     missing_external_ids: list[str] = []
 
     for external_id in node_by_external_id:
-        cached_issue = state_issue_for_external_id(state, external_id)
+        cached_issue = state_issue_for_external_id(
+            state,
+            external_id,
+        )
 
-        if cached_issue and str(cached_issue.get("issue_key") or "") and not args.refresh_existing:
+        if (
+            cached_issue
+            and str(cached_issue.get("issue_key") or "")
+            and not args.refresh_existing
+        ):
             continue
 
         missing_external_ids.append(external_id)
@@ -1550,8 +2076,10 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
     issue_keys_by_external_id: dict[str, str] = {}
 
     created_count = 0
-    skipped_existing_count = 0
     planned_create_count = 0
+    existing_count = 0
+    updated_count = 0
+    planned_update_count = 0
     linked_count = 0
     planned_link_count = 0
     skipped_link_count = 0
@@ -1562,7 +2090,14 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
         parent_external_id = node_parent_external_id(node)
         lookup_label = node_lookup_label(node)
         context = node_context(node)
-        target_status = hierarchy_target_status_for_node(node, config)
+        target_status = hierarchy_target_status_for_node(
+            node,
+            config,
+        )
+        managed_fields = hierarchy_managed_fields_for_node(
+            node,
+            config,
+        )
 
         result_row: dict[str, Any] = {
             "action": "",
@@ -1573,30 +2108,114 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
             "parent_external_id": parent_external_id,
             "lookup_label": lookup_label,
             "summary": str(node.get("summary") or ""),
-            "parent_project": context.get("parent_project", ""),
-            "parent_version": context.get("parent_version", ""),
+            "parent_project": context.get(
+                "parent_project",
+                "",
+            ),
+            "parent_version": context.get(
+                "parent_version",
+                "",
+            ),
             "subproject": context.get("subproject", ""),
-            "subproject_version": context.get("subproject_version", ""),
+            "subproject_version": context.get(
+                "subproject_version",
+                "",
+            ),
             "component": context.get("component", ""),
-            "component_version": context.get("component_version", ""),
-            "vulnerability": context.get("vulnerability", ""),
+            "component_version": context.get(
+                "component_version",
+                "",
+            ),
+            "vulnerability": context.get(
+                "vulnerability",
+                "",
+            ),
             "severity": context.get("severity", ""),
             "score": context.get("score", ""),
+            "cvss_vector": context.get(
+                "cvss_vector",
+                "",
+            ),
+            "entity": context.get("entity", ""),
             "message": "",
         }
 
-        cached_issue = state_issue_for_external_id(state, external_id)
+        cached_issue = state_issue_for_external_id(
+            state,
+            external_id,
+        )
 
-        if cached_issue and str(cached_issue.get("issue_key") or "") and not args.refresh_existing:
-            issue_key = str(cached_issue.get("issue_key") or "")
+        if (
+            cached_issue
+            and str(cached_issue.get("issue_key") or "")
+            and not args.refresh_existing
+        ):
+            issue_key = str(
+                cached_issue.get("issue_key") or ""
+            )
             issue_keys_by_external_id[external_id] = issue_key
 
-            result_row["action"] = "skip_existing_state"
             result_row["issue_key"] = issue_key
-            result_row["jira_status"] = str(cached_issue.get("status") or "")
-            result_row["message"] = "Found in local state cache"
+            result_row["jira_status"] = str(
+                cached_issue.get("status") or ""
+            )
+            existing_count += 1
 
-            skipped_existing_count += 1
+            if sync_existing_fields and managed_fields:
+                if dry_run:
+                    result_row["action"] = (
+                        "would_update_existing_fields"
+                    )
+                    result_row["message"] = json.dumps(
+                        {
+                            "issue_key": issue_key,
+                            "managed_fields": managed_fields,
+                        },
+                        sort_keys=True,
+                    )
+                    planned_update_count += 1
+                else:
+                    try:
+                        jira_client.update_issue_fields(
+                            issue_key=issue_key,
+                            fields=managed_fields,
+                        )
+                        result_row["action"] = (
+                            "updated_existing_fields"
+                        )
+                        result_row["message"] = (
+                            f"Updated managed fields on "
+                            f"Jira issue {issue_key}"
+                        )
+                        updated_count += 1
+
+                        update_state_issue(
+                            state=state,
+                            external_id=external_id,
+                            rollup_key=node_rollup_key(node),
+                            rollup_label_value=lookup_label,
+                            issue_key=issue_key,
+                            status=result_row["jira_status"],
+                            action=result_row["action"],
+                            node_type=str(
+                                node.get("node_type") or ""
+                            ),
+                            summary=str(
+                                node.get("summary") or ""
+                            ),
+                        )
+                    except RuntimeError as error:
+                        result_row["action"] = (
+                            "existing_field_update_error"
+                        )
+                        result_row["message"] = str(error)
+                        error_count += 1
+            else:
+                result_row["action"] = "skip_existing_state"
+                result_row["message"] = (
+                    "Found in local state cache"
+                )
+
             results.append(result_row)
             continue
 
@@ -1606,30 +2225,72 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
             issue_key = str(existing_issue.get("key") or "")
             issue_keys_by_external_id[external_id] = issue_key
 
-            result_row["action"] = "skip_existing_jira"
             result_row["issue_key"] = issue_key
-            result_row["jira_status"] = str(existing_issue.get("status") or "")
-            result_row["message"] = "Found in Jira by hierarchy lookup label"
+            result_row["jira_status"] = str(
+                existing_issue.get("status") or ""
+            )
+            existing_count += 1
+            messages = [
+                "Found in Jira by hierarchy lookup label"
+            ]
+            fields_updated = False
+            status_updated = False
+            update_failed = False
+
+            if sync_existing_fields and managed_fields:
+                try:
+                    jira_client.update_issue_fields(
+                        issue_key=issue_key,
+                        fields=managed_fields,
+                    )
+                    fields_updated = True
+                    updated_count += 1
+                    messages.append("updated managed fields")
+                except RuntimeError as error:
+                    update_failed = True
+                    error_count += 1
+                    messages.append(
+                        f"managed field update failed: {error}"
+                    )
 
             if target_status and issue_key:
                 try:
-                    transitioned_status = jira_client.transition_issue_to_status(
-                        issue_key=issue_key,
-                        target_status=target_status,
+                    transitioned_status = (
+                        jira_client.transition_issue_to_status(
+                            issue_key=issue_key,
+                            target_status=target_status,
+                        )
                     )
-                    result_row["action"] = "updated_existing_status"
-                    result_row["jira_status"] = transitioned_status
-                    result_row["message"] = (
-                        f"Found in Jira by hierarchy lookup label and moved to "
-                        f"{transitioned_status}"
+                    result_row["jira_status"] = (
+                        transitioned_status
                     )
-                except RuntimeError as transition_error:
-                    result_row["action"] = "existing_status_error"
-                    result_row["message"] = (
-                        f"Found in Jira by hierarchy lookup label, but failed moving it "
-                        f"to {target_status}: {transition_error}"
+                    status_updated = True
+                    messages.append(
+                        f"moved to {transitioned_status}"
                     )
+                except RuntimeError as error:
+                    update_failed = True
                     error_count += 1
+                    messages.append(
+                        f"status update failed: {error}"
+                    )
+
+            if update_failed:
+                result_row["action"] = "existing_update_error"
+            elif fields_updated and status_updated:
+                result_row["action"] = "updated_existing"
+            elif fields_updated:
+                result_row["action"] = (
+                    "updated_existing_fields"
+                )
+            elif status_updated:
+                result_row["action"] = (
+                    "updated_existing_status"
+                )
+            else:
+                result_row["action"] = "skip_existing_jira"
+
+            result_row["message"] = "; ".join(messages)
 
             update_state_issue(
                 state=state,
@@ -1637,13 +2298,12 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
                 rollup_key=node_rollup_key(node),
                 rollup_label_value=lookup_label,
                 issue_key=issue_key,
-                status=str(result_row.get("jira_status") or ""),
-                action=str(result_row.get("action") or "skip_existing_jira"),
+                status=result_row["jira_status"],
+                action=result_row["action"],
                 node_type=str(node.get("node_type") or ""),
                 summary=str(node.get("summary") or ""),
             )
 
-            skipped_existing_count += 1
             results.append(result_row)
             continue
 
@@ -1653,13 +2313,23 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
             description_format=args.description_format,
         )
 
-        parent_issue_key = issue_keys_by_external_id.get(parent_external_id, "")
+        parent_issue_key = issue_keys_by_external_id.get(
+            parent_external_id,
+            "",
+        )
 
-        if parent_external_id and hierarchy_parent_mode_for_node(node, config) != "issue_link":
+        if (
+            parent_external_id
+            and hierarchy_parent_mode_for_node(
+                node,
+                config,
+            ) != "issue_link"
+        ):
             if not parent_issue_key:
                 result_row["action"] = "error"
                 result_row["message"] = (
-                    f"Parent issue key not available for parent_external_id={parent_external_id}"
+                    "Parent issue key not available for "
+                    f"parent_external_id={parent_external_id}"
                 )
                 error_count += 1
                 results.append(result_row)
@@ -1680,19 +2350,16 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
                 continue
 
         if dry_run:
-            planned_key = f"DRY-{external_id[:8].upper()}"
+            planned_key = (
+                f"DRY-{external_id[:8].upper()}"
+            )
             issue_keys_by_external_id[external_id] = planned_key
 
             result_row["action"] = "would_create"
             result_row["issue_key"] = planned_key
             result_row["message"] = json.dumps(
                 {
-                    "summary": payload["fields"].get("summary", ""),
-                    "labels": payload["fields"].get("labels", []),
-                    "project": payload["fields"].get("project", {}),
-                    "issuetype": payload["fields"].get("issuetype", {}),
-                    "priority": payload["fields"].get("priority", {}),
-                    "parent": payload["fields"].get("parent", {}),
+                    "fields": payload.get("fields", {}),
                     "target_status": target_status,
                 },
                 sort_keys=True,
@@ -1702,9 +2369,16 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
             results.append(result_row)
             continue
 
-        if args.max_create is not None and created_count >= args.max_create:
-            result_row["action"] = "skip_max_create_reached"
-            result_row["message"] = f"--max-create {args.max_create} reached"
+        if (
+            args.max_create is not None
+            and created_count >= args.max_create
+        ):
+            result_row["action"] = (
+                "skip_max_create_reached"
+            )
+            result_row["message"] = (
+                f"--max-create {args.max_create} reached"
+            )
             results.append(result_row)
             continue
 
@@ -1716,23 +2390,33 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
             result_row["action"] = "created"
             result_row["issue_key"] = issue_key
             result_row["jira_status"] = "created"
-            result_row["message"] = f"Created Jira issue {issue_key}"
+            result_row["message"] = (
+                f"Created Jira issue {issue_key}"
+            )
 
             if target_status and issue_key:
                 try:
-                    transitioned_status = jira_client.transition_issue_to_status(
-                        issue_key=issue_key,
-                        target_status=target_status,
+                    transitioned_status = (
+                        jira_client.transition_issue_to_status(
+                            issue_key=issue_key,
+                            target_status=target_status,
+                        )
                     )
-                    result_row["jira_status"] = transitioned_status
-                    result_row["message"] = (
-                        f"Created Jira issue {issue_key} and moved to {transitioned_status}"
+                    result_row["jira_status"] = (
+                        transitioned_status
                     )
-                except RuntimeError as transition_error:
-                    result_row["action"] = "created_transition_error"
                     result_row["message"] = (
-                        f"Created Jira issue {issue_key}, but failed moving it to "
-                        f"{target_status}: {transition_error}"
+                        f"Created Jira issue {issue_key} and "
+                        f"moved to {transitioned_status}"
+                    )
+                except RuntimeError as error:
+                    result_row["action"] = (
+                        "created_transition_error"
+                    )
+                    result_row["message"] = (
+                        f"Created Jira issue {issue_key}, but "
+                        f"failed moving it to {target_status}: "
+                        f"{error}"
                     )
                     error_count += 1
 
@@ -1742,8 +2426,8 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
                 rollup_key=node_rollup_key(node),
                 rollup_label_value=lookup_label,
                 issue_key=issue_key,
-                status=str(result_row.get("jira_status") or "created"),
-                action=str(result_row.get("action") or "created"),
+                status=result_row["jira_status"],
+                action=result_row["action"],
                 node_type=str(node.get("node_type") or ""),
                 summary=str(node.get("summary") or ""),
             )
@@ -1757,8 +2441,9 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
 
         results.append(result_row)
 
-    hierarchy_config = config.get("hierarchy", {})
-    issue_link_type = str(hierarchy_config.get("issue_link_type") or "Relates")
+    issue_link_type = str(
+        hierarchy_config.get("issue_link_type") or "Relates"
+    )
 
     for node in nodes:
         if not hierarchy_node_needs_issue_link(node, config):
@@ -1770,8 +2455,14 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
         if not parent_external_id:
             continue
 
-        parent_issue_key = issue_keys_by_external_id.get(parent_external_id, "")
-        child_issue_key = issue_keys_by_external_id.get(child_external_id, "")
+        parent_issue_key = issue_keys_by_external_id.get(
+            parent_external_id,
+            "",
+        )
+        child_issue_key = issue_keys_by_external_id.get(
+            child_external_id,
+            "",
+        )
 
         context = node_context(node)
         link_key = hierarchy_link_state_key(
@@ -1789,31 +2480,61 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
             "parent_external_id": parent_external_id,
             "lookup_label": node_lookup_label(node),
             "summary": str(node.get("summary") or ""),
-            "parent_project": context.get("parent_project", ""),
-            "parent_version": context.get("parent_version", ""),
+            "parent_project": context.get(
+                "parent_project",
+                "",
+            ),
+            "parent_version": context.get(
+                "parent_version",
+                "",
+            ),
             "subproject": context.get("subproject", ""),
-            "subproject_version": context.get("subproject_version", ""),
+            "subproject_version": context.get(
+                "subproject_version",
+                "",
+            ),
             "component": context.get("component", ""),
-            "component_version": context.get("component_version", ""),
-            "vulnerability": context.get("vulnerability", ""),
+            "component_version": context.get(
+                "component_version",
+                "",
+            ),
+            "vulnerability": context.get(
+                "vulnerability",
+                "",
+            ),
             "severity": context.get("severity", ""),
             "score": context.get("score", ""),
+            "cvss_vector": context.get(
+                "cvss_vector",
+                "",
+            ),
+            "entity": context.get("entity", ""),
             "message": "",
         }
 
         if not parent_issue_key or not child_issue_key:
-            link_result_row["action"] = "skip_link_missing_issue_key"
+            link_result_row["action"] = (
+                "skip_link_missing_issue_key"
+            )
             link_result_row["message"] = (
-                f"Missing parent or child issue key. "
-                f"parent={parent_issue_key}, child={child_issue_key}"
+                "Missing parent or child issue key. "
+                f"parent={parent_issue_key}, "
+                f"child={child_issue_key}"
             )
             skipped_link_count += 1
             results.append(link_result_row)
             continue
 
-        if state_link_exists(state, link_key) and not args.refresh_existing:
-            link_result_row["action"] = "skip_link_existing_state"
-            link_result_row["message"] = "Issue link found in local state cache"
+        if (
+            state_link_exists(state, link_key)
+            and not args.refresh_existing
+        ):
+            link_result_row["action"] = (
+                "skip_link_existing_state"
+            )
+            link_result_row["message"] = (
+                "Issue link found in local state cache"
+            )
             skipped_link_count += 1
             results.append(link_result_row)
             continue
@@ -1821,7 +2542,8 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
         if dry_run:
             link_result_row["action"] = "would_link"
             link_result_row["message"] = (
-                f"{child_issue_key} {issue_link_type} {parent_issue_key}"
+                f"{child_issue_key} {issue_link_type} "
+                f"{parent_issue_key}"
             )
             planned_link_count += 1
             results.append(link_result_row)
@@ -1848,7 +2570,8 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
             link_result_row["action"] = "linked"
             link_result_row["jira_status"] = "linked"
             link_result_row["message"] = (
-                f"Linked {child_issue_key} to {parent_issue_key} using {issue_link_type}"
+                f"Linked {child_issue_key} to "
+                f"{parent_issue_key} using {issue_link_type}"
             )
             linked_count += 1
 
@@ -1860,26 +2583,44 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
         results.append(link_result_row)
 
     if args.plan_out:
-        planned_payload = {
-            "generated_at": now_iso(),
-            "dry_run": dry_run,
-            "hierarchy_plan": args.hierarchy_plan,
-            "input_node_count": len(all_nodes),
-            "processed_node_count": len(nodes),
-            "results": results,
-        }
-        save_json_file(args.plan_out, planned_payload)
+        save_json_file(
+            args.plan_out,
+            {
+                "generated_at": now_iso(),
+                "dry_run": dry_run,
+                "hierarchy_plan": args.hierarchy_plan,
+                "input_node_count": len(all_nodes),
+                "processed_node_count": len(nodes),
+                "sync_existing_fields": sync_existing_fields,
+                "results": results,
+            },
+        )
 
     if args.results_out:
-        write_hierarchy_results_csv(args.results_out, results)
+        write_hierarchy_results_csv(
+            args.results_out,
+            results,
+        )
 
     if not dry_run:
         save_json_file(args.state, state)
 
     node_type_counts = {
-        "epic": sum(1 for node in nodes if node.get("node_type") == "epic"),
-        "story": sum(1 for node in nodes if node.get("node_type") == "story"),
-        "vulnerability": sum(1 for node in nodes if node.get("node_type") == "vulnerability"),
+        "epic": sum(
+            1
+            for node in nodes
+            if node.get("node_type") == "epic"
+        ),
+        "story": sum(
+            1
+            for node in nodes
+            if node.get("node_type") == "story"
+        ),
+        "vulnerability": sum(
+            1
+            for node in nodes
+            if node.get("node_type") == "vulnerability"
+        ),
     }
 
     print()
@@ -1889,12 +2630,20 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
     print(f"Input nodes:             {len(all_nodes)}")
     print(f"Processed nodes:         {len(nodes)}")
     print(f"Epic nodes:              {node_type_counts['epic']}")
-    print(f"Task  nodes:             {node_type_counts['story']}")
-    print(f"Vulnerability nodes:     {node_type_counts['vulnerability']}")
+    print(f"Task nodes:              {node_type_counts['story']}")
+    print(
+        f"Vulnerability nodes:     "
+        f"{node_type_counts['vulnerability']}"
+    )
     print(f"Dry run:                 {dry_run}")
+    print(
+        f"Sync existing fields:    {sync_existing_fields}"
+    )
     print(f"Would create:            {planned_create_count}")
     print(f"Created:                 {created_count}")
-    print(f"Skipped existing:        {skipped_existing_count}")
+    print(f"Existing:                {existing_count}")
+    print(f"Would update fields:     {planned_update_count}")
+    print(f"Updated fields:          {updated_count}")
     print(f"Would link:              {planned_link_count}")
     print(f"Linked:                  {linked_count}")
     print(f"Skipped links:           {skipped_link_count}")
@@ -1908,10 +2657,12 @@ def process_hierarchy_plan(args: argparse.Namespace) -> int:
 
     if dry_run:
         print()
-        print("No Jira issues or links were created. Add --apply when ready.")
+        print(
+            "No Jira issues, updates, or links were applied. "
+            "Add --apply when ready."
+        )
 
     return 1 if error_count else 0
-
 
 def process_findings(args: argparse.Namespace) -> int:
     config = load_json_file(args.config, DEFAULT_CONFIG)
@@ -2235,80 +2986,111 @@ def process_findings(args: argparse.Namespace) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Create Jira issues from Black Duck subproject vulnerability rollup findings "
+            "Create Jira issues from Black Duck rollup findings "
             "or from a generated hierarchy plan."
         )
     )
 
     parser.add_argument(
         "--findings",
-        default="findings.csv",
-        help="Input findings CSV from subp_vuln_rollup.py. Default: findings.csv.",
+        default=jira_output_path("findings.csv"),
+        help="Input findings CSV.",
     )
-    parser.add_argument(
+    publish_mode = parser.add_mutually_exclusive_group()
+
+    publish_mode.add_argument(
         "--hierarchy-plan",
+        default=jira_output_path(
+            "jira-hierarchy-plan.json"
+        ),
         help=(
-            "Optional hierarchy plan JSON from findings_hierarchy_plan.py. "
-            "When supplied, this script publishes Epic/Story/Vulnerability nodes instead "
-            "of flat findings."
+            "Hierarchy plan JSON generated by the planner. "
+            "Default: .harness/jira/jira-hierarchy-plan.json."
+        ),
+    )
+    publish_mode.add_argument(
+        "--flat-findings",
+        action="store_true",
+        help=(
+            "Explicitly publish one Jira Task per raw finding "
+            "instead of using the CVE Epic and project Task hierarchy."
         ),
     )
     parser.add_argument(
         "--config",
-        default="src/unofficialblackduck-harness/config/jira-rollup-config.json",
-        help="Jira publisher config JSON. Default: jira-rollup-config.json.",
+        default=package_path(
+            "jira",
+            "config",
+            "jira-rollup-config.json",
+        ),
+        help="Jira publisher configuration JSON.",
     )
     parser.add_argument(
         "--state",
-        default="jira-rollup-state.json",
-        help="Local state/cache file for issue dedupe. Default: jira-rollup-state.json.",
+        default=jira_output_path(
+            "state",
+            "jira-rollup-state.json",
+        ),
+        help="Local Jira issue and link state file.",
     )
     parser.add_argument(
         "--results-out",
-        default="jira-rollup-results.csv",
-        help="CSV report of actions taken. Default: jira-rollup-results.csv.",
+        default=jira_output_path(
+            "jira-rollup-results.csv"
+        ),
+        help="CSV report of Jira actions.",
     )
     parser.add_argument(
         "--plan-out",
-        default="jira-rollup-plan.json",
-        help="JSON dry-run/create plan output. Default: jira-rollup-plan.json.",
+        default=jira_output_path(
+            "jira-rollup-plan.json"
+        ),
+        help="JSON dry-run or apply result plan.",
     )
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="Actually create Jira issues. Without this flag, the script is dry-run only.",
+        help="Create or update Jira issues.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Force dry-run mode even if --apply is passed.",
+        help="Force dry-run mode.",
     )
     parser.add_argument(
         "--description-format",
         choices=["wiki", "adf"],
         default="wiki",
-        help="Jira description format. Use adf for Jira Cloud API v3 if needed. Default: wiki.",
+        help="Jira description representation.",
     )
     parser.add_argument(
         "--refresh-existing",
         action="store_true",
-        help="Query Jira even for findings already present in local state.",
+        help="Query Jira for issues already found in local state.",
+    )
+    parser.add_argument(
+        "--sync-existing-fields",
+        action="store_true",
+        help=(
+            "Update configured managed custom fields on existing "
+            "Jira issues. This can also be enabled in the config."
+        ),
     )
     parser.add_argument(
         "--jql-label-batch-size",
         type=int,
         default=50,
-        help="How many rollup labels to include in each Jira search batch. Default: 50.",
+        help="Maximum hierarchy labels per Jira search.",
     )
     parser.add_argument(
         "--max-create",
         type=int,
-        help="Safety limit for the number of Jira issues to create in this run.",
+        help="Safety limit for issues created in this run.",
     )
     parser.add_argument(
         "--limit",
         type=int,
-        help="Limit number of input findings or hierarchy nodes processed. Useful for POC testing.",
+        help="Limit findings or hierarchy nodes processed.",
     )
     parser.add_argument(
         "--only-parent_project",
@@ -2317,70 +3099,101 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--only-parent-project",
-        help="Only process findings or hierarchy nodes for this parent project.",
+        help="Only process this parent project.",
     )
     parser.add_argument(
         "--only-parent-version",
-        help="Only process findings or hierarchy nodes for this parent version.",
+        help="Only process this parent version.",
     )
     parser.add_argument(
         "--only-subproject",
-        help="Only process findings or hierarchy nodes for this subproject.",
+        help="Only process this affected subproject.",
     )
     parser.add_argument(
         "--only-vulnerability",
-        help="Only process findings or hierarchy nodes for this vulnerability ID.",
+        help="Only process this vulnerability.",
     )
     parser.add_argument(
         "--only-rollup-key",
-        help="Only process one exact raw pipe-delimited rollup_key.",
+        help="Only process this exact rollup key.",
     )
     parser.add_argument(
         "--only-rollup-key-hash",
-        help=(
-            "Only process one finding by full SHA-256 hash of the rollup_key. "
-            "This is the value shown as Rollup key hash / Black Duck Rollup ID."
-        ),
+        help="Only process this full SHA-256 rollup-key hash.",
     )
     parser.add_argument(
         "--timeout",
         type=int,
         default=30,
-        help="HTTP timeout seconds. Default: 30.",
+        help="HTTP timeout seconds.",
     )
     parser.add_argument(
         "--retries",
         type=int,
         default=2,
-        help="Retry count for transient Jira/AI failures. Default: 2.",
+        help="Retry count for transient failures.",
     )
     parser.add_argument(
         "--retry-delay",
         type=float,
         default=2.0,
-        help="Base retry delay seconds. Default: 2.0.",
+        help="Base retry delay seconds.",
     )
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Print debug output to stderr.",
+        help="Print debugging output.",
     )
 
     return parser.parse_args()
-
 
 def main() -> int:
     args = parse_args()
 
     try:
-        if args.hierarchy_plan:
-            return process_hierarchy_plan(args)
+        if args.flat_findings:
+            if args.debug:
+                print(
+                    "Jira publish mode: flat findings "
+                    f"from {args.findings}",
+                    file=sys.stderr,
+                )
 
-        return process_findings(args)
+            return process_findings(args)
+
+        hierarchy_plan = str(
+            args.hierarchy_plan or ""
+        ).strip()
+
+        if not hierarchy_plan:
+            raise RuntimeError(
+                "Hierarchy publishing is the default, but no "
+                "hierarchy plan path was configured. Run "
+                "blackduck-hierarchy-plan first or use "
+                "--flat-findings for the legacy flat mode."
+            )
+
+        if not os.path.isfile(hierarchy_plan):
+            raise RuntimeError(
+                "Hierarchy publishing is the default, but the "
+                f"plan file does not exist: {hierarchy_plan}. "
+                "Run blackduck-hierarchy-plan first, provide "
+                "--hierarchy-plan PATH, or explicitly use "
+                "--flat-findings."
+            )
+
+        if args.debug:
+            print(
+                f"Jira publish mode: hierarchy plan "
+                f"{hierarchy_plan}",
+                file=sys.stderr,
+            )
+
+        return process_hierarchy_plan(args)
+
     except RuntimeError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -17,6 +17,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from harness.paths import datadog_output_path
+
 
 STATE_SCHEMA_VERSION = 1
 
@@ -1498,7 +1500,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Publish Black Duck high-risk vulnerability findings to Datadog Events."
     )
-    parser.add_argument("--findings", default="policy_findings.csv")
+    parser.add_argument(
+        "--findings",
+        default=datadog_output_path("policy_findings.csv"),
+        help="Detailed Black Duck findings input path.",
+    )
     parser.add_argument("--destination", choices=["events"], default="events")
     parser.add_argument(
         "--event-mode",
@@ -1525,9 +1531,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source", default="blackduck")
     parser.add_argument("--env", default="")
     parser.add_argument("--tags", default="")
-    parser.add_argument("--state", default="datadog-findings-state.json")
-    parser.add_argument("--results-out", default="datadog-publish-results.csv")
-    parser.add_argument("--plan-out", default="datadog-publish-plan.json")
+    parser.add_argument(
+        "--state",
+        default=datadog_output_path(
+            "state",
+            "datadog-findings-state.json",
+        ),
+        help="Datadog event state and deduplication file.",
+    )
+    parser.add_argument(
+        "--results-out",
+        default=datadog_output_path(
+            "datadog-publish-results.csv"
+        ),
+        help="Datadog action results CSV.",
+    )
+    parser.add_argument(
+        "--plan-out",
+        default=datadog_output_path(
+            "datadog-publish-plan.json"
+        ),
+        help="Datadog dry-run or publish plan JSON.",
+    )
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--refresh-existing", action="store_true")

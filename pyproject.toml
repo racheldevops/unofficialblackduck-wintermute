@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unofficialblackduck-harness"
-version = "0.1.0"
-description = "Utility scripts for Black Duck vulnerability rollups and Jira publishing workflows."
+version = "0.2.0"
+description = "Utility scripts for Black Duck vulnerability rollups, Jira, and Datadog workflows."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
@@ -15,24 +15,17 @@ authors = [
 dependencies = []
 
 [project.scripts]
-blackduck-find-parents = "find_parent_projects:main"
-blackduck-vuln-rollup = "subp_vuln_rollup:main"
-blackduck-hierarchy-plan = "findings_hierarchy_plan:main"
-blackduck-findings-to-jira = "findings_to_jira:main"
-blackduck-policy-vuln-find = "policy_vuln_find:main"
-blackduck-policy-vuln-pull = "policy_vuln_pull:main"
-blackduck-findings-to-datadog = "findings_to_datadog:main"
+blackduck-find-parents = "harness.jira.find_parent_projects:main"
+blackduck-vuln-rollup = "harness.jira.subp_vuln_rollup:main"
+blackduck-hierarchy-plan = "harness.jira.findings_hierarchy_plan:main"
+blackduck-findings-to-jira = "harness.jira.findings_to_jira:main"
+blackduck-policy-vuln-find = "harness.datadog.policy_vuln_find:main"
+blackduck-policy-vuln-pull = "harness.datadog.policy_vuln_pull:main"
+blackduck-findings-to-datadog = "harness.datadog.findings_to_datadog:main"
 
-[tool.setuptools]
-py-modules = [
-    "find_parent_projects",
-    "subp_vuln_rollup",
-    "findings_hierarchy_plan",
-    "findings_to_jira",
-    "policy_vuln_find",
-    "policy_vuln_pull",
-    "findings_to_datadog"
-]
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["harness*"]
 
-[tool.setuptools.package-dir]
-"" = "src/unofficialblackduck-harness"
+[tool.setuptools.package-data]
+"harness.jira" = ["config/*.json"]

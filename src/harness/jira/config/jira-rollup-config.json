@@ -1,0 +1,113 @@
+{
+  "jira": {
+    "url": "https://useyourjirahere.atlassian.net",
+    "project_key": "KAN",
+    "issue_type": "Task",
+    "api_version": "2",
+    "auth_mode": "basic",
+    "verify_tls": false
+  },
+  "issue": {
+    "summary_template": "Black Duck: {alert_severity} Alert - {subproject} - version {subproject_version} - {component} version {component_version}",
+    "labels": [
+      "blackduck",
+      "subproject_rollup",
+      "BDAlert"
+    ],
+    "priority_by_severity": {
+      "CRITICAL": "Highest",
+      "HIGH": "High",
+      "MEDIUM": "Medium",
+      "LOW": "Low"
+    },
+    "additional_fields": {},
+    "alert_severity_by_severity": {
+      "CRITICAL": "BLOCKER",
+      "HIGH": "HIGH",
+      "MEDIUM": "MEDIUM",
+      "LOW": "LOW",
+      "UNKNOWN": "UNKNOWN"
+    }
+  },
+  "dedupe": {
+    "label_prefix": "bd_rollup_",
+    "hash_length": 24
+  },
+  "ai": {
+    "enabled": false,
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini",
+    "api_key_env": "OPENAI_API_KEY"
+  },
+  "hierarchy": {
+    "epic_issue_type": "Epic",
+    "story_issue_type": "Task",
+    "vulnerability_issue_type": "Subtask",
+    "story_parent_mode": "jira_parent",
+    "vulnerability_parent_mode": "jira_parent",
+    "issue_link_type": "Relates",
+    "epic_link_field": "",
+    "labels": {
+      "epic": [
+        "bd_rollup_cve"
+      ],
+      "story": [
+        "bd_rollup_project_version"
+      ],
+      "vulnerability": [
+        "bd_rollup_vuln"
+      ]
+    },
+    "additional_fields": {
+      "epic": {},
+      "story": {},
+      "vulnerability": {}
+    },
+    "sync_existing_fields": false,
+    "field_mappings": {
+      "project_name": {
+        "field_id": "",
+        "source": "affected_project",
+        "node_types": [
+          "story"
+        ],
+        "value_type": "text"
+      },
+      "project_version": {
+        "field_id": "",
+        "source": "affected_version",
+        "node_types": [
+          "story"
+        ],
+        "value_type": "text"
+      },
+      "cvss_vector": {
+        "field_id": "",
+        "source": "cvss_vector",
+        "node_types": [
+          "story"
+        ],
+        "value_type": "text"
+      },
+      "cvss_score": {
+        "field_id": "",
+        "source": "stats.max_score",
+        "node_types": [
+          "story"
+        ],
+        "value_type": "number"
+      },
+      "entity": {
+        "field_id": "",
+        "source": "entity",
+        "node_types": [
+          "story"
+        ],
+        "value_type": "text"
+      }
+    },
+    "summary_templates": {
+      "story": "Black Duck: {alert_severity} Alert - {affected_project} - version {affected_version} - {component_summary}"
+    }
+  }
+}
