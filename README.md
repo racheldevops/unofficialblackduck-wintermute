@@ -1,553 +1,1127 @@
 # unofficialblackduck-harness
 
-NOTE: THIS IS IN ACTIVE DEV AND WILL HAVE SOME CHANGES THAT ARE WIP
+An unofficial integration harness for Black Duck SCA vulnerability workflows.
 
-This repository contains an unofficial enhancement to Black Duck SCA parent/child project finding alert workflows. It can roll up vulnerabilities from affected Black Duck project versions, plan Jira remediation hierarchies, publish those hierarchies to Jira, and optionally send high-risk vulnerability events to Datadog for on-call incident response.
+The harness can:
 
-## setup
+- Discover parent and child Black Duck project-version relationships.
+- Collect vulnerabilities affecting child project versions.
+- Retrieve CVSS scores and vectors.
+- Retrieve the Black Duck E+H Entity project custom field.
+- Build a CVE-centered Jira hierarchy.
+- Publish CVE Epics and affected project/version Tasks to Jira.
+- Preserve caches and Jira state between runs.
+- Run the complete Jira workflow through one pipeline command.
+- Run as a secure Kubernetes CronJob.
+- Push container images to a configurable private registry.
+- Optionally publish high-risk vulnerability events to Datadog.
 
-### Requirements
+This is not an officially supported Black Duck integration.
 
-- Python 3.12+
-- `virtualenv`
-- `pip`
+## Current status
 
-This project currently uses only Python standard library runtime dependencies, so there is no required `requirements.txt`.
+The application, orchestration module, container image, Kubernetes deployment resources, persistent storage configuration, tests, and build workflows have been implemented.
 
-### Create a local virtual environment
+The project is currently a release candidate awaiting customer-specific configuration and environment validation.
 
-macOS/Linux:
+Remaining production work requires customer values such as:
 
-```bash
-python3.12 -m virtualenv .venv
-source .venv/bin/activate
-```
+- Private registry address and repository.
+- Kubernetes namespace and storage class.
+- Customer CA certificate chain.
+- Runtime credentials.
+- Jira project key.
+- Jira custom-field IDs.
+- Cron schedule and timezone.
+- Resource requests and limits.
+- Customer acceptance of dry-run output.
+- Customer acceptance of a limited Jira apply.
 
-Windows PowerShell:
+## Requirements
 
-```powershell
-py -3.12 -m virtualenv .venv
-.\.venv\Scripts\Activate.ps1
-```
+Local development requires:
 
-### Install the project
+- Python 3.12
+- virtualenv
+- pip
+- pytest
 
-From the repository root:
+Container and Kubernetes development optionally requires:
 
-```bash
-python -m pip install -e .
-```
+- Docker
+- kubectl
+- Access to the private container registry
+- Access to the target Kubernetes cluster
 
-This installs the project in editable mode and makes the command-line tools available.
+## Project layout
 
-### Verify install
+The application is split into Jira and Datadog packages.
 
-```bash
-blackduck-find-parents --help
-blackduck-vuln-rollup --help
-blackduck-hierarchy-plan --help
-blackduck-findings-to-jira --help
-blackduck-policy-vuln-find --help
-blackduck-policy-vuln-pull --help
-blackduck-findings-to-datadog --help
-```
+    src/
+    └── harness/
+        ├── jira/
+        │   ├── config/
+        │   │   └── jira-rollup-config.json
+        │   ├── find_parent_projects.py
+        │   ├── subp_vuln_rollup.py
+        │   ├── findings_hierarchy_plan.py
+        │   ├── findings_to_jira.py
+        │   └── pipeline.py
+        ├── datadog/
+        │   ├── policy_vuln_find.py
+        │   ├── policy_vuln_pull.py
+        │   └── findings_to_datadog.py
+        └── paths.py
+
+Container and Kubernetes files include:
+
+    Dockerfile
+    .dockerignore
+    .github/workflows/container-build.yml
+    .github/workflows/kubernetes-deploy.yml
+    deploy/base/
+    deploy/examples/
+    deploy/overlays/customer/
+
+Additional documentation is stored under:
+
+    READMEs/
+
+## Local setup
+
+Create a virtual environment:
+
+    python3.12 -m virtualenv .venv
+
+Activate it:
+
+    source .venv/bin/activate
+
+Install the project in editable mode:
+
+    python -m pip install -e .
+
+Install the test dependency if required:
+
+    python -m pip install "pytest>=8,<9"
+
+Run tests:
+
+    python -m pytest -q
+
+Compile the Python package:
+
+    python -m compileall -q src/harness
+
+Editable installation means normal source-file changes are immediately available.
+
+Reinstall after changing:
+
+- pyproject.toml
+- The package structure
+- Installed command entry points
+- Package metadata
+
+## Installed commands
+
+Jira commands:
+
+    blackduck-find-parents
+    blackduck-vuln-rollup
+    blackduck-hierarchy-plan
+    blackduck-findings-to-jira
+    blackduck-jira-pipeline
+
+Datadog commands:
+
+    blackduck-policy-vuln-find
+    blackduck-policy-vuln-pull
+    blackduck-findings-to-datadog
+
+Verify installation:
+
+    blackduck-find-parents --help
+    blackduck-vuln-rollup --help
+    blackduck-hierarchy-plan --help
+    blackduck-findings-to-jira --help
+    blackduck-jira-pipeline --help
+    blackduck-policy-vuln-find --help
+    blackduck-policy-vuln-pull --help
+    blackduck-findings-to-datadog --help
+
+## Python module execution
+
+The installed commands and Python module commands run the same source code.
+
+Jira modules:
+
+    python -m harness.jira.find_parent_projects
+    python -m harness.jira.subp_vuln_rollup
+    python -m harness.jira.findings_hierarchy_plan
+    python -m harness.jira.findings_to_jira
+    python -m harness.jira.pipeline
+
+Datadog modules:
+
+    python -m harness.datadog.policy_vuln_find
+    python -m harness.datadog.policy_vuln_pull
+    python -m harness.datadog.findings_to_datadog
+
+Module execution is recommended for IntelliJ run configurations and debugging.
+
+## Output layout
+
+Generated files no longer default to the repository root.
+
+Default output root:
+
+    .harness/
+
+Jira output:
+
+    .harness/jira/
+
+Datadog output:
+
+    .harness/datadog/
+
+Override the output root with:
+
+    export HARNESS_OUTPUT_DIR="/custom/output/path"
+
+The Kubernetes deployment uses:
+
+    HARNESS_OUTPUT_DIR=/var/lib/blackduck-harness
 
 ## Black Duck authentication
 
-Set Black Duck connection details as environment variables:
+Set:
 
-```bash
-export BLACKDUCK_URL="https://blackduck.example.com"
-export BLACKDUCK_API_TOKEN="..."
-```
+    export BLACKDUCK_URL="https://blackduck.example.com"
+    export BLACKDUCK_API_TOKEN="your-token"
 
-Windows PowerShell:
+Do not store real tokens in source files, container images, or shared IntelliJ configurations.
 
-```powershell
-$env:BLACKDUCK_URL = "https://blackduck.example.com"
-$env:BLACKDUCK_API_TOKEN = "..."
-```
+## Jira authentication
 
-## Jira remediation workflow
+Jira URL:
 
-### Default Jira hierarchy
+    export JIRA_URL="https://jira.example.com"
 
-The default Jira hierarchy is now CVE/vulnerability remediation-forward:
+Basic authentication:
 
-```text
-Epic: CVE / vulnerability
-└── Task: CVE + affected Black Duck project/version
-```
+    export JIRA_USER="user@example.com"
+    export JIRA_API_TOKEN="your-api-token"
+
+Bearer or PAT authentication:
+
+    export JIRA_PAT="your-token"
+
+For bearer authentication, configure:
+
+    {
+      "jira": {
+        "auth_mode": "bearer"
+      }
+    }
+
+If Jira URL or credentials are incomplete, the Jira publisher forces dry-run mode.
+
+## Jira configuration
+
+Default configuration:
+
+    src/harness/jira/config/jira-rollup-config.json
+
+Customer configuration must provide:
+
+- Jira project key.
+- Jira URL or JIRA_URL.
+- Jira authentication mode.
+- Jira issue types.
+- Jira hierarchy parent mode.
+- Entity custom-field ID.
+- Project Name field ID.
+- Project Version field ID.
+- CVSS Vector field ID.
+- CVSS Score field ID.
+- Desired labels.
+- Desired summary templates.
+- Desired severity mappings.
+
+Credentials must not be placed in the Jira JSON configuration.
+
+## Jira workflow
+
+The normal Jira workflow is:
+
+    Black Duck
+        |
+        v
+    blackduck-find-parents
+        |
+        v
+    .harness/jira/parent_projects.csv
+        |
+        v
+    blackduck-vuln-rollup
+        |
+        v
+    .harness/jira/findings.csv
+        |
+        v
+    blackduck-hierarchy-plan
+        |
+        v
+    .harness/jira/jira-hierarchy-plan.json
+        |
+        v
+    blackduck-findings-to-jira
+        |
+        v
+    Jira CVE Epics and affected project/version Tasks
+
+The complete workflow can also be executed through:
+
+    blackduck-jira-pipeline
+
+## Parent discovery
+
+Run:
+
+    blackduck-find-parents
+
+Default outputs:
+
+    .harness/jira/parent_projects.csv
+    .harness/jira/parent_project_changes.csv
+    .harness/jira/cache/parent_projects_cache.json
+
+Parent discovery uses incremental synchronization.
+
+It:
+
+1. Builds a current Black Duck project-version inventory.
+2. Identifies versions by stable Black Duck API URL.
+3. Creates metadata fingerprints.
+4. Compares current fingerprints with cached fingerprints.
+5. Rescans new, changed, failed, or expired versions.
+6. Compares previous and current relationship sets.
+7. Writes added and removed relationship deltas.
+
+Force a complete relationship rescan:
+
+    blackduck-find-parents \
+      --refresh-all \
+      --debug
+
+Enable BOM name and version fallback:
+
+    blackduck-find-parents \
+      --resolve-bom-names \
+      --debug
+
+Detailed documentation:
+
+    READMEs/FIND_PARENTS_README.md
+
+## Vulnerability rollup
+
+Run:
+
+    blackduck-vuln-rollup
+
+When no input mode is supplied, it automatically reads:
+
+    .harness/jira/parent_projects.csv
+
+Single-parent mode remains available:
+
+    blackduck-vuln-rollup \
+      --parent-project "Parent Project" \
+      --parent-version "1.0"
+
+Default output:
+
+    .harness/jira/findings.csv
+
+Default API cache:
+
+    .harness/jira/cache/subp_vuln_rollup_cache.json
+
+The rollup collects:
+
+- Parent project and version.
+- Affected child project and version.
+- Component name.
+- Component display version.
+- Component-version URL.
+- Vulnerability ID.
+- Vulnerability URL.
+- Severity.
+- Score.
+- CVSS vector.
+- E+H Entity.
+
+Refresh the Black Duck API cache:
+
+    blackduck-vuln-rollup \
+      --refresh-api-cache \
+      --debug
+
+Require Entity:
+
+    blackduck-vuln-rollup \
+      --require-entity
+
+Do not require Entity against a test Black Duck instance that does not define it.
+
+## Component version handling
+
+Component display values and Black Duck component URLs are separate fields.
 
 Example:
 
-```text
-[Black Duck] CVE-2018-1000620
-└── CVE-2018-1000620 Project juicy_cam.juiced 1.0.0
-```
+    component = Thymeleaf
+    component_version = 3.0.15.RELEASE
+    component_version_href = https://blackduck.example/api/components/.../versions/...
 
-The affected project/version comes from the directly affected Black Duck project version in `findings.csv`:
+Jira titles use the display version.
 
-```text
-affected_project = subproject
-affected_version = subproject_version
-affected_project_version_href = subproject_version_href
-```
+Task descriptions retain the component-version URL.
 
-Parent project/version remains in node metadata and descriptions for traceability, but it does not drive the default Jira hierarchy.
+If an older findings file contains a URL in component_version, regenerate findings before regenerating the hierarchy plan.
 
-### 1. Generate rollup findings
+## Jira hierarchy planning
 
-```bash
-blackduck-vuln-rollup \
-  --parents-csv parent_projects.csv \
-  --threshold 7 \
-  --out findings.csv \
-  --timeout 30 \
-  --retries 1 \
-  --page-limit 500 \
-  --failures-out failed-rollup-relationships.csv
-```
+Run:
 
-Use `--insecure` only if needed for lab/on-prem TLS testing.
+    blackduck-hierarchy-plan
 
-### 2. Generate the default CVE/project-version Jira hierarchy plan
+Default input:
 
-`--hierarchy-mode vulnerability-project` is the default, but it is shown explicitly here for clarity.
+    .harness/jira/findings.csv
 
-```bash
-blackduck-hierarchy-plan \
-  --findings findings.csv \
-  --hierarchy-mode vulnerability-project \
-  --plan-out jira-hierarchy-plan.json \
-  --summary-out jira-hierarchy-summary.csv \
-  --nodes-out jira-hierarchy-nodes.csv
-```
+Default outputs:
 
-A focused test plan can filter before nodes are built:
+    .harness/jira/jira-hierarchy-plan.json
+    .harness/jira/jira-hierarchy-summary.csv
+    .harness/jira/jira-hierarchy-nodes.csv
 
-```bash
-blackduck-hierarchy-plan \
-  --findings findings.csv \
-  --hierarchy-mode vulnerability-project \
-  --plan-out jira-hierarchy-plan.json \
-  --summary-out jira-hierarchy-summary.csv \
-  --nodes-out jira-hierarchy-nodes.csv \
-  --only-parent-project "cc-goat" \
-  --only-parent-version "v2" \
-  --only-subproject "juicy_cam.juiced" \
-  --only-vulnerability "CVE-2018-1000620"
-```
+Default hierarchy mode:
 
-Expected default output shape:
+    vulnerability-project
 
-```text
-CVE Epic nodes:          number of unique CVEs/vulnerabilities
-Project-version Tasks:   number of CVE + affected project/version pairs
-Vulnerability nodes:     0
-```
+Default hierarchy:
 
-### Legacy Jira hierarchy mode
+    Epic: one CVE or vulnerability
+    └── Task: one affected Black Duck project/version
 
-The old project-centered hierarchy is still available:
+Example:
 
-```text
-Epic: parent project/version
-└── Story: child/subproject version
-    └── Vulnerability issue/subtask
-```
+    Epic: [Black Duck] CVE-2022-22938
+    └── Task: Black Duck: BLOCKER Alert - DG-WG-Demo - version 1.0 - Thymeleaf version 3.0.15.RELEASE
 
-Use:
+Focused CVE test:
 
-```bash
-blackduck-hierarchy-plan \
-  --findings findings.csv \
-  --hierarchy-mode project-subproject-vulnerability \
-  --plan-out jira-hierarchy-plan-legacy.json \
-  --summary-out jira-hierarchy-summary-legacy.csv \
-  --nodes-out jira-hierarchy-nodes-legacy.csv
-```
+    blackduck-hierarchy-plan \
+      --only-vulnerability CVE-2022-22938 \
+      --plan-out .harness/jira/tests/CVE-2022-22938-plan.json \
+      --summary-out .harness/jira/tests/CVE-2022-22938-summary.csv \
+      --nodes-out .harness/jira/tests/CVE-2022-22938-nodes.csv \
+      --debug
 
-### 3. Configure Jira
+Do not combine a focused CVE test with a small finding limit. A limit can remove component rows needed for complete aggregation.
 
-Edit:
+Detailed documentation:
 
-```text
-src/unofficialblackduck-harness/config/jira-rollup-config.json
-```
+    READMEs/HIERARCHY_PLAN_README.md
 
-Set at least the Jira URL/project details required for your environment.
+## Jira publishing
 
-The default hierarchy config is intended for Epic -> Task creation with Jira parent relationships:
+Hierarchy publishing is the default.
 
-```json
-{
-  "hierarchy": {
-    "epic_issue_type": "Epic",
-    "story_issue_type": "Task",
-    "vulnerability_issue_type": "Subtask",
-    "story_parent_mode": "jira_parent",
-    "vulnerability_parent_mode": "jira_parent",
-    "issue_link_type": "Relates",
-    "epic_link_field": ""
-  }
-}
-```
+Run a dry run:
 
-If your Jira instance does not allow Task issues directly under Epics with `parent`, set:
+    blackduck-findings-to-jira \
+      --dry-run \
+      --debug
 
-```json
-{
-  "hierarchy": {
-    "story_parent_mode": "issue_link",
-    "issue_link_type": "Relates"
-  }
-}
-```
+Default hierarchy plan:
 
-or:
+    .harness/jira/jira-hierarchy-plan.json
 
-```json
-{
-  "hierarchy": {
-    "story_parent_mode": "epic_link_field",
-    "epic_link_field": "customfield_XXXXX"
-  }
-}
-```
+Default outputs:
 
-### 4. Set Jira credentials
+    .harness/jira/jira-rollup-plan.json
+    .harness/jira/jira-rollup-results.csv
 
-Basic auth:
+The publisher fails if the default hierarchy plan does not exist.
 
-```bash
-export JIRA_USER="user@example.com"
-export JIRA_API_TOKEN="..."
-```
+It does not silently fall back to flat findings.
 
-Bearer/PAT auth:
+## Jira apply
 
-```bash
-export JIRA_PAT="..."
-```
+Run a limited apply first:
 
-Windows PowerShell example:
+    blackduck-findings-to-jira \
+      --apply \
+      --max-create 5 \
+      --debug
 
-```powershell
-$env:JIRA_USER = "user@example.com"
-$env:JIRA_API_TOKEN = "..."
-```
+After validation:
 
-### 5. Jira hierarchy dry run
+    blackduck-findings-to-jira \
+      --apply \
+      --debug
 
-Dry run is the default unless `--apply` is provided.
+Hierarchy nodes are processed in dependency order:
 
-Apply targeting filters at plan time when possible. The Jira dry run should normally consume the already-filtered hierarchy plan:
+    Epic
+    Task
+    Legacy vulnerability or Subtask
 
-```bash
-blackduck-findings-to-jira \
-  --hierarchy-plan jira-hierarchy-plan.json \
-  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
-  --state jira-hierarchy-publish-test-state.json \
-  --results-out jira-hierarchy-publish-test-results.csv \
-  --plan-out jira-hierarchy-publish-test-plan.json \
-  --dry-run \
-  --debug
-```
+## Flat Jira mode
 
-Expected dry-run payload examples in the results/plan output:
+Flat mode creates one Jira Task per raw finding.
 
-```text
-Epic: [Black Duck] CVE-2018-1000620
-Task: CVE-2018-1000620 Project juicy_cam.juiced 1.0.0
-```
+It is not the default.
 
-When `story_parent_mode` is `jira_parent`, the Task dry-run payload should include a Jira parent key.
+It must be selected explicitly:
 
-### 6. Jira apply run
+    blackduck-findings-to-jira \
+      --flat-findings \
+      --dry-run \
+      --debug
 
-This creates Jira issues/links.
+Flat apply:
 
-```bash
-blackduck-findings-to-jira \
-  --hierarchy-plan jira-hierarchy-plan.json \
-  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
-  --state jira-rollup-state.json \
-  --results-out jira-hierarchy-publish-results.csv \
-  --plan-out jira-hierarchy-publish-plan.json \
-  --apply
-```
+    blackduck-findings-to-jira \
+      --flat-findings \
+      --apply \
+      --max-create 5 \
+      --debug
 
-## Flat Jira findings mode
+## Jira Task titles
 
-Flat Jira publishing remains available and unchanged. It creates one Jira issue per unique rollup finding from `findings.csv`.
+Default template:
 
-Dry run:
+    Black Duck: {alert_severity} Alert - {affected_project} - version {affected_version} - {component_summary}
 
-```bash
-blackduck-findings-to-jira \
-  --findings findings.csv \
-  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
-  --state jira-rollup-state.json \
-  --results-out jira-rollup-results.csv \
-  --plan-out jira-rollup-plan.json
-```
+Single-component example:
 
-Apply:
+    Black Duck: BLOCKER Alert - DG-WG-Demo - version 1.0 - Thymeleaf version 3.0.15.RELEASE
 
-```bash
-blackduck-findings-to-jira \
-  --findings findings.csv \
-  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
-  --state jira-rollup-state.json \
-  --results-out jira-rollup-results.csv \
-  --plan-out jira-rollup-plan.json \
-  --apply
-```
+Multiple-component example:
 
-## Optional Datadog Events workflow
+    Black Duck: BLOCKER Alert - DG-WG-Demo - version 1.0 - 3 affected components
 
-This workflow is separate from the Jira workflow. It is split into three stages so the cheap discovery step can run frequently and only trigger the intensive pull/send path when candidates change.
+Default display mapping:
+
+    CRITICAL -> BLOCKER
+    HIGH     -> HIGH
+    MEDIUM   -> MEDIUM
+    LOW      -> LOW
+    UNKNOWN  -> UNKNOWN
+
+BLOCKER is a configurable display value.
+
+The original Black Duck severity remains available in findings, descriptions, statistics, and hierarchy context.
+
+## Jira labels
+
+Generated Jira issues include readable labels:
+
+    BDAlert
+    CVE-2022-22938
+    blackduck
+    subproject_rollup
+    bd_sev_critical
+
+Deterministic labels are retained for Jira lookup and deduplication.
+
+Example:
+
+    bd_cve_project_0123456789abcdef01234567
+
+Titles are not used as the primary deduplication key.
+
+## CVSS vectors
+
+CVSS vectors use Jira no-format markup in wiki descriptions.
+
+This prevents sequences such as:
+
+    E:P
+
+from becoming Jira emoticons.
+
+Example vector:
+
+    CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H/E:P/RL:O/RC:C
+
+CVSS vectors and scores can also be mapped to Jira custom fields.
+
+## E+H Entity
+
+The vulnerability rollup attempts to retrieve:
+
+    E+H Entity
+
+Data flow:
+
+    Black Duck project custom field
+        |
+        v
+    findings.csv entity column
+        |
+        v
+    hierarchy Task context
+        |
+        v
+    Jira Entity custom field
+
+Entity is not shown in the Task description by default.
+
+Configure the Jira Entity field ID under:
+
+    hierarchy.field_mappings.entity.field_id
+
+Jira screen tabs and field placement are Jira administration configuration.
+
+The integration can populate the Entity field, but it cannot create the Jira Default or Entity tabs.
+
+## Jira local state
+
+Default state file:
+
+    .harness/jira/state/jira-rollup-state.json
+
+The state records:
+
+- Hierarchy external IDs.
+- Jira issue keys.
+- Lookup labels.
+- Node types.
+- Last known Jira status.
+- Link state.
+- First and last seen times.
+- Last actions.
+
+Local state is checked before Jira.
+
+Deleting Jira issues manually does not update local state.
+
+A stale local state match produces:
+
+    skip_existing_state
+
+Reconcile local state against Jira:
+
+    blackduck-findings-to-jira \
+      --refresh-existing \
+      --dry-run \
+      --debug
+
+Use an isolated state path for testing:
+
+    --state .harness/jira/tests/new-test-state.json
+
+## Managed field synchronization
+
+Preview updates to configured Jira fields:
+
+    blackduck-findings-to-jira \
+      --refresh-existing \
+      --sync-existing-fields \
+      --dry-run \
+      --debug
+
+Apply updates:
+
+    blackduck-findings-to-jira \
+      --refresh-existing \
+      --sync-existing-fields \
+      --apply \
+      --max-create 5 \
+      --debug
+
+## Complete Jira pipeline
+
+Run every Jira stage through one command:
+
+    blackduck-jira-pipeline --dry-run
+
+Equivalent module command:
+
+    python -m harness.jira.pipeline --dry-run
+
+Pipeline stages:
+
+1. Parent relationship discovery.
+2. Vulnerability rollup.
+3. Hierarchy planning.
+4. Jira publishing.
+
+Apply must be explicit:
+
+    blackduck-jira-pipeline --apply
+
+Limited apply:
+
+    blackduck-jira-pipeline \
+      --apply \
+      --max-create 5
+
+## Strict pipeline mode
+
+Strict mode is the default.
+
+If relationship or vulnerability collection failures occur:
+
+- Jira publishing is skipped.
+- Diagnostics remain available.
+- The pipeline exits nonzero.
+- Previous active output remains available.
+
+Explicit strict mode:
+
+    blackduck-jira-pipeline --strict
+
+Allow partial processing only when intentionally required:
+
+    blackduck-jira-pipeline --allow-partial
+
+## Pipeline output and locking
+
+Each pipeline run creates:
+
+    .harness/jira/runs/RUN_ID/
+
+Active summary:
+
+    .harness/jira/pipeline-run-summary.json
+
+Lock file:
+
+    .harness/jira/pipeline.lock
+
+The lock prevents overlapping direct executions.
+
+Kubernetes concurrency protection remains the primary production safeguard.
+
+## Container image
+
+Build locally:
+
+    docker build \
+      --tag blackduck-harness:local \
+      --file Dockerfile \
+      .
+
+Display pipeline help:
+
+    docker run \
+      --rm \
+      blackduck-harness:local \
+      --help
+
+The image:
+
+- Uses Python 3.12.10.
+- Uses a multi-stage build.
+- Runs as user and group 10001.
+- Supports a read-only root filesystem.
+- Uses blackduck-jira-pipeline as its entry point.
+- Defaults to dry-run mode.
+- Does not contain credentials.
+- Does not contain customer certificates.
+- Does not contain local findings, cache, or state.
+
+## Kubernetes deployment
+
+The application runs as a finite Kubernetes CronJob.
+
+Each execution:
+
+1. Creates a Job and Pod.
+2. Mounts persistent storage.
+3. Mounts Jira configuration.
+4. Mounts the customer CA bundle.
+5. Loads credentials from Kubernetes secrets.
+6. Runs blackduck-jira-pipeline once.
+7. Writes cache, state, plans, results, and diagnostics.
+8. Exits.
+9. Leaves persistent data for the next run.
+
+The application is not a permanent HTTP service.
+
+## Persistent storage
+
+The deployment uses a PersistentVolumeClaim:
+
+    blackduck-harness-data
+
+Default capacity:
+
+    5Gi
+
+Default access mode:
+
+    ReadWriteOnce
+
+Mount path:
+
+    /var/lib/blackduck-harness
+
+The container sets:
+
+    HARNESS_OUTPUT_DIR=/var/lib/blackduck-harness
+
+The PVC preserves cache and Jira state across:
+
+- Pod completion.
+- Job deletion.
+- CronJob updates.
+- Container image updates.
+- Normal deployment changes.
+
+Deleting the PVC may delete the data depending on the storage class reclaim policy.
+
+Do not delete the PVC during normal upgrades.
+
+## Kubernetes concurrency and security
+
+The CronJob uses:
+
+    concurrencyPolicy: Forbid
+
+Container security settings include:
+
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    seccompProfile: RuntimeDefault
+
+All Linux capabilities are dropped.
+
+Writable locations are limited to:
+
+    /var/lib/blackduck-harness
+    /tmp
+
+## Kubernetes resources
+
+Base:
+
+    deploy/base/
+
+Customer overlay:
+
+    deploy/overlays/customer/
+
+Examples:
+
+    deploy/examples/
+
+The CronJob is initially configured with:
+
+    suspend: true
+    --dry-run
+    --strict
+
+Do not enable the schedule or apply mode before customer acceptance.
+
+## Private registry
+
+The container registry is configurable.
+
+GitHub variables:
+
+    REGISTRY_HOST
+    REGISTRY_REPOSITORY
+
+GitHub secrets:
+
+    REGISTRY_USERNAME
+    REGISTRY_PASSWORD
+
+Resulting image:
+
+    REGISTRY_HOST/REGISTRY_REPOSITORY:COMMIT_SHA
+
+Production should use an immutable commit SHA or image digest.
+
+## Container build workflow
 
 Workflow:
 
-```text
-blackduck-policy-vuln-find
-  -> policy_candidate_projects.csv and policy_candidate_trigger.json
-  -> blackduck-policy-vuln-pull
-  -> policy_findings.csv
-  -> blackduck-findings-to-datadog
-  -> Datadog Events
-```
+    .github/workflows/container-build.yml
 
-### Datadog and Black Duck auth
+It:
 
-```bash
-export BLACKDUCK_URL="https://blackduck.example.com"
-export BLACKDUCK_API_TOKEN="..."
-export DATADOG_API_KEY="..."
-```
+1. Installs Python.
+2. Installs the package.
+3. Compiles the package.
+4. Runs tests.
+5. Builds the image.
+6. Logs in to the private registry.
+7. Pushes the immutable image.
+8. Reports the image digest.
 
-### 1. Fast candidate find
+## Kubernetes deployment workflow
 
-```bash
-blackduck-policy-vuln-find \
-  --out policy_candidate_projects.csv \
-  --changes-out policy_candidate_changes.csv \
-  --trigger-out policy_candidate_trigger.json \
-  --cache policy_vuln_find_cache.json \
-  --refresh-older-than-hours 6
-```
+Workflow:
 
-Automation should inspect `policy_candidate_trigger.json`. If `should_trigger_pull` is true, run the pull and Datadog publish stages.
+    .github/workflows/kubernetes-deploy.yml
 
-Example trigger shape:
+The workflow is manually triggered.
 
-```json
-{
-  "should_trigger_pull": true,
-  "candidate_count": 12,
-  "added_count": 2,
-  "removed_count": 0,
-  "changed_count": 1,
-  "unchanged_count": 9,
-  "recommended_next_command": "blackduck-policy-vuln-pull --candidates policy_candidate_projects.csv --out policy_findings.csv"
-}
-```
+Supported operations:
 
-### 2. Intensive vulnerability pull
+| Operation | Behavior |
+|---|---|
+| render | Render and upload manifests |
+| diff | Compare rendered manifests with the cluster |
+| apply | Apply manifests to the cluster |
 
-```bash
-blackduck-policy-vuln-pull \
-  --candidates policy_candidate_projects.csv \
-  --threshold 8.9 \
-  --score-operator gt \
-  --require-exploit-available \
-  --out policy_findings.csv \
-  --failures-out policy_pull_failures.csv
-```
-
-Default high-risk criteria are:
-
-```text
-score > 8.9
-exploit_available == true
-```
-
-Reachability is captured when fields are available, but is not required by default. Future AI-based reachability can be added behind `--reachability-mode ai`.
-
-Optional policy filtering is supported with `--policy-name` or `--policy-rule-id`, but the direct high-risk criteria are sufficient when policy matching is not needed.
-
-### 3. Datadog dry run
-
-The default Datadog grouping is now vulnerability rollup. It sends one summarized event per CVE/vulnerability across all affected Black Duck project versions.
-
-`--event-mode vulnerability` is shown explicitly here for clarity.
-
-```bash
-blackduck-findings-to-datadog \
-  --findings policy_findings.csv \
-  --event-mode vulnerability \
-  --site datadoghq.com \
-  --service blackduck \
-  --source blackduck \
-  --env prod \
-  --state datadog-findings-state.json \
-  --results-out datadog-publish-results.csv \
-  --plan-out datadog-publish-plan.json
-```
-
-### 4. Datadog apply
-
-```bash
-blackduck-findings-to-datadog \
-  --findings policy_findings.csv \
-  --event-mode vulnerability \
-  --site datadoghq.com \
-  --service blackduck \
-  --source blackduck \
-  --env prod \
-  --state datadog-findings-state.json \
-  --results-out datadog-publish-results.csv \
-  --plan-out datadog-publish-plan.json \
-  --apply
-```
-
-For a safe production smoke test, limit sends first:
-
-```bash
-blackduck-findings-to-datadog \
-  --findings policy_findings.csv \
-  --event-mode vulnerability \
-  --site datadoghq.com \
-  --service blackduck \
-  --source blackduck \
-  --env prod \
-  --max-send 10 \
-  --apply
-```
-
-### Datadog event modes
+Supported pipeline modes:
 
 | Mode | Behavior |
 |---|---|
-| `vulnerability` | One summarized event per CVE/vulnerability across all affected project versions. Default. |
-| `project` | One grouped event per Black Duck project. |
-| `finding` | One event per individual finding. |
-| `both` | Project summary events plus finding detail events. |
+| dry-run | Generate Jira plans without modifying Jira |
+| apply | Permit Jira issue creation and updates |
 
-Vulnerability mode is usually the best on-call shape because it collapses one widespread CVE into one Datadog Event instead of sending one event for every project/component occurrence.
+GitHub environment variables:
 
-### Vulnerability rollup event shape
+    REGISTRY_HOST
+    REGISTRY_REPOSITORY
+    KUBE_NAMESPACE
+    CRON_SCHEDULE
+    CRON_TIMEZONE
 
-A vulnerability rollup event looks like:
+GitHub environment secret:
 
-```text
-Title:
-[Black Duck] CRITICAL CVE-2024-12345 affects 12 project version(s)
+    KUBE_CONFIG_B64
 
-Body:
-Black Duck vulnerability rollup event.
+KUBE_CONFIG_B64 contains the base64-encoded kubeconfig used by the manual deployment workflow for diff and apply operations.
 
-Vulnerability: CVE-2024-12345
-Highest severity: CRITICAL
-Active finding count: 37
-Max score: 10.0
-Affected project/version count: 12
-Affected component count: 4
-Critical count: 37
-High count: 0
-Medium count: 0
-Low count: 0
+Applying active Jira mode requires explicit confirmation in the deployment workflow.
 
-Affected Black Duck project versions shown: 12 of 12
-- service-a 1.2.3
-- service-b 4.5.6
+## Registry pull secret
 
-Affected components shown: 4 of 4
-- openssl 1.0.2
-- example-lib 3.1.4
+Expected Kubernetes secret:
 
-Sample project/component findings shown: 3 of 37
-- service-a 1.2.3 | openssl 1.0.2 | severity=CRITICAL | score=10.0
-- service-b 4.5.6 | openssl 1.0.2 | severity=CRITICAL | score=10.0
+    blackduck-harness-registry
 
-Black Duck vulnerability links shown: 3 of 3
-- https://blackduck.example.com/...
+It contains private-registry pull credentials.
 
-Event key: vulnerability_open:<vulnerability_group_external_id>
-Aggregation key: bd_vulnerability_<vulnerability_group_external_id>
-Note: Datadog Events have a small text cap, so this event is intentionally summarized.
-```
+Registry credentials must not be committed.
 
-Common tags include:
+## Runtime credential secret
 
-```text
-source:blackduck
-service:blackduck
-env:prod
-bd_group:vulnerability
-bd_vulnerability:<normalized_vulnerability>
-bd_severity:<normalized_highest_severity>
-bd_status:open
-```
+Expected Kubernetes secret:
 
-### Event body limits
+    blackduck-harness-credentials
 
-Vulnerability rollup events are intentionally summarized to fit Datadog Event text limits.
+It can supply:
 
-Useful tuning flags:
+    BLACKDUCK_URL
+    BLACKDUCK_API_TOKEN
+    JIRA_URL
+    JIRA_USER
+    JIRA_API_TOKEN
+    JIRA_PAT
 
-```bash
---event-project-limit 25
---event-component-limit 8
---event-finding-limit 3
---event-vulnerability-link-limit 3
-```
+Only supply the Jira credentials required for the selected authentication mode.
 
-Example:
+External Secrets, Vault, or a cloud secret manager are preferred when available.
 
-```bash
-blackduck-findings-to-datadog \
-  --findings policy_findings.csv \
-  --event-mode vulnerability \
-  --event-project-limit 50 \
-  --event-component-limit 12 \
-  --event-finding-limit 5 \
-  --event-vulnerability-link-limit 5 \
-  --site datadoghq.com \
-  --service blackduck \
-  --source blackduck \
-  --env prod
-```
+## Customer TLS certificate
 
-### Resolution behavior
+Production must not use insecure TLS.
 
-Datadog Events are append-only. This tool treats closure as a recovery or success event plus a local state update.
+The customer should provide the issuing root and intermediate CA chain.
 
-In `--event-mode vulnerability`, a vulnerability group is resolved when it was active in `datadog-findings-state.json` but no current findings match that vulnerability in the latest `policy_findings.csv`.
+Expected ConfigMap:
 
-A resolved vulnerability event looks like:
+    blackduck-harness-ca
 
-```text
-Title:
-[Black Duck] Resolved: CVE-2024-12345 no longer has matching exploitable high-risk findings
+Expected file:
 
-Body:
-No current findings matched the configured Black Duck criteria for this vulnerability in the latest run.
+    /etc/blackduck-harness/ca/customer-ca.pem
 
-Vulnerability group external ID: <vulnerability_group_external_id>
-```
+Pipeline argument:
 
-Use `--no-send-resolved` to disable recovery events.
+    --ca-bundle /etc/blackduck-harness/ca/customer-ca.pem
 
-### State
+Environment variable:
 
-```text
-datadog-findings-state.json
-```
+    SSL_CERT_FILE=/etc/blackduck-harness/ca/customer-ca.pem
 
-Tracks active and resolved findings, project groups, vulnerability groups, and Datadog event responses.
-## License
+Do not use a short-lived leaf certificate as the trust bundle.
 
-Use at your own risk, this is not an officially supported pathway.
+## Schedule and manual triggering
+
+Base schedule:
+
+    0 2 * * *
+
+Base timezone:
+
+    Etc/UTC
+
+The CronJob initially remains suspended.
+
+Create a manual Job:
+
+    run_id=$(date -u +%Y%m%d%H%M%S)
+
+    kubectl create job \
+      --namespace blackduck-harness \
+      --from=cronjob/blackduck-jira-pipeline \
+      blackduck-jira-manual-${run_id}
+
+Follow logs:
+
+    kubectl logs \
+      --namespace blackduck-harness \
+      job/blackduck-jira-manual-RUN_ID \
+      --follow
+
+The first customer execution should be dry-run only.
+
+## Customer information still required
+
+### Private registry
+
+- Registry hostname.
+- Repository path.
+- Authentication method.
+- Registry username and password or token.
+- Kubernetes image-pull secret name.
+- Image tag or digest convention.
+
+### Kubernetes
+
+- Namespace.
+- Storage class.
+- PVC capacity.
+- Storage reclaim policy.
+- Snapshot or backup policy.
+- Cron schedule.
+- Cron timezone.
+- CPU requests and limits.
+- Memory requests and limits.
+- Maximum runtime.
+- Kustomize acceptance or Helm requirement.
+
+### TLS
+
+- Root and intermediate CA bundle.
+- Confirmation that the CA validates Black Duck.
+- Confirmation that the CA validates Jira.
+- ConfigMap or Secret preference.
+
+### Runtime secrets
+
+- Black Duck URL.
+- Black Duck API token.
+- Jira URL.
+- Jira authentication mode.
+- Jira username and API token or PAT.
+- Secret-management platform.
+
+### Jira
+
+- Jira project key.
+- Entity field ID and type.
+- Project Name field ID.
+- Project Version field ID.
+- CVSS Vector field ID.
+- CVSS Score field ID.
+- Confirmation of Epic and Task parent behavior.
+- Default and Entity screen-tab configuration.
+
+### Operations
+
+- Dry-run or apply schedule.
+- Strict or partial failure policy.
+- Existing-field synchronization policy.
+- Deleted-issue recreation policy.
+- Run-output retention period.
+- Whether Datadog also requires a CronJob.
+
+## Customer deployment sequence
+
+1. Receive registry information.
+2. Receive Kubernetes configuration.
+3. Receive the customer CA bundle.
+4. Receive Jira custom-field IDs.
+5. Configure the customer overlay.
+6. Build and push an immutable image.
+7. Render the Kubernetes resources.
+8. Review the rendered manifests.
+9. Create secrets and the CA ConfigMap.
+10. Deploy with the CronJob suspended.
+11. Trigger a manual dry-run Job.
+12. Inspect logs and PVC output.
+13. Trigger a second dry-run Job.
+14. Confirm cache and Jira state reuse.
+15. Run a limited Jira apply with max-create 5.
+16. Verify Jira Epic and Task behavior.
+17. Enable the schedule after acceptance.
+
+## Optional Datadog workflow
+
+The Datadog workflow remains separate.
+
+Stages:
+
+    blackduck-policy-vuln-find
+        |
+        v
+    blackduck-policy-vuln-pull
+        |
+        v
+    blackduck-findings-to-datadog
+
+Default output:
+
+    .harness/datadog/
+
+The current Kubernetes CronJob implementation targets Jira.
+
+A separate Datadog CronJob can be added if required.
+
+## Documentation
+
+Parent discovery:
+
+    READMEs/FIND_PARENTS_README.md
+
+Hierarchy planning:
+
+    READMEs/HIERARCHY_PLAN_README.md
+
+Jira publishing:
+
+    READMEs/FIND_2JIRA_README.md
+
+Kubernetes deployment:
+
+    READMEs/KUBERNETES_DEPLOYMENT_README.md
+
+Datadog:
+
+    READMEs/FINDINGS_TO_DATADOG_README.md
+    READMEs/POLICY_VULN_FIND_README.md
+    READMEs/POLICY_VULN_PULL_README.md
+
+## License and support
+
+Use at your own risk.
+
+This is not an officially supported Black Duck integration.
