@@ -183,7 +183,7 @@ def test_pipeline_promotes_successful_outputs(
         project_name_contains=None,
         threshold=7.0,
         score_field="overallScore",
-        entity_custom_field="E+H Entity",
+        entity_custom_field="foo Entity",
         require_entity=False,
         timeout=60,
         retries=2,

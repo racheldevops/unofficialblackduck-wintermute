@@ -2434,7 +2434,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--entity-custom-field",
-        default="E+H Entity",
+        default="foo Entity",
         help=(
             "Black Duck project custom-field name copied into findings. "
             "Use an empty string to disable."

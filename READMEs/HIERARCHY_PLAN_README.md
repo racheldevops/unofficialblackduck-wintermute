@@ -242,7 +242,7 @@ Therefore:
 
 The vulnerability rollup attempts to read the Black Duck project custom field named:
 
-    E+H Entity
+    foo Entity
 
 The lookup is performed for the directly affected Black Duck project and cached per project during the run.
 
@@ -269,7 +269,7 @@ To require Entity for every affected project:
 The custom-field name can be changed:
 
     blackduck-vuln-rollup \
-      --entity-custom-field "E+H Entity"
+      --entity-custom-field "foo"
 
 Entity is not part of hierarchy grouping or deterministic IDs. Changing an Entity value should update the existing Jira Task rather than create a duplicate Task.
 

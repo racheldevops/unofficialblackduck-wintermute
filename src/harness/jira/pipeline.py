@@ -696,7 +696,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--entity-custom-field",
-        default="E+H Entity",
+        default="foo Entity",
     )
     parser.add_argument(
         "--require-entity",

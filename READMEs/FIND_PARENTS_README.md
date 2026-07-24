@@ -628,10 +628,10 @@ The vulnerability rollup:
 - Reads vulnerable BOM components.
 - Reads matching vulnerabilities.
 - Retrieves CVSS data.
-- Attempts to retrieve the E+H Entity project custom field.
+- Attempts to retrieve the foo Entity project custom field.
 - Writes .harness/jira/findings.csv.
 
-Parent discovery itself does not retrieve E+H Entity. Entity belongs to the later vulnerability rollup stage because the affected child project is known there.
+Parent discovery itself does not retrieve foo Entity. Entity belongs to the later vulnerability rollup stage because the affected child project is known there.
 
 ## Relationship to Jira hierarchy
 
@@ -660,7 +660,7 @@ Use the legacy project-subproject-vulnerability hierarchy mode if the Jira hiera
 - This module calls Black Duck.
 - This module does not call Jira.
 - This module does not collect vulnerability findings.
-- This module does not retrieve E+H Entity.
+- This module does not retrieve foo Entity.
 - It only discovers parent and child Black Duck project-version relationships.
 - API URL detection is preferred over BOM-name fallback.
 - Incremental cache reuse is enabled by default.
