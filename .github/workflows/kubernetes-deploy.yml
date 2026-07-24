@@ -1,0 +1,432 @@
+name: Deploy to Kubernetes
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub environment containing deployment configuration
+        required: true
+        type: environment
+      operation:
+        description: Render, diff, or apply the Kubernetes resources
+        required: true
+        default: render
+        type: choice
+        options:
+          - render
+          - diff
+          - apply
+      image_tag:
+        description: Immutable image tag, normally a commit SHA
+        required: true
+        type: string
+      pipeline_mode:
+        description: Runtime mode placed in the CronJob
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - apply
+      suspend_cronjob:
+        description: Keep the CronJob schedule suspended
+        required: true
+        default: true
+        type: boolean
+      confirm_apply:
+        description: Required when applying an active Jira pipeline
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    env:
+      REGISTRY_HOST: ${{ vars.REGISTRY_HOST }}
+      REGISTRY_REPOSITORY: ${{ vars.REGISTRY_REPOSITORY }}
+      KUBE_NAMESPACE: ${{ vars.KUBE_NAMESPACE }}
+      CRON_SCHEDULE: ${{ vars.CRON_SCHEDULE }}
+      CRON_TIMEZONE: ${{ vars.CRON_TIMEZONE }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      OPERATION: ${{ inputs.operation }}
+      PIPELINE_MODE: ${{ inputs.pipeline_mode }}
+      SUSPEND_CRONJOB: ${{ inputs.suspend_cronjob }}
+      CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+      KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG_B64 }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate deployment inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -n "${REGISTRY_HOST}" || {
+            echo "REGISTRY_HOST environment variable is required"
+            exit 1
+          }
+
+          test -n "${REGISTRY_REPOSITORY}" || {
+            echo "REGISTRY_REPOSITORY environment variable is required"
+            exit 1
+          }
+
+          test -n "${IMAGE_TAG}" || {
+            echo "image_tag is required"
+            exit 1
+          }
+
+          if [[ "${REGISTRY_HOST}" == "registry.invalid" ]]; then
+            echo "REGISTRY_HOST still contains the placeholder value"
+            exit 1
+          fi
+
+          if [[ -z "${KUBE_NAMESPACE}" ]]; then
+            echo "KUBE_NAMESPACE is empty; using blackduck-harness"
+            echo "KUBE_NAMESPACE=blackduck-harness" >> "${GITHUB_ENV}"
+          fi
+
+          if [[ -z "${CRON_SCHEDULE}" ]]; then
+            echo "CRON_SCHEDULE is empty; using 0 2 * * *"
+            echo "CRON_SCHEDULE=0 2 * * *" >> "${GITHUB_ENV}"
+          fi
+
+          if [[ -z "${CRON_TIMEZONE}" ]]; then
+            echo "CRON_TIMEZONE is empty; using Etc/UTC"
+            echo "CRON_TIMEZONE=Etc/UTC" >> "${GITHUB_ENV}"
+          fi
+
+          if [[ "${OPERATION}" == "apply" \
+             && "${PIPELINE_MODE}" == "apply" \
+             && "${CONFIRM_APPLY}" != "true" ]]; then
+            echo "confirm_apply must be true to deploy Jira apply mode"
+            exit 1
+          fi
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+
+      - name: Prepare deployment overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          work="${RUNNER_TEMP}/blackduck-harness-deploy"
+          rm -rf "${work}"
+          cp -R deploy "${work}"
+
+          python - \
+            "${work}/overlays/customer" \
+            "${REGISTRY_HOST}" \
+            "${REGISTRY_REPOSITORY}" \
+            "${IMAGE_TAG}" \
+            "${KUBE_NAMESPACE}" \
+            "${CRON_SCHEDULE}" \
+            "${CRON_TIMEZONE}" \
+            "${PIPELINE_MODE}" \
+            "${SUSPEND_CRONJOB}" <<'PYTHON'
+          from __future__ import annotations
+
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          (
+              overlay_text,
+              registry_host,
+              registry_repository,
+              image_tag,
+              namespace,
+              cron_schedule,
+              cron_timezone,
+              pipeline_mode,
+              suspend_cronjob,
+          ) = sys.argv[1:]
+
+          overlay = Path(overlay_text)
+          kustomization = overlay / "kustomization.yaml"
+          cronjob = overlay / "cronjob-patch.yaml"
+          namespace_file = overlay / "namespace.yaml"
+          jira_config = overlay / "jira-rollup-config.json"
+
+          if not all(
+              path.is_file()
+              for path in (
+                  kustomization,
+                  cronjob,
+                  namespace_file,
+                  jira_config,
+              )
+          ):
+              raise RuntimeError(
+                  f"Customer overlay is incomplete: {overlay}"
+              )
+
+          config = json.loads(
+              jira_config.read_text(encoding="utf-8")
+          )
+          project_key = str(
+              config.get("jira", {}).get("project_key") or ""
+          ).strip()
+
+          if not project_key:
+              raise RuntimeError(
+                  "jira.project_key is blank in the customer overlay"
+              )
+
+          kustomization_text = kustomization.read_text(
+              encoding="utf-8"
+          )
+          kustomization_text = re.sub(
+              r"(?m)^namespace:\s*.*$",
+              f"namespace: {namespace}",
+              kustomization_text,
+              count=1,
+          )
+          kustomization_text = re.sub(
+              r"(?m)^\s*newName:\s*.*$",
+              (
+                  "    newName: "
+                  f"{registry_host}/{registry_repository}"
+              ),
+              kustomization_text,
+              count=1,
+          )
+          kustomization_text = re.sub(
+              r"(?m)^\s*newTag:\s*.*$",
+              f"    newTag: {image_tag}",
+              kustomization_text,
+              count=1,
+          )
+          kustomization.write_text(
+              kustomization_text,
+              encoding="utf-8",
+          )
+
+          namespace_text = namespace_file.read_text(
+              encoding="utf-8"
+          )
+          namespace_text = re.sub(
+              (
+                  r"(?ms)(kind:\s*Namespace.*?"
+                  r"metadata:\s*\n\s*name:)\s*.*$"
+              ),
+              rf"\1 {namespace}",
+              namespace_text,
+              count=1,
+          )
+          namespace_file.write_text(
+              namespace_text,
+              encoding="utf-8",
+          )
+
+          cronjob_text = cronjob.read_text(encoding="utf-8")
+          cronjob_text = re.sub(
+              r'(?m)^  schedule:\s*".*"$',
+              f'  schedule: "{cron_schedule}"',
+              cronjob_text,
+              count=1,
+          )
+          cronjob_text = re.sub(
+              r'(?m)^  timeZone:\s*".*"$',
+              f'  timeZone: "{cron_timezone}"',
+              cronjob_text,
+              count=1,
+          )
+          cronjob_text = re.sub(
+              r"(?m)^  suspend:\s*(true|false)$",
+              (
+                  "  suspend: "
+                  + (
+                      "true"
+                      if suspend_cronjob.lower() == "true"
+                      else "false"
+                  )
+              ),
+              cronjob_text,
+              count=1,
+          )
+
+          desired_argument = (
+              "--apply"
+              if pipeline_mode == "apply"
+              else "--dry-run"
+          )
+          cronjob_text = cronjob_text.replace(
+              "- --dry-run",
+              f"- {desired_argument}",
+          )
+          cronjob_text = cronjob_text.replace(
+              "- --apply",
+              f"- {desired_argument}",
+          )
+          cronjob.write_text(
+              cronjob_text,
+              encoding="utf-8",
+          )
+          PYTHON
+
+          echo "DEPLOYMENT_ROOT=${work}" >> "${GITHUB_ENV}"
+
+      - name: Render Kubernetes resources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl kustomize \
+            "${DEPLOYMENT_ROOT}/overlays/customer" \
+            > "${GITHUB_WORKSPACE}/rendered-manifest.yaml"
+
+          test -s "${GITHUB_WORKSPACE}/rendered-manifest.yaml"
+
+          if grep -q "registry.invalid" \
+              "${GITHUB_WORKSPACE}/rendered-manifest.yaml"; then
+            echo "Rendered manifest still contains registry.invalid"
+            exit 1
+          fi
+
+          if grep -q "replace-me" \
+              "${GITHUB_WORKSPACE}/rendered-manifest.yaml"; then
+            echo "Rendered manifest still contains replace-me"
+            exit 1
+          fi
+
+          grep -q "kind: CronJob" \
+            "${GITHUB_WORKSPACE}/rendered-manifest.yaml"
+
+          grep -q "kind: PersistentVolumeClaim" \
+            "${GITHUB_WORKSPACE}/rendered-manifest.yaml"
+
+          grep -q "concurrencyPolicy: Forbid" \
+            "${GITHUB_WORKSPACE}/rendered-manifest.yaml"
+
+          grep -q "claimName: blackduck-harness-data" \
+            "${GITHUB_WORKSPACE}/rendered-manifest.yaml"
+
+          echo "Rendered image:"
+          grep -E "^[[:space:]]+image:" \
+            "${GITHUB_WORKSPACE}/rendered-manifest.yaml"
+
+      - name: Upload rendered manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: blackduck-harness-${{ inputs.environment }}-${{ inputs.image_tag }}
+          path: rendered-manifest.yaml
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Configure Kubernetes credentials
+        if: inputs.operation != 'render'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -n "${KUBE_CONFIG_B64}" || {
+            echo "KUBE_CONFIG_B64 environment secret is required"
+            exit 1
+          }
+
+          kubeconfig="${RUNNER_TEMP}/kubeconfig"
+          printf '%s' "${KUBE_CONFIG_B64}" \
+            | base64 --decode \
+            > "${kubeconfig}"
+
+          chmod 600 "${kubeconfig}"
+          echo "KUBECONFIG=${kubeconfig}" >> "${GITHUB_ENV}"
+
+      - name: Validate Kubernetes target
+        if: inputs.operation != 'render'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl config current-context
+          kubectl cluster-info
+
+          kubectl get namespace "${KUBE_NAMESPACE}"
+
+          kubectl get secret \
+            blackduck-harness-registry \
+            --namespace "${KUBE_NAMESPACE}"
+
+          kubectl get secret \
+            blackduck-harness-credentials \
+            --namespace "${KUBE_NAMESPACE}"
+
+      - name: Show Kubernetes diff
+        if: inputs.operation == 'diff'
+        shell: bash
+        run: |
+          set +e
+
+          kubectl diff \
+            --filename "${GITHUB_WORKSPACE}/rendered-manifest.yaml"
+
+          rc=$?
+          set -e
+
+          if [[ "${rc}" -gt 1 ]]; then
+            echo "kubectl diff failed with exit code ${rc}"
+            exit "${rc}"
+          fi
+
+          if [[ "${rc}" -eq 1 ]]; then
+            echo "Kubernetes differences were found"
+          else
+            echo "No Kubernetes differences were found"
+          fi
+
+      - name: Apply Kubernetes resources
+        if: inputs.operation == 'apply'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl apply \
+            --server-side \
+            --field-manager blackduck-harness \
+            --filename "${GITHUB_WORKSPACE}/rendered-manifest.yaml"
+
+          kubectl get cronjob \
+            blackduck-jira-pipeline \
+            --namespace "${KUBE_NAMESPACE}" \
+            --output wide
+
+          kubectl get pvc \
+            blackduck-harness-data \
+            --namespace "${KUBE_NAMESPACE}" \
+            --output wide
+
+      - name: Write deployment summary
+        shell: bash
+        run: |
+          {
+            echo "## Kubernetes deployment"
+            echo
+            echo "Environment: ${{ inputs.environment }}"
+            echo
+            echo "Operation: ${OPERATION}"
+            echo
+            echo "Pipeline mode: ${PIPELINE_MODE}"
+            echo
+            echo "CronJob suspended: ${SUSPEND_CRONJOB}"
+            echo
+            echo "Namespace: ${KUBE_NAMESPACE}"
+            echo
+            echo "Image: ${REGISTRY_HOST}/${REGISTRY_REPOSITORY}:${IMAGE_TAG}"
+            echo
+            echo "Schedule: ${CRON_SCHEDULE}"
+            echo
+            echo "Timezone: ${CRON_TIMEZONE}"
+          } >> "${GITHUB_STEP_SUMMARY}"

@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: blackduck-jira-pipeline
+spec:
+  schedule: "0 2 * * *"
+  timeZone: "Etc/UTC"
+  suspend: true
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 21600
+      template:
+        spec:
+          imagePullSecrets:
+            - name: blackduck-harness-registry
+          containers:
+            - name: jira-pipeline
+              imagePullPolicy: IfNotPresent
+              args:
+                - --dry-run
+                - --strict
+                - --config
+                - /etc/blackduck-harness/jira-rollup-config.json
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 512Mi
+                limits:
+                  cpu: "2"
+                  memory: 2Gi

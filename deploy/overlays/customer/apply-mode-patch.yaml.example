@@ -1,0 +1,17 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: blackduck-jira-pipeline
+spec:
+  suspend: false
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: jira-pipeline
+              args:
+                - --apply
+                - --strict
+                - --config
+                - /etc/blackduck-harness/jira-rollup-config.json

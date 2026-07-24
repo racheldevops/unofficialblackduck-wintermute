@@ -1,0 +1,97 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: blackduck-jira-pipeline
+  labels:
+    app.kubernetes.io/name: blackduck-harness
+    app.kubernetes.io/component: jira-pipeline
+spec:
+  schedule: "0 2 * * *"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  suspend: true
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 21600
+      ttlSecondsAfterFinished: 604800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: blackduck-harness
+            app.kubernetes.io/component: jira-pipeline
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          imagePullSecrets:
+            - name: blackduck-harness-registry
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: jira-pipeline
+              image: blackduck-harness:local
+              imagePullPolicy: IfNotPresent
+              args:
+                - --dry-run
+                - --strict
+                - --config
+                - /etc/blackduck-harness/jira-rollup-config.json
+              envFrom:
+                - secretRef:
+                    name: blackduck-harness-credentials
+              env:
+                - name: HARNESS_OUTPUT_DIR
+                  value: /var/lib/blackduck-harness
+                - name: TMPDIR
+                  value: /tmp
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 512Mi
+                limits:
+                  cpu: "2"
+                  memory: 2Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: harness-data
+                  mountPath: /var/lib/blackduck-harness
+                - name: tmp
+                  mountPath: /tmp
+                - name: jira-config
+                  mountPath: /etc/blackduck-harness/jira-rollup-config.json
+                  subPath: jira-rollup-config.json
+                  readOnly: true
+                - name: customer-ca
+                  mountPath: /etc/blackduck-harness/ca
+                  readOnly: true
+          volumes:
+            - name: harness-data
+              persistentVolumeClaim:
+                claimName: blackduck-harness-data
+            - name: tmp
+              emptyDir:
+                sizeLimit: 1Gi
+            - name: jira-config
+              configMap:
+                name: blackduck-harness-jira-config
+            - name: customer-ca
+              configMap:
+                name: blackduck-harness-ca
+                optional: true

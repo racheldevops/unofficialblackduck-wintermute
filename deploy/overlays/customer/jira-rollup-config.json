@@ -1,0 +1,103 @@
+{
+  "jira": {
+    "url": "",
+    "project_key": "",
+    "issue_type": "Task",
+    "api_version": "2",
+    "auth_mode": "basic",
+    "verify_tls": true
+  },
+  "issue": {
+    "summary_template": "Black Duck: {alert_severity} Alert - {subproject} - version {subproject_version} - {component} version {component_version}",
+    "labels": [
+      "blackduck",
+      "subproject_rollup",
+      "BDAlert"
+    ],
+    "priority_by_severity": {
+      "CRITICAL": "Highest",
+      "HIGH": "High",
+      "MEDIUM": "Medium",
+      "LOW": "Low"
+    },
+    "alert_severity_by_severity": {
+      "CRITICAL": "BLOCKER",
+      "HIGH": "HIGH",
+      "MEDIUM": "MEDIUM",
+      "LOW": "LOW",
+      "UNKNOWN": "UNKNOWN"
+    },
+    "additional_fields": {}
+  },
+  "hierarchy": {
+    "epic_issue_type": "Epic",
+    "story_issue_type": "Task",
+    "vulnerability_issue_type": "Subtask",
+    "story_parent_mode": "jira_parent",
+    "vulnerability_parent_mode": "jira_parent",
+    "issue_link_type": "Relates",
+    "epic_link_field": "",
+    "sync_existing_fields": false,
+    "summary_templates": {
+      "story": "Black Duck: {alert_severity} Alert - {affected_project} - version {affected_version} - {component_summary}"
+    },
+    "labels": {
+      "epic": [
+        "bd_rollup_cve"
+      ],
+      "story": [
+        "bd_rollup_project_version"
+      ],
+      "vulnerability": [
+        "bd_rollup_vuln"
+      ]
+    },
+    "additional_fields": {
+      "epic": {},
+      "story": {},
+      "vulnerability": {}
+    },
+    "field_mappings": {
+      "project_name": {
+        "field_id": "",
+        "source": "affected_project",
+        "node_types": [
+          "story"
+        ],
+        "value_type": "text"
+      },
+      "project_version": {
+        "field_id": "",
+        "source": "affected_version",
+        "node_types": [
+          "story"
+        ],
+        "value_type": "text"
+      },
+      "cvss_vector": {
+        "field_id": "",
+        "source": "cvss_vector",
+        "node_types": [
+          "story"
+        ],
+        "value_type": "text"
+      },
+      "cvss_score": {
+        "field_id": "",
+        "source": "stats.max_score",
+        "node_types": [
+          "story"
+        ],
+        "value_type": "number"
+      },
+      "entity": {
+        "field_id": "",
+        "source": "entity",
+        "node_types": [
+          "story"
+        ],
+        "value_type": "text"
+      }
+    }
+  }
+}
