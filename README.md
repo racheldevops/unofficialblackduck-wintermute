@@ -1,4 +1,4 @@
-# unofficialblackduck-harness
+# unofficialblackduck-harness 
 
 This repository contains an unofficial enhancement to Black Duck SCA parent/child project finding alert workflows. It can roll up vulnerabilities from affected Black Duck project versions, plan Jira remediation hierarchies, publish those hierarchies to Jira, and optionally send high-risk vulnerability events to Datadog for on-call incident response.
 
