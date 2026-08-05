@@ -1,0 +1,71 @@
+{
+  "results_dir": ".benchmark-results",
+  "timeout_seconds": 21600,
+  "repetitions": 1,
+  "workers": [
+    4
+  ],
+  "pipeline_args": [
+    "--dry-run",
+    "--strict",
+    "--insecure"
+  ],
+  "jira_config": "src/harness/jira/config/jira-rollup-config.json",
+  "environment_names": [
+    "BLACKDUCK_URL",
+    "BLACKDUCK_API_TOKEN",
+    "JIRA_URL",
+    "JIRA_USER",
+    "JIRA_API_TOKEN",
+    "JIRA_PAT",
+    "SSL_CERT_FILE"
+  ],
+  "local": {
+    "enabled": true,
+    "command": [
+      ".venv/bin/python",
+      "-m",
+      "harness.jira.pipeline"
+    ]
+  },
+  "docker": {
+    "enabled": false,
+    "command": "docker",
+    "image": "blackduck-harness:local",
+    "read_only": true,
+    "cpus": 2,
+    "memory": "2g",
+    "tmpfs": "/tmp:rw,size=1g",
+    "extra_run_args": []
+  },
+  "kubernetes": {
+    "enabled": false,
+    "kubectl": "kubectl",
+    "namespace": "blackduck-harness",
+    "cronjob": "blackduck-jira-pipeline",
+    "container_name": "jira-pipeline",
+    "data_volume_name": "harness-data",
+    "config_path": "/etc/blackduck-harness/jira-rollup-config.json",
+    "storage_modes": [
+      "emptydir",
+      "pvc"
+    ],
+    "create_pvc": true,
+    "pvc_claim_name": "",
+    "pvc_size": "5Gi",
+    "storage_class": "",
+    "cleanup_jobs": true,
+    "cleanup_pvc": true,
+    "poll_seconds": 5,
+    "resources": {
+      "requests": {
+        "cpu": "1",
+        "memory": "512Mi"
+      },
+      "limits": {
+        "cpu": "2",
+        "memory": "2Gi"
+      }
+    }
+  }
+}
