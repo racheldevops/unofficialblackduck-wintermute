@@ -8,3 +8,4 @@ __pycache__/
 .benchmark-results/
 .planning/
 .codesight/
+.test-results/
