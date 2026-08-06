@@ -6,22 +6,31 @@ import csv
 import hashlib
 import json
 import os
-import ssl
 import sys
-import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse, urlunparse
 
+from wintermute.blackduck.inventory import (
+    InventoryFilter,
+    build_project_version_inventory,
+    get_project_versions as shared_get_project_versions,
+)
+from wintermute.blackduck.candidates import (
+    candidate_cache_settings as shared_candidate_cache_settings,
+    candidate_key as shared_candidate_key,
+    count_policy_violations as shared_count_policy_violations,
+    count_vulnerable_components as shared_count_vulnerable_components,
+    scan_candidate as shared_scan_candidate,
+    stable_candidate as shared_stable_candidate,
+)
+from wintermute.blackduck.client import BlackDuckClient as SharedBlackDuckClient
 from wintermute.concurrency import (
     MAX_IO_WORKERS,
     bounded_worker_count,
-    ordered_parallel_map,
 )
 from wintermute.paths import datadog_output_path, ensure_parent_dir
 
@@ -188,30 +197,22 @@ def version_updated(version: dict[str, Any]) -> str:
     )
 
 
-def candidate_key(project: str, project_version: str, project_version_href: str) -> str:
-    return "|".join([project, project_version, canonical_href(project_version_href)])
+def candidate_key(
+        project: str,
+        project_version: str,
+        project_version_href: str,
+) -> str:
+    return shared_candidate_key(
+        project,
+        project_version,
+        project_version_href,
+    )
 
 
-def stable_candidate(row: dict[str, str]) -> dict[str, str]:
-    return {
-        key: str(row.get(key, ""))
-        for key in [
-            "project",
-            "project_version",
-            "project_phase",
-            "project_updated",
-            "project_href",
-            "project_version_href",
-            "candidate_reason",
-            "candidate_policy_name",
-            "candidate_policy_rule_href",
-            "candidate_vulnerable_component_count",
-            "candidate_policy_violation_count",
-            "candidate_security_violation_count",
-            "candidate_key",
-            "candidate_external_id",
-        ]
-    }
+def stable_candidate(
+        row: dict[str, str],
+) -> dict[str, str]:
+    return shared_stable_candidate(row)
 
 
 def format_duration(seconds: float) -> str:
@@ -230,232 +231,14 @@ def format_duration(seconds: float) -> str:
     return f"{hours}h {remaining_minutes}m {remainder}s"
 
 
-class BlackDuckClient:
-    def __init__(
-        self,
-        base_url: str,
-        api_token: str,
-        insecure: bool,
-        timeout: int,
-        retries: int,
-        retry_delay: float,
-        page_limit: int,
-        debug: bool,
-        bearer_token: str | None = None,
-    ):
-        self.base_url = base_url.rstrip("/")
-        self.api_token = api_token
-        self.timeout = timeout
-        self.retries = retries
-        self.retry_delay = retry_delay
-        self.page_limit = page_limit
-        self.debug = debug
-        self.bearer_token: str | None = bearer_token
-        self.ssl_context = ssl._create_unverified_context() if insecure else None
-
-    def clone_for_worker(self) -> BlackDuckClient:
-        worker = BlackDuckClient(
-            base_url=self.base_url,
-            api_token=self.api_token,
-            insecure=False,
-            timeout=self.timeout,
-            retries=self.retries,
-            retry_delay=self.retry_delay,
-            page_limit=self.page_limit,
-            debug=self.debug,
-            bearer_token=self.bearer_token,
-        )
-        worker.ssl_context = self.ssl_context
-        return worker
-
-    def authenticate(self) -> None:
-        url = f"{self.base_url}/api/tokens/authenticate"
-        headers = {
-            "Authorization": f"token {self.api_token}",
-            "Accept": "application/json",
-        }
-
-        for attempt in range(self.retries + 1):
-            request = Request(url, data=b"", headers=headers, method="POST")
-
-            try:
-                with urlopen(
-                    request,
-                    timeout=self.timeout,
-                    context=self.ssl_context,
-                ) as response:
-                    text = response.read().decode("utf-8")
-
-                try:
-                    payload = json.loads(text)
-                except json.JSONDecodeError as error:
-                    raise RuntimeError(f"Authentication returned invalid JSON: {error}") from error
-
-                self.bearer_token = str(payload["bearerToken"])
-                return
-
-            except (HTTPError, URLError, TimeoutError, OSError) as error:
-                if isinstance(error, HTTPError):
-                    body = error.read().decode("utf-8", errors="replace")
-                    retryable = error.code in {429, 500, 502, 503, 504}
-                    message = f"HTTP {error.code} {error.reason}: {body[:1000]}"
-                else:
-                    retryable = True
-                    message = str(error)
-
-                if not retryable or attempt >= self.retries:
-                    raise RuntimeError(f"Authentication failed: {message}") from error
-
-                time.sleep(self.retry_delay * (attempt + 1))
-
-        raise RuntimeError("Authentication failed unexpectedly")
-
-    def _make_url(self, url_or_path: str, params: dict[str, Any] | None = None) -> str:
-        if url_or_path.startswith(("http://", "https://")):
-            url = url_or_path
-        else:
-            url = f"{self.base_url}/{url_or_path.lstrip('/')}"
-
-        if not params:
-            return url
-
-        parsed = urlparse(url)
-        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-
-        for key, value in params.items():
-            if value is not None:
-                query[key] = str(value)
-
-        return urlunparse(
-            (
-                parsed.scheme,
-                parsed.netloc,
-                parsed.path,
-                parsed.params,
-                urlencode(query),
-                parsed.fragment,
-            )
-        )
-
-    def get(self, url_or_path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        url = self._make_url(url_or_path, params)
-
-        headers = {
-            "Accept": "application/json",
-        }
-
-        if self.bearer_token:
-            headers["Authorization"] = f"Bearer {self.bearer_token}"
-
-        for attempt in range(self.retries + 1):
-            request = Request(url, headers=headers, method="GET")
-
-            try:
-                with urlopen(
-                    request,
-                    timeout=self.timeout,
-                    context=self.ssl_context,
-                ) as response:
-                    text = response.read().decode("utf-8")
-
-                if not text:
-                    return {}
-
-                try:
-                    return json.loads(text)
-                except json.JSONDecodeError as error:
-                    raise RuntimeError(f"GET {url} returned invalid JSON: {error}") from error
-
-            except (HTTPError, URLError, TimeoutError, OSError) as error:
-                if isinstance(error, HTTPError):
-                    body = error.read().decode("utf-8", errors="replace")
-                    retryable = error.code in {429, 500, 502, 503, 504}
-                    message = f"HTTP {error.code} {error.reason}: {body[:1000]}"
-                else:
-                    retryable = True
-                    message = str(error)
-
-                if not retryable or attempt >= self.retries:
-                    raise RuntimeError(f"GET {url} failed: {message}") from error
-
-                if self.debug:
-                    print(f"Retrying GET {url}: {message}", file=sys.stderr)
-
-                time.sleep(self.retry_delay * (attempt + 1))
-
-        raise RuntimeError(f"GET {url} failed unexpectedly")
-
-    def paged_get(
-        self,
-        url_or_path: str,
-        params: dict[str, Any] | None = None,
-        limit: int | None = None,
-    ) -> list[dict[str, Any]]:
-        page_limit = limit or self.page_limit
-        offset = 0
-        all_items: list[dict[str, Any]] = []
-
-        while True:
-            page_params = dict(params or {})
-            page_params["offset"] = offset
-            page_params["limit"] = page_limit
-
-            payload = self.get(url_or_path, page_params)
-
-            if "items" not in payload:
-                return [payload] if payload else []
-
-            items = payload.get("items") or []
-            all_items.extend(items)
-
-            total_count = payload.get("totalCount")
-            total_int = int(total_count) if total_count is not None else None
-
-            if not items:
-                break
-
-            offset += len(items)
-
-            if total_int is not None and offset >= total_int:
-                break
-
-            if len(items) < page_limit:
-                break
-
-        return all_items
-
-    def collection_count_and_items(
-        self,
-        url_or_path: str,
-        params: dict[str, Any] | None = None,
-        limit: int = 1,
-    ) -> tuple[int, list[dict[str, Any]]]:
-        page_params = dict(params or {})
-        page_params["offset"] = 0
-        page_params["limit"] = limit
-
-        payload = self.get(url_or_path, page_params)
-
-        if "items" in payload:
-            items = payload.get("items") or []
-            if payload.get("totalCount") is not None:
-                return int(payload["totalCount"]), list(items)
-            return len(items), list(items)
-
-        return (1, [payload]) if payload else (0, [])
-
-    def count_items(self, url_or_path: str, params: dict[str, Any] | None = None) -> int:
-        count, _ = self.collection_count_and_items(url_or_path, params=params, limit=1)
-        return count
+class BlackDuckClient(SharedBlackDuckClient):
+    pass
 
 
-def cache_settings(args: argparse.Namespace) -> dict[str, Any]:
-    return {
-        "candidate_mode": str(args.candidate_mode or ""),
-        "policy_name": str(args.policy_name or ""),
-        "policy_rule_id": str(args.policy_rule_id or ""),
-        "skip_policy_rules": bool(args.skip_policy_rules),
-    }
+def cache_settings(
+        args: argparse.Namespace,
+) -> dict[str, Any]:
+    return shared_candidate_cache_settings(args)
 
 
 def fresh_cache(base_url: str, settings: dict[str, Any]) -> dict[str, Any]:
@@ -538,142 +321,73 @@ def cache_stale(row: dict[str, Any], max_age_hours: float) -> bool:
     return age_hours >= max_age_hours
 
 
-def get_project_versions(client: BlackDuckClient, project: dict[str, Any]) -> list[dict[str, Any]]:
-    versions_url = get_link(project, ("versions",))
-
-    if not versions_url:
-        project_href = get_self_href(project)
-        if not project_href:
-            return []
-        versions_url = f"{project_href}/versions"
-
-    return client.paged_get(versions_url)
+def get_project_versions(
+        client: BlackDuckClient,
+        project: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return shared_get_project_versions(
+        client,
+        project,
+    )
 
 
 def build_inventory(
         client: BlackDuckClient,
         args: argparse.Namespace,
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-    projects = client.paged_get("/api/projects")
-    selected_projects: list[dict[str, Any]] = []
-
-    for project in projects:
-        project_name = str(project.get("name") or "")
-
-        if (
-            args.project_name
-            and project_name != args.project_name
-        ):
-            continue
-
-        if (
-            args.project_name_contains
-            and args.project_name_contains.lower()
-            not in project_name.lower()
-        ):
-            continue
-
-        selected_projects.append(project)
-
-        if (
-            args.max_projects is not None
-            and len(selected_projects) >= args.max_projects
-        ):
-            break
-
-    if not selected_projects:
-        return []
-
-    requested_workers = int(
-        getattr(args, "workers", 1)
-    )
-    worker_count = min(
-        bounded_worker_count(
-            requested_workers,
-            maximum=MAX_IO_WORKERS,
+    result = build_project_version_inventory(
+        client,
+        filters=InventoryFilter(
+            project_name=str(
+                getattr(args, "project_name", "") or ""
+            ),
+            project_name_contains=str(
+                getattr(
+                    args,
+                    "project_name_contains",
+                    "",
+                )
+                or ""
+            ),
+            version_name=str(
+                getattr(args, "version_name", "") or ""
+            ),
+            phase=str(
+                getattr(args, "phase", "") or ""
+            ),
+            max_projects=getattr(
+                args,
+                "max_projects",
+                None,
+            ),
+            max_versions=getattr(
+                args,
+                "max_versions",
+                None,
+            ),
         ),
-        len(selected_projects),
+        workers=int(
+            getattr(args, "workers", 1)
+        ),
+        debug=bool(
+            getattr(args, "debug", False)
+        ),
     )
-    worker_local = threading.local()
 
-    def worker_client() -> BlackDuckClient:
-        if worker_count == 1:
-            return client
-
-        local_client = getattr(
-            worker_local,
-            "blackduck_client",
-            None,
+    for failure in result.failures:
+        print(
+            f"Warning: failed reading versions for "
+            f"{failure.project}: {failure.error}",
+            file=sys.stderr,
         )
 
-        if local_client is None:
-            local_client = client.clone_for_worker()
-            worker_local.blackduck_client = local_client
-
-        return local_client
-
-    def load_project_versions(
-            project: dict[str, Any],
-    ) -> tuple[list[dict[str, Any]], str]:
-        try:
-            return (
-                get_project_versions(
-                    worker_client(),
-                    project,
-                ),
-                "",
-            )
-        except RuntimeError as error:
-            return [], str(error)
-
-    version_results = ordered_parallel_map(
-        selected_projects,
-        load_project_versions,
-        workers=worker_count,
-        maximum=MAX_IO_WORKERS,
-    )
-    inventory: list[
-        tuple[dict[str, Any], dict[str, Any]]
-    ] = []
-
-    for project, (versions, error) in zip(
-        selected_projects,
-        version_results,
-        strict=True,
-    ):
-        project_name = str(project.get("name") or "")
-
-        if error:
-            print(
-                f"Warning: failed reading versions for "
-                f"{project_name}: {error}",
-                file=sys.stderr,
-            )
-            continue
-
-        for version in versions:
-            if (
-                args.version_name
-                and version_name(version) != args.version_name
-            ):
-                continue
-
-            if (
-                args.phase
-                and str(version.get("phase") or "")
-                != args.phase
-            ):
-                continue
-
-            inventory.append((project, version))
-
-            if (
-                args.max_versions is not None
-                and len(inventory) >= args.max_versions
-            ):
-                return inventory
-
-    return inventory
+    return [
+        (
+            item.project_resource,
+            item.version_resource,
+        )
+        for item in result.items
+    ]
 
 
 def signature(project: dict[str, Any], version: dict[str, Any]) -> str:
@@ -690,129 +404,27 @@ def signature(project: dict[str, Any], version: dict[str, Any]) -> str:
 
 
 def count_vulnerable_components(
-    client: BlackDuckClient,
-    version: dict[str, Any],
-    project_version_href: str,
+        client: BlackDuckClient,
+        version: dict[str, Any],
+        project_version_href: str,
 ) -> int:
-    if not project_version_href:
-        return 0
-
-    try:
-        return client.count_items(f"{project_version_href}/vulnerable-bom-components")
-    except RuntimeError as direct_error:
-        if client.debug:
-            print(
-                f"Direct vulnerable-bom-components check failed for {project_version_href}: {direct_error}",
-                file=sys.stderr,
-            )
-
-    vulnerable_link = get_link(
+    return shared_count_vulnerable_components(
+        client,
         version,
-        (
-            "vulnerable-bom-components",
-            "vulnerableBomComponents",
-            "vulnerable-components",
-        ),
+        project_version_href,
     )
-
-    if not vulnerable_link:
-        try:
-            fresh_version = client.get(project_version_href)
-            vulnerable_link = get_link(
-                fresh_version,
-                (
-                    "vulnerable-bom-components",
-                    "vulnerableBomComponents",
-                    "vulnerable-components",
-                ),
-            )
-        except RuntimeError as error:
-            if client.debug:
-                print(
-                    f"Could not resolve vulnerable component link for {project_version_href}: {error}",
-                    file=sys.stderr,
-                )
-
-    if not vulnerable_link:
-        return 0
-
-    try:
-        return client.count_items(vulnerable_link)
-    except RuntimeError as fallback_error:
-        if client.debug:
-            print(
-                f"Linked vulnerable component check failed for {project_version_href}: {fallback_error}",
-                file=sys.stderr,
-            )
-        return 0
 
 
 def count_policy_violations(
-    client: BlackDuckClient,
-    project_version_href: str,
-    settings: ScanSettings,
+        client: BlackDuckClient,
+        project_version_href: str,
+        settings: ScanSettings,
 ) -> tuple[int, int, str, str]:
-    if not project_version_href:
-        return 0, 0, "", ""
-
-    security_count = 0
-    matched_policy_name = ""
-    matched_policy_href = ""
-
-    need_rule_details = (
-        not settings.skip_policy_rules
-        and (
-            bool(settings.policy_name or settings.policy_rule_id)
-            or settings.candidate_mode == "both"
-        )
+    return shared_count_policy_violations(
+        client,
+        project_version_href,
+        settings,
     )
-
-    component_limit = 25 if need_rule_details else 1
-
-    try:
-        policy_count, components = client.collection_count_and_items(
-            f"{project_version_href}/components",
-            params={"filter": "policyStatus:IN_VIOLATION"},
-            limit=component_limit,
-        )
-    except RuntimeError as error:
-        if client.debug:
-            print(f"Policy violation count failed for {project_version_href}: {error}", file=sys.stderr)
-        return 0, 0, "", ""
-
-    if not need_rule_details:
-        return policy_count, 0, "", ""
-
-    for component in components[:25]:
-        policy_rules_url = get_link(component, ("policy-rules", "policyRules", "policy-rule"))
-
-        if not policy_rules_url:
-            continue
-
-        try:
-            _, rules = client.collection_count_and_items(policy_rules_url, limit=25)
-        except RuntimeError as error:
-            if client.debug:
-                print(f"Policy rule check failed for {project_version_href}: {error}", file=sys.stderr)
-            continue
-
-        for rule in rules[:25]:
-            category = str(first_value_by_key(rule, ["category", "policyCategory"]) or "").upper()
-            name = str(first_value_by_key(rule, ["name", "policyName", "policyRuleName"]) or "")
-            href = canonical_href(get_self_href(rule) or get_link(rule, ("self",)))
-
-            if category == "SECURITY":
-                security_count += 1
-
-            if settings.policy_name and name == settings.policy_name:
-                matched_policy_name = name
-                matched_policy_href = href
-
-            if settings.policy_rule_id and settings.policy_rule_id in href:
-                matched_policy_name = name
-                matched_policy_href = href
-
-    return policy_count, security_count, matched_policy_name, matched_policy_href
 
 
 def build_failed_row(
@@ -850,74 +462,21 @@ def build_failed_row(
 
 
 def scan_candidate(
-    client: BlackDuckClient,
-    project: dict[str, Any],
-    version: dict[str, Any],
-    settings: ScanSettings,
+        client: BlackDuckClient,
+        project: dict[str, Any],
+        version: dict[str, Any],
+        settings: ScanSettings,
 ) -> dict[str, str]:
-    project_name = str(project.get("name") or "")
-    project_version = version_name(version)
-    project_href = canonical_href(get_self_href(project))
-    project_version_href = canonical_href(get_self_href(version))
-    key = candidate_key(project_name, project_version, project_version_href)
-
-    vulnerable_count = 0
-    policy_count = 0
-    security_count = 0
-    policy_name = ""
-    policy_href = ""
-
-    if settings.candidate_mode in {"vulnerable-only", "both"}:
-        vulnerable_count = count_vulnerable_components(
-            client=client,
-            version=version,
-            project_version_href=project_version_href,
-        )
-
-    if settings.candidate_mode in {"policy-only", "both"}:
-        policy_count, security_count, policy_name, policy_href = count_policy_violations(
-            client=client,
-            project_version_href=project_version_href,
-            settings=settings,
-        )
-
-    reasons: list[str] = []
-
-    if vulnerable_count > 0:
-        reasons.append("vulnerable-bom-components")
-
-    if policy_count > 0:
-        reasons.append("policy-violation")
-
-    if security_count > 0:
-        reasons.append("security-policy-violation")
-
-    if settings.policy_name or settings.policy_rule_id:
-        if policy_name or policy_href:
-            reasons.append("requested-policy-match")
-        else:
-            reasons = []
-
-    return {
-        "project": project_name,
-        "project_version": project_version,
-        "project_phase": str(version.get("phase") or ""),
-        "project_updated": version_updated(version),
-        "project_href": project_href,
-        "project_version_href": project_version_href,
-        "candidate_reason": ";".join(sorted(set(reasons))),
-        "candidate_policy_name": policy_name or settings.policy_name,
-        "candidate_policy_rule_href": policy_href,
-        "candidate_vulnerable_component_count": str(vulnerable_count),
-        "candidate_policy_violation_count": str(policy_count),
-        "candidate_security_violation_count": str(security_count),
-        "candidate_detected_at": now_iso(),
-        "cache_entry_status": "ok",
-        "cache_reuse_reason": "fresh-scan",
-        "scan_error": "",
-        "candidate_key": key,
-        "candidate_external_id": sha256_hex(key),
-    }
+    return shared_scan_candidate(
+        client,
+        project,
+        version,
+        settings,
+        vulnerable_counter=(
+            count_vulnerable_components
+        ),
+        policy_counter=count_policy_violations,
+    )
 
 
 def scan_one_candidate_version(

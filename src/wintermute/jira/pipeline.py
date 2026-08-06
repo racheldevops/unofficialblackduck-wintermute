@@ -521,7 +521,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
             hierarchy_plan = run_dir / 'jira-hierarchy-plan.json'
             hierarchy_summary = run_dir / 'jira-hierarchy-summary.csv'
             hierarchy_nodes = run_dir / 'jira-hierarchy-nodes.csv'
-            planner_arguments = ['--findings', str(findings_output), '--hierarchy-mode', 'vulnerability-project', '--plan-out', str(hierarchy_plan), '--summary-out', str(hierarchy_summary), '--nodes-out', str(hierarchy_nodes)]
+            planner_arguments = ['--findings', str(findings_output), '--hierarchy-mode', 'vulnerability-remediation', '--plan-out', str(hierarchy_plan), '--summary-out', str(hierarchy_summary), '--nodes-out', str(hierarchy_nodes)]
             if args.hierarchy_limit is not None:
                 planner_arguments.extend(['--limit', str(args.hierarchy_limit)])
             filter_arguments = [('--only-parent-project', args.only_parent_project), ('--only-parent-version', args.only_parent_version), ('--only-subproject', args.only_subproject), ('--only-vulnerability', args.only_vulnerability)]
