@@ -522,3 +522,16 @@ def test_version_inventory_fetches_projects_concurrently() -> None:
         "Project 2",
         "Project 3",
     ]
+
+
+def test_parent_discovery_does_not_retain_unique_bom_responses() -> None:
+    client = parents.BlackDuckClient(
+        "https://bd.example",
+        "token",
+    )
+    clone = client.clone_for_worker()
+
+    assert client.cache_raw_gets is False
+    assert client.cache_paged_results is False
+    assert clone.cache_raw_gets is False
+    assert clone.cache_paged_results is False

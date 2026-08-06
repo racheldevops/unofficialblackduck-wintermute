@@ -426,3 +426,13 @@ def test_load_config_rejects_non_object(tmp_path: Path) -> None:
         pipeline.load_config(path)
 
     assert captured.value.exit_code == pipeline.EXIT_ARGUMENT_ERROR
+
+
+def test_rollup_module_exposes_shared_collection_adapter() -> None:
+    from wintermute.jira import (
+        subp_vuln_rollup,
+    )
+
+    assert callable(
+        subp_vuln_rollup.collect_parent_rollup_findings
+    )

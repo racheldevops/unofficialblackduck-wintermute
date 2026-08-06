@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 from pathlib import Path
 from typing import Any
 
@@ -173,10 +172,15 @@ def test_score_filtering(
     score: float | None,
     expected: bool,
 ) -> None:
-    assert puller.score_passes(
-        score,
-        settings(score_operator=operator),
-    ) is expected
+    from wintermute.datadog.collection import (
+        criteria_from_pull_settings,
+    )
+
+    criteria = criteria_from_pull_settings(
+        settings(score_operator=operator)
+    )
+
+    assert criteria.score_passes(score) is expected
 
 
 def test_candidate_identity_prefers_external_id() -> None:
@@ -259,203 +263,70 @@ def test_api_cache_prunes_old_entries(tmp_path: Path) -> None:
     assert set(cache.data["entries"]) == {"middle", "new"}
 
 
-def test_policy_match_supports_name_and_rule_id() -> None:
-    rules = [
-        {
-            "name": "Security Policy",
-            "_meta": {
-                "href": "https://bd.example/policy-rules/rule-123"
-            },
-        }
-    ]
-
-    assert puller.policy_match(
-        rules,
-        settings(policy_name="Security Policy"),
-    ) == (
-        True,
-        "Security Policy",
-        "https://bd.example/policy-rules/rule-123",
-    )
-
-    assert puller.policy_match(
-        rules,
-        settings(policy_rule_id="rule-123"),
-    )[0] is True
-
-    assert puller.policy_match(
-        rules,
-        settings(policy_name="Missing"),
-    ) == (False, "", "")
 
 
-def test_should_fetch_policy_rules_respects_settings() -> None:
-    assert puller.should_fetch_policy_rules(
-        settings(skip_policy_rules=True)
-    ) is False
-    assert puller.should_fetch_policy_rules(
-        settings(policy_name="Policy")
-    ) is True
-    assert puller.should_fetch_policy_rules(
-        settings(include_policy_rule_details=True)
-    ) is True
-    assert puller.should_fetch_policy_rules(settings()) is False
 
 
-def test_collect_for_component_builds_normalized_finding() -> None:
-    component = {
-        "componentName": "openssl",
-        "componentVersionName": "3.0.1",
-        "componentOriginId": "origin-a",
-        "_meta": {
-            "href": "https://bd.example/components/openssl",
-            "links": [
-                {
-                    "rel": "vulnerabilities",
-                    "href": (
-                        "https://bd.example/components/openssl/"
-                        "vulnerabilities"
-                    ),
-                }
-            ],
-        },
-    }
-
-    class Client:
-        def paged_get(
-            self,
-            path: str,
-        ) -> list[dict[str, Any]]:
-            assert path.endswith("/vulnerabilities")
-            return [
-                {
-                    "vulnerabilityName": "CVE-2026-0001",
-                    "overallScore": 9.8,
-                    "severity": "CRITICAL",
-                    "exploitAvailable": True,
-                    "reachable": True,
-                    "_meta": {
-                        "href": (
-                            "https://bd.example/vulnerabilities/"
-                            "CVE-2026-0001"
-                        )
-                    },
-                }
-            ]
-
-    result = puller.collect_for_component(
-        Client(),
-        candidate(),
-        component,
-        settings(
-            require_exploit_available=True,
-            require_reachable=True,
-        ),
-        fetch_policy_rules=False,
-    )
-
-    assert result.failures == []
-    assert len(result.findings) == 1
-
-    row = result.findings[0]
-    assert row["project"] == "Service A"
-    assert row["component"] == "openssl"
-    assert row["component_version"] == "3.0.1"
-    assert row["vulnerability"] == "CVE-2026-0001"
-    assert row["score"] == "9.8"
-    assert row["exploit_available"] == "true"
-    assert row["reachable"] == "true"
-    assert row["project_group_key"] == "Service A"
-    assert row["finding_external_id"] == puller.sha256_hex(
-        row["finding_key"]
-    )
 
 
-def test_collect_for_component_applies_exploit_filter() -> None:
-    component = {
-        "componentName": "library",
-        "componentVersionName": "1",
-        "_meta": {
-            "links": [
-                {
-                    "rel": "vulnerabilities",
-                    "href": "https://bd.example/vulnerabilities",
-                }
-            ]
-        },
-    }
-
-    class Client:
-        def paged_get(self, path: str) -> list[dict[str, Any]]:
-            del path
-            return [
-                {
-                    "vulnerabilityName": "CVE-1",
-                    "overallScore": 10.0,
-                    "severity": "CRITICAL",
-                    "exploitAvailable": False,
-                }
-            ]
-
-    result = puller.collect_for_component(
-        Client(),
-        candidate(),
-        component,
-        settings(require_exploit_available=True),
-        fetch_policy_rules=False,
-    )
-
-    assert result.findings == []
-    assert result.failures == []
 
 
 def test_collect_candidate_supports_component_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    components = [
-        {"id": "a"},
-        {"id": "b"},
-    ]
-    monkeypatch.setattr(
-        puller,
-        "get_vulnerable_components",
-        lambda *_: components,
-    )
+    captured: dict[str, Any] = {}
 
-    def fake_collect(
+    def fake_shared_collection(
         client: Any,
         candidate_row: dict[str, str],
-        component: dict[str, Any],
         pull_settings: puller.PullSettings,
-        fetch_policy_rules: bool,
-    ) -> puller.ComponentPullResult:
-        del client, candidate_row, pull_settings, fetch_policy_rules
-        return puller.ComponentPullResult(
-            findings=[
+    ) -> tuple[
+        list[dict[str, str]],
+        list[dict[str, str]],
+    ]:
+        captured["client"] = client
+        captured["candidate"] = candidate_row
+        captured["component_workers"] = (
+            pull_settings.component_workers
+        )
+
+        return (
+            [
                 {
-                    "finding_external_id": component["id"],
+                    "finding_external_id": (
+                        "finding-a"
+                    )
                 }
             ],
-            failures=[],
+            [],
         )
 
     monkeypatch.setattr(
         puller,
-        "collect_for_component",
-        fake_collect,
+        "collect_candidate_findings",
+        fake_shared_collection,
+    )
+    client = object()
+    candidate_row = candidate()
+    findings, failures = (
+        puller.collect_for_candidate(
+            client,
+            candidate_row,
+            settings(component_workers=2),
+        )
     )
 
-    findings, failures = puller.collect_for_candidate(
-        object(),
-        candidate(),
-        settings(component_workers=2),
-    )
-
-    assert {
-        row["finding_external_id"]
-        for row in findings
-    } == {"a", "b"}
+    assert findings == [
+        {
+            "finding_external_id": "finding-a"
+        }
+    ]
     assert failures == []
+    assert captured == {
+        "client": client,
+        "candidate": candidate_row,
+        "component_workers": 2,
+    }
 
 
 def test_auth_failure_detection() -> None:
@@ -679,3 +550,55 @@ def test_validate_args_rejects_invalid_values(
 
     with pytest.raises(RuntimeError, match=message):
         puller.validate_args(args)
+
+
+def test_pull_path_routes_through_shared_collector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def fake_shared_collection(
+        client: Any,
+        candidate_row: dict[str, str],
+        pull_settings: puller.PullSettings,
+    ) -> tuple[
+        list[dict[str, str]],
+        list[dict[str, str]],
+    ]:
+        del client, candidate_row, pull_settings
+        nonlocal calls
+        calls += 1
+
+        return (
+            [
+                {
+                    "finding_external_id": (
+                        "shared-finding"
+                    )
+                }
+            ],
+            [],
+        )
+
+    monkeypatch.setattr(
+        puller,
+        "collect_candidate_findings",
+        fake_shared_collection,
+    )
+    findings, failures = (
+        puller.collect_for_candidate(
+            object(),
+            candidate(),
+            settings(),
+        )
+    )
+
+    assert calls == 1
+    assert findings == [
+        {
+            "finding_external_id": (
+                "shared-finding"
+            )
+        }
+    ]
+    assert failures == []

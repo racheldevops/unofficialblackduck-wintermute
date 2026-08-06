@@ -86,3 +86,29 @@ def test_kubernetes_resources_support_high_concurrency(
         text,
         re.MULTILINE,
     )
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "deploy/base/cronjob.yaml",
+        "deploy/overlays/customer/cronjob-patch.yaml",
+    ),
+)
+def test_kubernetes_memory_supports_eight_workers(
+    relative_path: str,
+) -> None:
+    text = (ROOT / relative_path).read_text(
+        encoding="utf-8"
+    )
+
+    assert re.search(
+        r"requests:\s+cpu:\s+\"1\"\s+memory:\s+1Gi",
+        text,
+        re.MULTILINE,
+    )
+    assert re.search(
+        r"limits:\s+cpu:\s+\"4\"\s+memory:\s+4Gi",
+        text,
+        re.MULTILINE,
+    )

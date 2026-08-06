@@ -2,29 +2,44 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import csv
-import hashlib
 import json
 import os
 import re
 import shlex
-import ssl
 import sys
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from collections.abc import Callable
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
 
+from wintermute.blackduck.client import BlackDuckClient as SharedBlackDuckClient
+from wintermute.blackduck.criteria import (
+    jira_parent_rollup_criteria,
+)
+from wintermute.jira.collection import (
+    collect_parent_rollup,
+)
+from wintermute.blackduck.cache import ApiResponseCache as SharedApiResponseCache
+from wintermute.blackduck.resources import (
+    canonical_href as shared_canonical_href,
+    first_value_by_key as shared_first_value_by_key,
+    get_link as shared_get_link,
+    get_self_href as shared_get_self_href,
+    iter_hrefs as shared_iter_hrefs,
+    looks_like_resource_url as shared_looks_like_resource_url,
+)
+from wintermute.blackduck.vulnerabilities import (
+    extract_vulnerability_candidates as shared_extract_vulnerability_candidates,
+    looks_like_vulnerability as shared_looks_like_vulnerability,
+    vulnerability_identifier as shared_vulnerability_identifier,
+    vulnerability_severity as shared_vulnerability_severity,
+)
 from wintermute.concurrency import (
     DEFAULT_IO_WORKERS,
     MAX_IO_WORKERS,
-    SingleFlight,
     bounded_worker_count,
     ordered_parallel_map,
 )
@@ -68,724 +83,33 @@ class FailedRelationship:
     error: str
 
 
-@dataclass
-class RelationshipCollectionResult:
-    index: int
-    label: str
-    findings: list[dict[str, Any]]
-    failure: FailedRelationship | None
-    elapsed_seconds: float
 
 
-class ApiResponseCache:
-    def __init__(
-            self,
-            path: str,
-            base_url: str,
-            max_age_hours: float,
-            max_entries: int,
-            debug: bool,
-    ):
-        self.path = path
-        self.base_url = base_url.rstrip("/")
-        self.max_age_hours = max_age_hours
-        self.max_entries = max_entries
-        self.debug = debug
-        self._lock = threading.RLock()
-        self._singleflight: SingleFlight[
-            str,
-            list[dict[str, Any]],
-        ] = SingleFlight()
-        self.data: dict[str, Any] = {
-            "schema_version": ROLLUP_API_CACHE_SCHEMA_VERSION,
-            "base_url": self.base_url,
-            "created_at": now_iso(),
-            "updated_at": now_iso(),
-            "settings": {
-                "max_age_hours": self.max_age_hours,
-                "max_entries": self.max_entries,
-            },
-            "entries": {},
-        }
+class ApiResponseCache(SharedApiResponseCache):
+    pass
 
-    @classmethod
-    def load(
-            cls,
-            path: str,
-            base_url: str,
-            max_age_hours: float,
-            refresh: bool,
-            max_entries: int,
-            debug: bool,
-    ) -> ApiResponseCache:
-        cache = cls(
-            path=path,
-            base_url=base_url,
-            max_age_hours=max_age_hours,
-            max_entries=max_entries,
-            debug=debug,
-        )
 
-        if refresh:
-            print(
-                f"Refreshing API cache; ignoring existing cache at {path}.",
-                file=sys.stderr,
-            )
-            return cache
-
-        if not os.path.exists(path):
-            print(
-                f"No API cache found at {path}; fresh API reads required.",
-                file=sys.stderr,
-            )
-            return cache
-
-        try:
-            with open(path, encoding="utf-8") as cache_file:
-                loaded = json.load(cache_file)
-        except (OSError, json.JSONDecodeError) as error:
-            print(
-                f"Warning: failed to read API cache {path}: {error}; "
-                f"fresh API reads required.",
-                file=sys.stderr,
-            )
-            return cache
-
-        if loaded.get("schema_version") != ROLLUP_API_CACHE_SCHEMA_VERSION:
-            print(
-                f"API cache schema mismatch in {path}; fresh API reads required.",
-                file=sys.stderr,
-            )
-            return cache
-
-        if str(loaded.get("base_url") or "").rstrip("/") != cache.base_url:
-            print(
-                "API cache base URL differs from current Black Duck URL; "
-                "fresh API reads required.",
-                file=sys.stderr,
-            )
-            return cache
-
-        entries = loaded.get("entries")
-        if not isinstance(entries, dict):
-            print(
-                f"API cache entries are invalid in {path}; fresh API reads required.",
-                file=sys.stderr,
-            )
-            return cache
-
-        cache.data = loaded
-        cache.prune()
-
-        print(
-            f"Loaded API cache from {path} with "
-            f"{len(cache.data.get('entries', {}))} entrie(s).",
-            file=sys.stderr,
-        )
-
-        return cache
-
-    def get_items(
-            self,
-            source_url: str,
-    ) -> list[dict[str, Any]] | None:
-        with self._lock:
-            entry = self._entry_for_url(source_url)
-
-            if not entry:
-                return None
-
-            if self._is_stale(entry):
-                if self.debug:
-                    print(
-                        f"API cache stale, fetching fresh: {source_url}",
-                        file=sys.stderr,
-                    )
-                return None
-
-            items = entry.get("items")
-
-            if not isinstance(items, list):
-                return None
-
-            entry["last_used_at"] = now_iso()
-            entry["hit_count"] = int(entry.get("hit_count") or 0) + 1
-
-            if self.debug:
-                print(
-                    f"Reusing API cache: {source_url} "
-                    f"({len(items)} cached item(s), age={self._age_label(entry)})",
-                    file=sys.stderr,
-                )
-
-            return copy.deepcopy(items)
-
-    def get_or_load_items(
-            self,
-            source_url: str,
-            loader: Callable[
-                [],
-                tuple[list[dict[str, Any]], int | None],
-            ],
-    ) -> list[dict[str, Any]]:
-        cached = self.get_items(source_url)
-
-        if cached is not None:
-            return cached
-
-        def load_once() -> list[dict[str, Any]]:
-            cached_after_wait = self.get_items(source_url)
-
-            if cached_after_wait is not None:
-                return cached_after_wait
-
-            items, total_count = loader()
-            self.put_items(
-                source_url,
-                items,
-                total_count=total_count,
-            )
-            return copy.deepcopy(items)
-
-        return copy.deepcopy(
-            self._singleflight.run(source_url, load_once)
-        )
-
-    def put_items(
-            self,
-            source_url: str,
-            items: list[dict[str, Any]],
-            total_count: int | None = None,
-    ) -> None:
-        with self._lock:
-            entries = self.data.setdefault("entries", {})
-            key = self._key_for_url(source_url)
-            timestamp = now_iso()
-
-            entries[key] = {
-                "source_url": source_url,
-                "cached_at": timestamp,
-                "last_used_at": timestamp,
-                "hit_count": 0,
-                "item_count": len(items),
-                "total_count": total_count,
-                "items": copy.deepcopy(items),
-            }
-
-            if self.debug:
-                total_label = (
-                    total_count
-                    if total_count is not None
-                    else "unknown"
-                )
-                print(
-                    f"Stored API cache: {source_url} "
-                    f"({len(items)} item(s), totalCount={total_label})",
-                    file=sys.stderr,
-                )
-
-            self._prune_locked()
-
-    def prune(self) -> None:
-        with self._lock:
-            self._prune_locked()
-
-    def _prune_locked(self) -> None:
-        entries = self.data.setdefault("entries", {})
-        stale_keys = [
-            key
-            for key, entry in entries.items()
-            if not isinstance(entry, dict) or self._is_stale(entry)
-        ]
-
-        for key in stale_keys:
-            entries.pop(key, None)
-
-        if stale_keys and self.debug:
-            print(
-                f"Pruned {len(stale_keys)} stale API cache entrie(s).",
-                file=sys.stderr,
-            )
-
-        if len(entries) <= self.max_entries:
-            return
-
-        sortable_entries = sorted(
-            (
-                str(
-                    entry.get("last_used_at")
-                    or entry.get("cached_at")
-                    or ""
-                )
-                if isinstance(entry, dict)
-                else "",
-                key,
-            )
-            for key, entry in entries.items()
-        )
-        remove_count = len(entries) - self.max_entries
-
-        for _, key in sortable_entries[:remove_count]:
-            entries.pop(key, None)
-
-        if remove_count and self.debug:
-            print(
-                f"Pruned {remove_count} old API cache entrie(s) to enforce "
-                f"--api-cache-max-entries={self.max_entries}.",
-                file=sys.stderr,
-            )
-
-    def save(self) -> None:
-        with self._lock:
-            self._prune_locked()
-            self.data["updated_at"] = now_iso()
-            self.data.setdefault("settings", {})
-            self.data["settings"]["max_age_hours"] = self.max_age_hours
-            self.data["settings"]["max_entries"] = self.max_entries
-            tmp_path = f"{self.path}.tmp"
-
-            with open(tmp_path, "w", encoding="utf-8") as cache_file:
-                json.dump(
-                    self.data,
-                    cache_file,
-                    indent=2,
-                    sort_keys=True,
-                )
-
-            os.replace(tmp_path, self.path)
-            entry_count = len(self.data.get("entries", {}))
-
-        print(
-            f"Wrote API cache: {self.path} "
-            f"({entry_count} entrie(s))",
-            file=sys.stderr,
-        )
-
-    def _entry_for_url(self, source_url: str) -> dict[str, Any] | None:
-        entries = self.data.get("entries", {})
-        if not isinstance(entries, dict):
-            return None
-
-        entry = entries.get(self._key_for_url(source_url))
-        return entry if isinstance(entry, dict) else None
-
-    def _is_stale(self, entry: dict[str, Any]) -> bool:
-        if self.max_age_hours < 0:
-            return False
-
-        cached_at = parse_iso(str(entry.get("cached_at") or ""))
-
-        if not cached_at:
-            return True
-
-        age_hours = (datetime.now(timezone.utc) - cached_at).total_seconds() / 3600
-        return age_hours >= self.max_age_hours
-
-    def _age_label(self, entry: dict[str, Any]) -> str:
-        cached_at = parse_iso(str(entry.get("cached_at") or ""))
-
-        if not cached_at:
-            return "unknown"
-
-        age_seconds = (datetime.now(timezone.utc) - cached_at).total_seconds()
-
-        if age_seconds < 60:
-            return f"{age_seconds:.0f}s"
-
-        age_minutes = age_seconds / 60
-
-        if age_minutes < 60:
-            return f"{age_minutes:.1f}m"
-
-        age_hours = age_minutes / 60
-        return f"{age_hours:.1f}h"
-
-    @staticmethod
-    def _key_for_url(source_url: str) -> str:
-        return hashlib.sha256(source_url.encode("utf-8")).hexdigest()
-
-
-class BlackDuckClient:
-    def __init__(
-            self,
-            base_url: str,
-            api_token: str,
-            insecure: bool = False,
-            timeout: int = 30,
-            retries: int = 1,
-            retry_delay: float = 2.0,
-            page_limit: int = 100,
-            debug: bool = False,
-            api_cache: ApiResponseCache | None = None,
-    ):
-        self.base_url = base_url.rstrip("/")
-        self.api_token = api_token
-        self.bearer_token: str | None = None
-        self.ssl_context = ssl._create_unverified_context() if insecure else None
-        self.timeout = timeout
-        self.retries = retries
-        self.retry_delay = retry_delay
-        self.page_limit = page_limit
-        self.debug = debug
-        self.api_cache = api_cache
-        self.raw_get_cache: dict[str, dict[str, Any]] = {}
-        self.paged_result_cache: dict[str, list[dict[str, Any]]] = {}
-        self.vulnerability_summary_cache: dict[tuple[str, str, float], list[dict[str, Any]]] = {}
-
-    def clone_for_worker(self) -> BlackDuckClient:
-        worker = BlackDuckClient(
-            base_url=self.base_url,
-            api_token=self.api_token,
-            insecure=False,
-            timeout=self.timeout,
-            retries=self.retries,
-            retry_delay=self.retry_delay,
-            page_limit=self.page_limit,
-            debug=self.debug,
-            api_cache=self.api_cache,
-        )
-        worker.ssl_context = self.ssl_context
-        worker.bearer_token = self.bearer_token
-        return worker
-
-    def authenticate(self) -> None:
-        url = f"{self.base_url}/api/tokens/authenticate"
-        headers = {
-            "Authorization": f"token {self.api_token}",
-            "Accept": "application/json",
-        }
-
-        retryable_statuses = {429, 500, 502, 503, 504}
-
-        for attempt in range(self.retries + 1):
-            request = Request(url, data=b"", headers=headers, method="POST")
-
-            try:
-                with urlopen(
-                        request,
-                        context=self.ssl_context,
-                        timeout=self.timeout,
-                ) as response:
-                    text = response.read().decode("utf-8")
-
-                try:
-                    payload = json.loads(text)
-                except json.JSONDecodeError as error:
-                    raise RuntimeError(
-                        f"Authentication returned invalid JSON: {error}"
-                    ) from error
-
-                self.bearer_token = payload["bearerToken"]
-                return
-
-            except HTTPError as error:
-                body = error.read().decode("utf-8", errors="replace")
-
-                if error.code not in retryable_statuses or attempt >= self.retries:
-                    raise RuntimeError(
-                        f"Authentication failed: HTTP {error.code} {error.reason}\n{body}"
-                    ) from error
-
-                sleep_seconds = self.retry_delay * (attempt + 1)
-                print(
-                    f"Retrying authentication after HTTP {error.code}; "
-                    f"retry {attempt + 1}/{self.retries}, sleeping {sleep_seconds}s",
-                    file=sys.stderr,
-                )
-                time.sleep(sleep_seconds)
-
-            except (TimeoutError, URLError, OSError) as error:
-                if attempt >= self.retries:
-                    raise RuntimeError(
-                        f"Authentication failed after {self.retries + 1} "
-                        f"attempt(s), timeout={self.timeout}s: {error}"
-                    ) from error
-
-                sleep_seconds = self.retry_delay * (attempt + 1)
-                print(
-                    f"Retrying authentication after network error: {error}; "
-                    f"retry {attempt + 1}/{self.retries}, sleeping {sleep_seconds}s",
-                    file=sys.stderr,
-                )
-                time.sleep(sleep_seconds)
-
-        raise RuntimeError("Authentication failed unexpectedly")
-
-    def get(self, url_or_path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self.request("GET", url_or_path, params=params)
-
-    def request(
-            self,
-            method: str,
-            url_or_path: str,
-            params: dict[str, Any] | None = None,
-            body: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        url = self._make_url(url_or_path, params)
-
-        headers = {
-            "Accept": "application/json",
-        }
-
-        if self.bearer_token:
-            headers["Authorization"] = f"Bearer {self.bearer_token}"
-
-        data = None
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-            data = json.dumps(body).encode("utf-8")
-
-        raw_get_cache_key = ""
-        if method.upper() == "GET" and body is None:
-            raw_get_cache_key = url
-            cached_payload = self.raw_get_cache.get(raw_get_cache_key)
-
-            if cached_payload is not None:
-                if self.debug:
-                    print(
-                        f"Reusing in-run GET cache: {url}",
-                        file=sys.stderr,
-                    )
-                return copy.deepcopy(cached_payload)
-
-        retryable_statuses = {429, 500, 502, 503, 504}
-
-        for attempt in range(self.retries + 1):
-            request = Request(url, data=data, headers=headers, method=method)
-
-            try:
-                with urlopen(
-                        request,
-                        context=self.ssl_context,
-                        timeout=self.timeout,
-                ) as response:
-                    text = response.read().decode("utf-8")
-
-                if not text:
-                    payload: dict[str, Any] = {}
-                else:
-                    try:
-                        payload = json.loads(text)
-                    except json.JSONDecodeError as error:
-                        raise RuntimeError(
-                            f"{method} {url} returned invalid JSON: {error}"
-                        ) from error
-
-                if raw_get_cache_key:
-                    self.raw_get_cache[raw_get_cache_key] = copy.deepcopy(payload)
-
-                return payload
-
-            except HTTPError as error:
-                response_body = error.read().decode("utf-8", errors="replace")
-
-                if error.code not in retryable_statuses or attempt >= self.retries:
-                    raise RuntimeError(
-                        f"{method} {url} failed: HTTP {error.code} {error.reason}\n"
-                        f"{response_body[:4000]}"
-                    ) from error
-
-                sleep_seconds = self.retry_delay * (attempt + 1)
-                print(
-                    f"Retrying {method} {url} after HTTP {error.code}; "
-                    f"retry {attempt + 1}/{self.retries}, sleeping {sleep_seconds}s",
-                    file=sys.stderr,
-                )
-                time.sleep(sleep_seconds)
-
-            except (TimeoutError, URLError, OSError) as error:
-                if attempt >= self.retries:
-                    raise RuntimeError(
-                        f"{method} {url} failed after {self.retries + 1} "
-                        f"attempt(s), timeout={self.timeout}s: {error}"
-                    ) from error
-
-                sleep_seconds = self.retry_delay * (attempt + 1)
-                print(
-                    f"Retrying {method} {url} after network error: {error}; "
-                    f"retry {attempt + 1}/{self.retries}, sleeping {sleep_seconds}s",
-                    file=sys.stderr,
-                )
-                time.sleep(sleep_seconds)
-
-        raise RuntimeError(f"{method} {url} failed unexpectedly")
-
-    def paged_get(
-            self,
-            url_or_path: str,
-            params: dict[str, Any] | None = None,
-            limit: int | None = None,
-    ) -> list[dict[str, Any]]:
-        page_limit = limit if limit is not None else self.page_limit
-        cache_source_url = self._make_url(url_or_path, params)
-
-        in_run_cached_items = self.paged_result_cache.get(
-            cache_source_url
-        )
-
-        if in_run_cached_items is not None:
-            if self.debug:
-                print(
-                    f"Reusing in-run paged cache: {cache_source_url} "
-                    f"({len(in_run_cached_items)} item(s))",
-                    file=sys.stderr,
-                )
-
-            return copy.deepcopy(in_run_cached_items)
-
-        def load_pages() -> tuple[
-            list[dict[str, Any]],
-            int | None,
-        ]:
-            return self._fetch_paged_items(
-                url_or_path=url_or_path,
-                params=params,
-                page_limit=page_limit,
-            )
-
-        if self.api_cache is not None:
-            all_items = self.api_cache.get_or_load_items(
-                cache_source_url,
-                load_pages,
-            )
-        else:
-            all_items, _ = load_pages()
-
-        self.paged_result_cache[cache_source_url] = copy.deepcopy(
-            all_items
-        )
-        return copy.deepcopy(all_items)
-
-    def _fetch_paged_items(
-            self,
-            url_or_path: str,
-            params: dict[str, Any] | None,
-            page_limit: int,
-    ) -> tuple[list[dict[str, Any]], int | None]:
-        all_items: list[dict[str, Any]] = []
-        offset = 0
-        final_total_count: int | None = None
-
-        while True:
-            page_params = dict(params or {})
-            page_params["offset"] = offset
-            page_params["limit"] = page_limit
-
-            if self.debug:
-                print(
-                    f"Fetching page offset={offset}, limit={page_limit}: "
-                    f"{self._make_url(url_or_path, page_params)}",
-                    file=sys.stderr,
-                )
-
-            payload = self.get(
-                url_or_path,
-                params=page_params,
-            )
-
-            if "items" not in payload:
-                return [payload], 1
-
-            items = payload.get("items", [])
-            all_items.extend(items)
-
-            total_count = payload.get("totalCount")
-            final_total_count = (
-                int(total_count)
-                if total_count is not None
-                else None
-            )
-
-            if not items:
-                break
-
-            offset += len(items)
-
-            if (
-                final_total_count is not None
-                and offset >= final_total_count
-            ):
-                break
-
-            if len(items) < page_limit:
-                break
-
-        return all_items, final_total_count
-
-    def _make_url(self, url_or_path: str, params: dict[str, Any] | None = None) -> str:
-        if url_or_path.startswith("http://") or url_or_path.startswith("https://"):
-            url = url_or_path
-        else:
-            url = f"{self.base_url}/{url_or_path.lstrip('/')}"
-
-        if not params:
-            return url
-
-        parsed = urlparse(url)
-        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-
-        for key, value in params.items():
-            if value is not None:
-                query[key] = str(value)
-
-        return urlunparse(
-            (
-                parsed.scheme,
-                parsed.netloc,
-                parsed.path,
-                parsed.params,
-                urlencode(query),
-                parsed.fragment,
-            )
-        )
+class BlackDuckClient(SharedBlackDuckClient):
+    pass
 
 
 def canonical_href(href: str) -> str:
-    if not href:
-        return ""
-
-    parsed = urlparse(href)
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "", ""))
+    return shared_canonical_href(href)
 
 
 def get_self_href(resource: dict[str, Any]) -> str | None:
-    meta = resource.get("_meta", {})
-    href = meta.get("href")
-    return href
+    return shared_get_self_href(resource) or None
 
 
-def get_link(resource: dict[str, Any], rel_names: tuple[str, ...]) -> str | None:
-    wanted = {rel.lower() for rel in rel_names}
-
-    for link in resource.get("_meta", {}).get("links", []):
-        rel = str(link.get("rel", "")).lower()
-        href = link.get("href")
-        if rel in wanted and href:
-            return href
-
-    for link in resource.get("_meta", {}).get("links", []):
-        rel = str(link.get("rel", "")).lower()
-        href = link.get("href")
-        if href and any(wanted_rel in rel for wanted_rel in wanted):
-            return href
-
-    return None
+def get_link(
+        resource: dict[str, Any],
+        rel_names: tuple[str, ...],
+) -> str | None:
+    return shared_get_link(resource, rel_names) or None
 
 
 def iter_hrefs(value: Any) -> list[str]:
-    hrefs: list[str] = []
-
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key == "href" and isinstance(item, str):
-                hrefs.append(item)
-            else:
-                hrefs.extend(iter_hrefs(item))
-    elif isinstance(value, list):
-        for item in value:
-            hrefs.extend(iter_hrefs(item))
-
-    return hrefs
+    return shared_iter_hrefs(value)
 
 
 def extract_project_version_hrefs(raw_href: str, base_url: str) -> list[str]:
@@ -1071,48 +395,13 @@ def walk_subprojects(
     return discovered_all
 
 
-def get_vulnerable_bom_components(
-        client: BlackDuckClient,
-        project_version: dict[str, Any],
-) -> list[dict[str, Any]]:
-    vulnerable_components_url = get_link(
-        project_version,
-        (
-            "vulnerable-bom-components",
-            "vulnerableBomComponents",
-            "vulnerable-components",
-        ),
-    )
-
-    if not vulnerable_components_url:
-        version_href = get_self_href(project_version)
-        if not version_href:
-            raise RuntimeError("Project version has no self href")
-        vulnerable_components_url = f"{version_href}/vulnerable-bom-components"
-
-    return client.paged_get(vulnerable_components_url)
 
 
-def first_value_by_key(value: Any, keys: list[str]) -> Any:
-    wanted = {key.lower() for key in keys}
-
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key.lower() in wanted and item not in (None, ""):
-                return item
-
-        for item in value.values():
-            found = first_value_by_key(item, keys)
-            if found not in (None, ""):
-                return found
-
-    elif isinstance(value, list):
-        for item in value:
-            found = first_value_by_key(item, keys)
-            if found not in (None, ""):
-                return found
-
-    return None
+def first_value_by_key(
+        value: Any,
+        keys: list[str],
+) -> Any:
+    return shared_first_value_by_key(value, keys)
 
 
 def custom_field_value_text(value: Any) -> str:
@@ -1365,82 +654,16 @@ def read_project_custom_field(
     cache[cache_key] = ""
     return ""
 
-def to_float(value: Any) -> float | None:
-    if value is None:
-        return None
-
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
-def looks_like_vulnerability(value: dict[str, Any], score_field: str) -> bool:
-    id_keys = [
-        "vulnerabilityName",
-        "vulnerabilityId",
-        "vulnerabilityExternalId",
-        "externalId",
-        "cveId",
-        "cve",
-        "bdsaId",
-    ]
-
-    has_id = first_value_by_key(value, id_keys) is not None
-    has_score = first_value_by_key(value, [score_field]) is not None
-    has_severity = first_value_by_key(value, ["severity", "vulnerabilitySeverity"]) is not None
-
-    return has_id and (has_score or has_severity)
-
-
-def extract_vulnerability_candidates(value: Any, score_field: str) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-
-    def walk(item: Any) -> None:
-        if isinstance(item, dict):
-            nested_vulnerability = item.get("vulnerability")
-
-            if isinstance(nested_vulnerability, dict):
-                merged = dict(nested_vulnerability)
-
-                for key, nested_item in item.items():
-                    if key != "vulnerability" and key not in merged:
-                        merged[key] = nested_item
-
-                if looks_like_vulnerability(merged, score_field):
-                    candidates.append(merged)
-
-            if looks_like_vulnerability(item, score_field):
-                candidates.append(item)
-
-            for nested_item in item.values():
-                walk(nested_item)
-
-        elif isinstance(item, list):
-            for nested_item in item:
-                walk(nested_item)
-
-    walk(value)
-
-    unique: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    for candidate in candidates:
-        vulnerability_id = vulnerability_identifier(candidate)
-        score = first_value_by_key(candidate, [score_field])
-        key = f"{vulnerability_id}|{score}|{json.dumps(candidate, sort_keys=True, default=str)[:500]}"
-
-        if key not in seen:
-            seen.add(key)
-            unique.append(candidate)
-
-    return unique
-
-
-def vulnerability_identifier(vulnerability: dict[str, Any]) -> str:
-    value = first_value_by_key(
-        vulnerability,
-        [
+def looks_like_vulnerability(
+        value: dict[str, Any],
+        score_field: str,
+) -> bool:
+    return shared_looks_like_vulnerability(
+        value,
+        score_fields=(score_field,),
+        id_fields=(
             "vulnerabilityName",
             "vulnerabilityId",
             "vulnerabilityExternalId",
@@ -1448,432 +671,54 @@ def vulnerability_identifier(vulnerability: dict[str, Any]) -> str:
             "cveId",
             "cve",
             "bdsaId",
-            "name",
-            "id",
-        ],
-    )
-
-    return str(value or "UNKNOWN")
-
-
-def vulnerability_severity(vulnerability: dict[str, Any]) -> str:
-    value = first_value_by_key(
-        vulnerability,
-        [
-            "severity",
-            "vulnerabilitySeverity",
-            "sourceSeverity",
-        ],
-    )
-
-    return str(value or "")
-
-
-def summarize_vulnerabilities_for_component(
-        client: BlackDuckClient,
-        vulnerable_component: dict[str, Any],
-        component_name: str,
-        component_version: str,
-        threshold: float,
-        score_field: str,
-) -> list[dict[str, Any]]:
-    vulnerabilities_url = get_link(
-        vulnerable_component,
-        (
-            "vulnerabilities",
-            "vulnerability",
         ),
     )
 
-    summary_cache_key: tuple[str, str, float] | None = None
 
-    if vulnerabilities_url:
-        summary_cache_key = (
-            vulnerabilities_url,
-            score_field,
-            threshold,
-        )
-        cached_summaries = client.vulnerability_summary_cache.get(
-            summary_cache_key
-        )
+def extract_vulnerability_candidates(
+        value: Any,
+        score_field: str,
+) -> list[dict[str, Any]]:
+    return shared_extract_vulnerability_candidates(
+        value,
+        score_fields=(score_field,),
+        id_fields=(
+            "vulnerabilityName",
+            "vulnerabilityId",
+            "vulnerabilityExternalId",
+            "externalId",
+            "cveId",
+            "cve",
+            "bdsaId",
+        ),
+        dedupe_score_fields=(score_field,),
+        dedupe_payload_limit=500,
+    )
 
-        if cached_summaries is not None:
-            if client.debug:
-                print(
-                    f"Reusing parsed vulnerability summary cache: "
-                    f"{vulnerabilities_url} "
-                    f"({len(cached_summaries)} matching item(s))",
-                    file=sys.stderr,
-                )
 
-            return cached_summaries
+def vulnerability_identifier(
+        vulnerability: dict[str, Any],
+) -> str:
+    return shared_vulnerability_identifier(vulnerability)
 
-    vulnerabilities: list[dict[str, Any]] = []
 
-    if vulnerabilities_url:
-        try:
-            vulnerability_items = client.paged_get(vulnerabilities_url)
+def vulnerability_severity(
+        vulnerability: dict[str, Any],
+) -> str:
+    return shared_vulnerability_severity(
+        vulnerability,
+        uppercase=False,
+    )
 
-            for vulnerability_item in vulnerability_items:
-                extracted = extract_vulnerability_candidates(
-                    vulnerability_item,
-                    score_field,
-                )
-                vulnerabilities.extend(
-                    extracted or [vulnerability_item]
-                )
-        except RuntimeError as error:
-            raise RuntimeError(
-                f"Failed reading vulnerabilities for component "
-                f"{component_name} {component_version}: {error}"
-            ) from error
-    else:
-        vulnerabilities.extend(
-            extract_vulnerability_candidates(
-                vulnerable_component,
-                score_field,
-            )
-        )
 
-    summaries: list[dict[str, Any]] = []
-
-    for vulnerability in vulnerabilities:
-        score = to_float(
-            first_value_by_key(vulnerability, [score_field])
-        )
-
-        if score is None or score < threshold:
-            continue
-
-        cvss_vector = first_value_by_key(
-            vulnerability,
-            [
-                "cvssVector",
-                "cvss3Vector",
-                "cvss31Vector",
-                "cvssV3Vector",
-                "cvssV31Vector",
-                "cvss2Vector",
-                "vector",
-            ],
-        )
-
-        summaries.append(
-            {
-                "vulnerability": vulnerability_identifier(vulnerability),
-                "score": score,
-                "severity": vulnerability_severity(vulnerability),
-                "cvss_vector": str(cvss_vector or ""),
-                "blackduck_url": (
-                    get_link(vulnerability, ("self",))
-                    or get_self_href(vulnerability)
-                    or ""
-                ),
-            }
-        )
-
-    if summary_cache_key is not None:
-        client.vulnerability_summary_cache[
-            summary_cache_key
-        ] = summaries
-
-    return summaries
 
 def looks_like_resource_url(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-
-    return (
-        text.startswith("http://")
-        or text.startswith("https://")
-        or text.startswith("/api/")
-    )
+    return shared_looks_like_resource_url(value)
 
 
-def component_version_href_from_resource(
-        resource: dict[str, Any],
-) -> str:
-    direct_candidates = [
-        resource.get("componentVersionHref"),
-        resource.get("componentVersionUrl"),
-        resource.get("componentVersion"),
-    ]
-
-    for candidate in direct_candidates:
-        if isinstance(candidate, str):
-            if looks_like_resource_url(candidate):
-                if "/api/components/" in candidate and "/versions/" in candidate:
-                    return canonical_href(candidate)
-
-        if isinstance(candidate, dict):
-            for href in iter_hrefs(candidate):
-                if "/api/components/" in href and "/versions/" in href:
-                    return canonical_href(href)
-
-    for link in resource.get("_meta", {}).get("links", []):
-        rel = str(link.get("rel") or "").lower()
-        href = str(link.get("href") or "")
-
-        if (
-            href
-            and rel in {
-                "component-version",
-                "componentversion",
-                "component_version",
-            }
-        ):
-            return canonical_href(href)
-
-    for href in iter_hrefs(resource):
-        if "/api/components/" in href and "/versions/" in href:
-            return canonical_href(href)
-
-    return ""
 
 
-def extract_component_version_details(
-        client: BlackDuckClient,
-        vulnerable_component: dict[str, Any],
-) -> tuple[str, str]:
-    display_value = first_value_by_key(
-        vulnerable_component,
-        [
-            "componentVersionName",
-            "versionName",
-        ],
-    )
-    display_name = str(display_value or "").strip()
 
-    if looks_like_resource_url(display_name):
-        display_name = ""
-
-    direct_version = vulnerable_component.get(
-        "componentVersion"
-    )
-
-    if not display_name and isinstance(
-        direct_version,
-        (str, int, float),
-    ):
-        direct_text = str(direct_version).strip()
-
-        if not looks_like_resource_url(direct_text):
-            display_name = direct_text
-
-    version_href = component_version_href_from_resource(
-        vulnerable_component
-    )
-
-    if version_href and not display_name:
-        try:
-            version_resource = client.get(version_href)
-        except RuntimeError as error:
-            if client.debug:
-                print(
-                    f"Could not resolve component version name "
-                    f"from {version_href}: {error}",
-                    file=sys.stderr,
-                )
-        else:
-            display_name = str(
-                version_resource.get("versionName")
-                or version_resource.get("name")
-                or first_value_by_key(
-                    version_resource,
-                    [
-                        "componentVersionName",
-                        "versionName",
-                    ],
-                )
-                or ""
-            ).strip()
-
-            if looks_like_resource_url(display_name):
-                display_name = ""
-
-    return display_name, version_href
-
-def collect_findings_for_subproject(
-        client: BlackDuckClient,
-        parent_project: str,
-        parent_version: str,
-        subproject_ref: dict[str, Any],
-        threshold: float,
-        score_field: str,
-        entity_custom_field: str,
-        require_entity: bool,
-) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    seen_component_vulnerability_keys: set[
-        tuple[str, str, str]
-    ] = set()
-
-    entity = read_project_custom_field(
-        client=client,
-        version_href=str(
-            subproject_ref.get("version_href") or ""
-        ),
-        version=subproject_ref["version"],
-        field_name=entity_custom_field,
-    )
-
-    if require_entity and entity_custom_field and not entity:
-        raise RuntimeError(
-            f"Black Duck project "
-            f"{subproject_ref.get('project_name', '')!r} "
-            f"does not have a populated "
-            f"{entity_custom_field!r} custom field"
-        )
-
-    vulnerable_components = get_vulnerable_bom_components(
-        client,
-        subproject_ref["version"],
-    )
-
-    for vulnerable_component in vulnerable_components:
-        component_name = str(
-            first_value_by_key(
-                vulnerable_component,
-                [
-                    "componentName",
-                    "name",
-                ],
-            )
-            or ""
-        )
-        (
-            component_version,
-            component_version_href,
-        ) = extract_component_version_details(
-            client,
-            vulnerable_component,
-        )
-
-        vulnerabilities_url = get_link(
-            vulnerable_component,
-            (
-                "vulnerabilities",
-                "vulnerability",
-            ),
-        )
-
-        if vulnerabilities_url:
-            component_vulnerability_key = (
-                component_name,
-                component_version or component_version_href,
-                vulnerabilities_url,
-            )
-
-            if (
-                component_vulnerability_key
-                in seen_component_vulnerability_keys
-            ):
-                if client.debug:
-                    print(
-                        f"Skipping duplicate vulnerable component "
-                        f"URL for {component_name} "
-                        f"{component_version}: "
-                        f"{vulnerabilities_url}",
-                        file=sys.stderr,
-                    )
-                continue
-
-            seen_component_vulnerability_keys.add(
-                component_vulnerability_key
-            )
-
-        vulnerability_summaries = (
-            summarize_vulnerabilities_for_component(
-                client=client,
-                vulnerable_component=vulnerable_component,
-                component_name=component_name,
-                component_version=(
-                    component_version
-                    or component_version_href
-                ),
-                threshold=threshold,
-                score_field=score_field,
-            )
-        )
-
-        for vulnerability_summary in vulnerability_summaries:
-            vulnerability_id = str(
-                vulnerability_summary["vulnerability"]
-            )
-            score = float(vulnerability_summary["score"])
-            severity = str(
-                vulnerability_summary["severity"]
-            )
-            cvss_vector = str(
-                vulnerability_summary.get("cvss_vector")
-                or ""
-            )
-            vulnerability_url = str(
-                vulnerability_summary["blackduck_url"]
-            )
-
-            version_identity = (
-                component_version
-                or component_version_href
-            )
-
-            rollup_key = "|".join(
-                [
-                    parent_project,
-                    parent_version,
-                    subproject_ref["project_name"],
-                    subproject_ref["version_name"],
-                    component_name,
-                    version_identity,
-                    vulnerability_id,
-                ]
-            )
-
-            findings.append(
-                {
-                    "parent_project": parent_project,
-                    "parent_version": parent_version,
-                    "parent_version_href": (
-                        subproject_ref.get(
-                            "parent_version_href",
-                            "",
-                        )
-                    ),
-                    "subproject_path": subproject_ref.get(
-                        "path",
-                        "",
-                    ),
-                    "subproject": subproject_ref[
-                        "project_name"
-                    ],
-                    "subproject_version": subproject_ref[
-                        "version_name"
-                    ],
-                    "subproject_version_href": (
-                        subproject_ref.get(
-                            "version_href",
-                            "",
-                        )
-                    ),
-                    "relationship_detection_method": (
-                        subproject_ref.get("source", "")
-                    ),
-                    "component": component_name,
-                    "component_version": component_version,
-                    "component_version_href": (
-                        component_version_href
-                    ),
-                    "vulnerability": vulnerability_id,
-                    "score_field": score_field,
-                    "score": score,
-                    "severity": severity,
-                    "cvss_vector": cvss_vector,
-                    "entity": entity,
-                    "blackduck_url": vulnerability_url,
-                    "rollup_key": rollup_key,
-                }
-            )
-
-    return findings
 
 def dedupe_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     unique: list[dict[str, Any]] = []
@@ -2171,166 +1016,188 @@ def relationship_label(
     return f"{subproject['project_name']} {subproject['version_name']}"
 
 
-def collect_one_relationship(
-        client: BlackDuckClient,
-        index: int,
-        subproject: dict[str, Any],
-        args: argparse.Namespace,
-        default_parent_project: str,
-        default_parent_version: str,
-) -> RelationshipCollectionResult:
-    label = relationship_label(
-        subproject,
-        default_parent_project=default_parent_project,
-        default_parent_version=default_parent_version,
-    )
-    parent_project = str(
-        subproject.get("parent_project")
-        or default_parent_project
-    )
-    parent_version = str(
-        subproject.get("parent_version")
-        or default_parent_version
-    )
-    started = time.monotonic()
-
-    try:
-        findings = collect_findings_for_subproject(
-            client,
-            parent_project=parent_project,
-            parent_version=parent_version,
-            subproject_ref=subproject,
-            threshold=args.threshold,
-            score_field=args.score_field,
-            entity_custom_field=args.entity_custom_field,
-            require_entity=args.require_entity,
-        )
-
-        return RelationshipCollectionResult(
-            index=index,
-            label=label,
-            findings=findings,
-            failure=None,
-            elapsed_seconds=time.monotonic() - started,
-        )
-
-    except RuntimeError as error:
-        elapsed = time.monotonic() - started
-
-        return RelationshipCollectionResult(
-            index=index,
-            label=label,
-            findings=[],
-            failure=failed_relationship_from_subproject(
-                subproject,
-                stage="collect-vulnerabilities",
-                elapsed_seconds=elapsed,
-                client=client,
-                error=error,
-                default_parent_project=default_parent_project,
-                default_parent_version=default_parent_version,
-            ),
-            elapsed_seconds=elapsed,
-        )
 
 
-def collect_findings_for_subprojects(
+def collect_parent_rollup_findings(
         client: BlackDuckClient,
         subprojects: list[dict[str, Any]],
         args: argparse.Namespace,
         default_parent_project: str = "",
         default_parent_version: str = "",
-) -> tuple[list[dict[str, Any]], list[FailedRelationship]]:
-    findings: list[dict[str, Any]] = []
-    failures: list[FailedRelationship] = []
-    total = len(subprojects)
+) -> tuple[
+    list[dict[str, Any]],
+    list[FailedRelationship],
+]:
+    relationship_rows: list[
+        dict[str, Any]
+    ] = []
+    version_resources: dict[
+        str,
+        dict[str, Any],
+    ] = {}
 
-    if total == 0:
-        return findings, failures
+    for subproject in subprojects:
+        parent_project = str(
+            subproject.get("parent_project")
+            or default_parent_project
+        )
+        parent_version = str(
+            subproject.get("parent_version")
+            or default_parent_version
+        )
+        child_href = canonical_href(
+            str(
+                subproject.get("version_href")
+                or ""
+            )
+        )
 
-    requested_workers = int(getattr(args, "workers", 1))
-    worker_count = min(
-        bounded_worker_count(
-            requested_workers,
-            maximum=MAX_IO_WORKERS,
+        relationship_rows.append(
+            {
+                "parent_project": (
+                    parent_project
+                ),
+                "parent_version": (
+                    parent_version
+                ),
+                "parent_version_href": (
+                    subproject.get(
+                        "parent_version_href",
+                        "",
+                    )
+                ),
+                "child_project": (
+                    subproject.get(
+                        "project_name",
+                        "",
+                    )
+                ),
+                "child_version": (
+                    subproject.get(
+                        "version_name",
+                        "",
+                    )
+                ),
+                "child_version_href": (
+                    child_href
+                ),
+                "detection_method": (
+                    subproject.get(
+                        "source",
+                        "",
+                    )
+                ),
+                "subproject_path": (
+                    subproject.get(
+                        "path",
+                        "",
+                    )
+                ),
+            }
+        )
+
+        version_resource = subproject.get(
+            "version"
+        )
+
+        if (
+            child_href
+            and isinstance(
+                version_resource,
+                dict,
+            )
+        ):
+            version_resources[
+                child_href
+            ] = version_resource
+
+    criteria = jira_parent_rollup_criteria(
+        threshold=args.threshold,
+        score_field=args.score_field,
+        entity_custom_field=(
+            args.entity_custom_field
         ),
-        total,
+        require_entity=args.require_entity,
     )
-    worker_local = threading.local()
+
+    entity_resolver = None
+
+    if args.entity_custom_field:
+        def resolve_entity(
+            current_client: BlackDuckClient,
+            target: Any,
+        ) -> str:
+            version_href = canonical_href(
+                target.project_version.version_href
+            )
+            version_resource = (
+                version_resources.get(
+                    version_href,
+                    {},
+                )
+            )
+
+            return read_project_custom_field(
+                client=current_client,
+                version_href=version_href,
+                version=version_resource,
+                field_name=(
+                    args.entity_custom_field
+                ),
+            )
+
+        entity_resolver = resolve_entity
+
+    result = collect_parent_rollup(
+        client,
+        relationship_rows,
+        criteria,
+        workers=args.workers,
+        component_workers=1,
+        entity_resolver=entity_resolver,
+    )
+    failures = [
+        FailedRelationship(
+            parent_project=(
+                failure.parent_project
+            ),
+            parent_version=(
+                failure.parent_version
+            ),
+            child_project=(
+                failure.child_project
+            ),
+            child_version=(
+                failure.child_version
+            ),
+            child_version_href=(
+                failure.child_version_href
+            ),
+            source=failure.source,
+            stage=failure.stage,
+            elapsed_seconds=(
+                failure.elapsed_seconds
+            ),
+            timeout_seconds=client.timeout,
+            retries=client.retries,
+            attempts_per_request=(
+                client.retries + 1
+            ),
+            error=failure.error,
+        )
+        for failure in result.failures
+    ]
 
     print(
-        f"Collecting vulnerabilities for {total} relationship(s) "
-        f"with {worker_count} worker(s).",
+        f"Collected {result.finding_count} direct finding(s) "
+        f"from {result.target_count} unique child "
+        f"project version(s), expanded across "
+        f"{len(relationship_rows)} relationship(s).",
         file=sys.stderr,
     )
 
-    def worker_client() -> BlackDuckClient:
-        if worker_count == 1:
-            return client
+    return list(result.rows), failures
 
-        local_client = getattr(
-            worker_local,
-            "blackduck_client",
-            None,
-        )
-
-        if local_client is None:
-            local_client = client.clone_for_worker()
-            worker_local.blackduck_client = local_client
-
-        return local_client
-
-    def collect(
-            item: tuple[int, dict[str, Any]],
-    ) -> RelationshipCollectionResult:
-        index, subproject = item
-
-        if args.debug:
-            print(
-                f"[{index}/{total}] Checking "
-                f"{relationship_label(subproject, default_parent_project, default_parent_version)} "
-                f"from {subproject.get('source')}",
-                file=sys.stderr,
-            )
-
-        return collect_one_relationship(
-            client=worker_client(),
-            index=index,
-            subproject=subproject,
-            args=args,
-            default_parent_project=default_parent_project,
-            default_parent_version=default_parent_version,
-        )
-
-    results = ordered_parallel_map(
-        enumerate(subprojects, start=1),
-        collect,
-        workers=worker_count,
-        maximum=MAX_IO_WORKERS,
-    )
-
-    for result in results:
-        if result.failure is not None:
-            print(
-                f"Warning: failed checking {result.label} after "
-                f"{format_duration(result.elapsed_seconds)}; "
-                f"continuing: {result.failure.error}",
-                file=sys.stderr,
-            )
-            failures.append(result.failure)
-            continue
-
-        findings.extend(result.findings)
-
-        if args.debug:
-            print(
-                f"[{result.index}/{total}] Completed "
-                f"{result.label}: {len(result.findings)} finding(s) "
-                f"in {format_duration(result.elapsed_seconds)}",
-                file=sys.stderr,
-            )
-
-    return findings, failures
 
 
 def write_csv(
@@ -2996,7 +1863,7 @@ def main() -> int:
                     file=sys.stderr,
                 )
 
-            child_findings, child_failures = collect_findings_for_subprojects(
+            child_findings, child_failures = collect_parent_rollup_findings(
                 client=client,
                 subprojects=subprojects,
                 args=args,
@@ -3040,7 +1907,7 @@ def main() -> int:
                     file=sys.stderr,
                 )
 
-            child_findings, child_failures = collect_findings_for_subprojects(
+            child_findings, child_failures = collect_parent_rollup_findings(
                 client=client,
                 subprojects=subprojects,
                 args=args,

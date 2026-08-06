@@ -1,18 +1,13 @@
 from __future__ import annotations
 
-import time
 import argparse
-import copy
 import csv
-import json
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from wintermute.jira import subp_vuln_rollup as rollup
-
 
 PROJECT_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 VERSION_UUID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
@@ -243,195 +238,12 @@ def test_extract_vulnerability_candidates_finds_nested_records() -> None:
     } == {"CVE-1"}
 
 
-def test_summarize_vulnerabilities_filters_threshold_and_caches() -> None:
-    class Client(MinimalClient):
-        def __init__(self) -> None:
-            super().__init__()
-            self.calls = 0
-
-        def paged_get(self, href: str) -> list[dict[str, Any]]:
-            self.calls += 1
-            assert href == "https://bd.example/vulnerabilities"
-            return [
-                {
-                    "vulnerabilityName": "CVE-1",
-                    "overallScore": 9.8,
-                    "severity": "CRITICAL",
-                    "cvssVector": "CVSS:3.1/AV:N",
-                    "_meta": {
-                        "href": "https://bd.example/vulnerabilities/CVE-1"
-                    },
-                },
-                {
-                    "vulnerabilityName": "CVE-2",
-                    "overallScore": 5.0,
-                    "severity": "MEDIUM",
-                },
-            ]
-
-    client = Client()
-    component = {
-        "_meta": {
-            "links": [
-                {
-                    "rel": "vulnerabilities",
-                    "href": "https://bd.example/vulnerabilities",
-                }
-            ]
-        }
-    }
-
-    first = rollup.summarize_vulnerabilities_for_component(
-        client,
-        component,
-        "library",
-        "1.0",
-        threshold=7.0,
-        score_field="overallScore",
-    )
-    second = rollup.summarize_vulnerabilities_for_component(
-        client,
-        component,
-        "library",
-        "1.0",
-        threshold=7.0,
-        score_field="overallScore",
-    )
-
-    assert first == [
-        {
-            "vulnerability": "CVE-1",
-            "score": 9.8,
-            "severity": "CRITICAL",
-            "cvss_vector": "CVSS:3.1/AV:N",
-            "blackduck_url": (
-                "https://bd.example/vulnerabilities/CVE-1"
-            ),
-        }
-    ]
-    assert second == first
-    assert client.calls == 1
 
 
-def test_extract_component_version_resolves_display_name() -> None:
-    class Client(MinimalClient):
-        def get(self, href: str) -> dict[str, Any]:
-            assert href == "https://bd.example/api/components/a/versions/b"
-            return {"versionName": "4.5.6"}
-
-    name, href = rollup.extract_component_version_details(
-        Client(),
-        {
-            "componentVersionHref": (
-                "https://bd.example/api/components/a/versions/b/"
-            )
-        },
-    )
-
-    assert name == "4.5.6"
-    assert href == "https://bd.example/api/components/a/versions/b"
 
 
-def test_collect_findings_deduplicates_component_vulnerability_urls(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    component = {
-        "componentName": "library",
-        "_meta": {
-            "links": [
-                {
-                    "rel": "vulnerabilities",
-                    "href": "https://bd.example/component-vulnerabilities",
-                }
-            ]
-        },
-    }
-    client = MinimalClient()
-
-    monkeypatch.setattr(
-        rollup,
-        "read_project_custom_field",
-        lambda **_: "Team A",
-    )
-    monkeypatch.setattr(
-        rollup,
-        "get_vulnerable_bom_components",
-        lambda *_: [copy.deepcopy(component), copy.deepcopy(component)],
-    )
-    monkeypatch.setattr(
-        rollup,
-        "extract_component_version_details",
-        lambda *_: (
-            "1.2.3",
-            "https://bd.example/api/components/a/versions/b",
-        ),
-    )
-    monkeypatch.setattr(
-        rollup,
-        "summarize_vulnerabilities_for_component",
-        lambda **_: [
-            {
-                "vulnerability": "CVE-1",
-                "score": 9.8,
-                "severity": "CRITICAL",
-                "cvss_vector": "CVSS:3.1/AV:N",
-                "blackduck_url": "https://bd.example/vulnerabilities/CVE-1",
-            }
-        ],
-    )
-
-    findings = rollup.collect_findings_for_subproject(
-        client,
-        parent_project="Parent",
-        parent_version="1",
-        subproject_ref={
-            "project_name": "Child",
-            "version_name": "2",
-            "version_href": VERSION_HREF,
-            "version": {"versionName": "2"},
-            "parent_version_href": "https://bd.example/parent/1",
-            "path": "Child/2",
-            "source": "api-href",
-        },
-        threshold=7.0,
-        score_field="overallScore",
-        entity_custom_field="foo Entity",
-        require_entity=True,
-    )
-
-    assert len(findings) == 1
-    assert findings[0]["entity"] == "Team A"
-    assert findings[0]["component_version"] == "1.2.3"
-    assert findings[0]["rollup_key"] == (
-        "Parent|1|Child|2|library|1.2.3|CVE-1"
-    )
 
 
-def test_collect_findings_requires_entity_when_configured(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        rollup,
-        "read_project_custom_field",
-        lambda **_: "",
-    )
-
-    with pytest.raises(RuntimeError, match="does not have a populated"):
-        rollup.collect_findings_for_subproject(
-            MinimalClient(),
-            parent_project="Parent",
-            parent_version="1",
-            subproject_ref={
-                "project_name": "Child",
-                "version_name": "2",
-                "version_href": VERSION_HREF,
-                "version": {"versionName": "2"},
-            },
-            threshold=7.0,
-            score_field="overallScore",
-            entity_custom_field="foo Entity",
-            require_entity=True,
-        )
 
 
 def test_parent_csv_loading_deduplicates_relationships(
@@ -552,75 +364,6 @@ def test_filter_subprojects_supports_all_target_fields() -> None:
     ) == [subprojects[1]]
 
 
-def test_collect_subprojects_continues_after_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client = MinimalClient()
-    subprojects = [
-        {
-            "project_name": "Good",
-            "version_name": "1",
-            "version_href": "https://bd.example/good/1",
-            "version": {},
-            "source": "test",
-        },
-        {
-            "project_name": "Bad",
-            "version_name": "2",
-            "version_href": "https://bd.example/bad/2",
-            "version": {},
-            "source": "test",
-        },
-    ]
-
-    def fake_collect(
-        client: Any,
-        parent_project: str,
-        parent_version: str,
-        subproject_ref: dict[str, Any],
-        threshold: float,
-        score_field: str,
-        entity_custom_field: str,
-        require_entity: bool,
-    ) -> list[dict[str, Any]]:
-        del (
-            client,
-            parent_project,
-            parent_version,
-            threshold,
-            score_field,
-            entity_custom_field,
-            require_entity,
-        )
-        if subproject_ref["project_name"] == "Bad":
-            raise RuntimeError("temporary failure")
-        return [{"rollup_key": "good"}]
-
-    monkeypatch.setattr(
-        rollup,
-        "collect_findings_for_subproject",
-        fake_collect,
-    )
-    args = argparse.Namespace(
-        debug=False,
-        threshold=7.0,
-        score_field="overallScore",
-        entity_custom_field="foo Entity",
-        require_entity=False,
-    )
-
-    findings, failures = rollup.collect_findings_for_subprojects(
-        client,
-        subprojects,
-        args,
-        default_parent_project="Parent",
-        default_parent_version="1",
-    )
-
-    assert findings == [{"rollup_key": "good"}]
-    assert len(failures) == 1
-    assert failures[0].child_project == "Bad"
-    assert failures[0].stage == "collect-vulnerabilities"
 
 
 def test_walk_subprojects_respects_depth(
@@ -725,89 +468,6 @@ def test_dedupe_findings_uses_rollup_key() -> None:
         [first, duplicate, second]
     ) == [first, second]
 
-def test_parallel_collection_preserves_relationship_order(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client = rollup.BlackDuckClient(
-        base_url="https://bd.example",
-        api_token="token",
-    )
-    client.bearer_token = "bearer"
-
-    subprojects = [
-        {
-            "project_name": "Slow",
-            "version_name": "1",
-            "version_href": "https://bd.example/slow/1",
-            "version": {},
-            "source": "test",
-        },
-        {
-            "project_name": "Fast",
-            "version_name": "1",
-            "version_href": "https://bd.example/fast/1",
-            "version": {},
-            "source": "test",
-        },
-    ]
-
-    def fake_collect(
-        client: Any,
-        parent_project: str,
-        parent_version: str,
-        subproject_ref: dict[str, Any],
-        threshold: float,
-        score_field: str,
-        entity_custom_field: str,
-        require_entity: bool,
-    ) -> list[dict[str, Any]]:
-        del (
-            client,
-            parent_project,
-            parent_version,
-            threshold,
-            score_field,
-            entity_custom_field,
-            require_entity,
-        )
-
-        if subproject_ref["project_name"] == "Slow":
-            time.sleep(0.03)
-
-        return [
-            {
-                "rollup_key": subproject_ref["project_name"],
-            }
-        ]
-
-    monkeypatch.setattr(
-        rollup,
-        "collect_findings_for_subproject",
-        fake_collect,
-    )
-
-    args = argparse.Namespace(
-        debug=False,
-        threshold=7.0,
-        score_field="overallScore",
-        entity_custom_field="foo Entity",
-        require_entity=False,
-        workers=2,
-    )
-
-    findings, failures = rollup.collect_findings_for_subprojects(
-        client,
-        subprojects,
-        args,
-        default_parent_project="Parent",
-        default_parent_version="1",
-    )
-
-    assert failures == []
-    assert [
-        finding["rollup_key"]
-        for finding in findings
-    ] == ["Slow", "Fast"]
 
 
 def test_validate_args_clamps_rollup_workers() -> None:
