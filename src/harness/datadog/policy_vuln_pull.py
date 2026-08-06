@@ -20,6 +20,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from harness.concurrency import (
+    MAX_COMPONENT_WORKERS as SHARED_MAX_COMPONENT_WORKERS,
+    MAX_IO_WORKERS,
+    bounded_worker_count,
+)
 from harness.paths import datadog_output_path, ensure_parent_dir
 
 
@@ -65,8 +70,8 @@ FAILURE_FIELDNAMES = [
 
 CACHE_SCHEMA_VERSION = 1
 STATE_SCHEMA_VERSION = 2
-MAX_WORKERS = 8
-MAX_COMPONENT_WORKERS = 16
+MAX_WORKERS = MAX_IO_WORKERS
+MAX_COMPONENT_WORKERS = SHARED_MAX_COMPONENT_WORKERS
 
 
 @dataclass(frozen=True)
@@ -2471,51 +2476,118 @@ def parse_args() -> argparse.Namespace:
 def validate_args(args: argparse.Namespace) -> None:
     if args.timeout <= 0:
         raise RuntimeError("--timeout must be greater than 0")
+
     if args.retries < 0:
         raise RuntimeError("--retries must be 0 or greater")
+
     if args.retry_delay < 0:
         raise RuntimeError("--retry-delay must be 0 or greater")
+
     if args.page_limit <= 0:
         raise RuntimeError("--page-limit must be greater than 0")
+
     if args.api_cache_max_age_hours < -1:
-        raise RuntimeError("--api-cache-max-age-hours must be -1 or greater")
+        raise RuntimeError(
+            "--api-cache-max-age-hours must be -1 or greater"
+        )
+
     if args.api_cache_max_entries <= 0:
-        raise RuntimeError("--api-cache-max-entries must be greater than 0")
-    if args.limit_candidates is not None and args.limit_candidates <= 0:
-        raise RuntimeError("--limit-candidates must be greater than 0")
-    if args.limit_findings is not None and args.limit_findings <= 0:
-        raise RuntimeError("--limit-findings must be greater than 0")
+        raise RuntimeError(
+            "--api-cache-max-entries must be greater than 0"
+        )
+
+    if (
+        args.limit_candidates is not None
+        and args.limit_candidates <= 0
+    ):
+        raise RuntimeError(
+            "--limit-candidates must be greater than 0"
+        )
+
+    if (
+        args.limit_findings is not None
+        and args.limit_findings <= 0
+    ):
+        raise RuntimeError(
+            "--limit-findings must be greater than 0"
+        )
+
     if args.workers <= 0:
         raise RuntimeError("--workers must be greater than 0")
+
     if args.workers > MAX_WORKERS:
-        print(f"Warning: --workers {args.workers} exceeds max {MAX_WORKERS}; clamping to {MAX_WORKERS}.", file=sys.stderr)
-        args.workers = MAX_WORKERS
-    if args.component_workers <= 0:
-        raise RuntimeError("--component-workers must be greater than 0")
-    if args.component_workers > MAX_COMPONENT_WORKERS:
         print(
-            f"Warning: --component-workers {args.component_workers} exceeds max "
-            f"{MAX_COMPONENT_WORKERS}; clamping to {MAX_COMPONENT_WORKERS}.",
+            f"Warning: --workers {args.workers} exceeds max "
+            f"{MAX_WORKERS}; clamping to {MAX_WORKERS}.",
             file=sys.stderr,
         )
-        args.component_workers = MAX_COMPONENT_WORKERS
+
+    args.workers = bounded_worker_count(
+        args.workers,
+        maximum=MAX_WORKERS,
+    )
+
+    if args.component_workers <= 0:
+        raise RuntimeError(
+            "--component-workers must be greater than 0"
+        )
+
+    if args.component_workers > MAX_COMPONENT_WORKERS:
+        print(
+            f"Warning: --component-workers "
+            f"{args.component_workers} exceeds max "
+            f"{MAX_COMPONENT_WORKERS}; clamping.",
+            file=sys.stderr,
+        )
+
+    args.component_workers = bounded_worker_count(
+        args.component_workers,
+        maximum=MAX_COMPONENT_WORKERS,
+    )
+
     if args.progress_every <= 0:
         raise RuntimeError("--progress-every must be greater than 0")
+
     if args.heartbeat_every < 0:
         raise RuntimeError("--heartbeat-every must be 0 or greater")
+
     if args.cache_save_every <= 0:
-        raise RuntimeError("--cache-save-every must be greater than 0")
-    if args.max_runtime_minutes is not None and args.max_runtime_minutes <= 0:
-        raise RuntimeError("--max-runtime-minutes must be greater than 0")
-    if (args.policy_name or args.policy_rule_id) and args.skip_policy_rules:
-        raise RuntimeError("--skip-policy-rules cannot be used with --policy-name or --policy-rule-id")
+        raise RuntimeError(
+            "--cache-save-every must be greater than 0"
+        )
+
+    if (
+        args.max_runtime_minutes is not None
+        and args.max_runtime_minutes <= 0
+    ):
+        raise RuntimeError(
+            "--max-runtime-minutes must be greater than 0"
+        )
+
+    if (
+        (args.policy_name or args.policy_rule_id)
+        and args.skip_policy_rules
+    ):
+        raise RuntimeError(
+            "--skip-policy-rules cannot be used with "
+            "--policy-name or --policy-rule-id"
+        )
+
     if args.shard_count <= 0:
         raise RuntimeError("--shard-count must be greater than 0")
+
     if args.shard_count > 32:
-        print("Warning: --shard-count above 32 is unsafe; clamping to 32.", file=sys.stderr)
+        print(
+            "Warning: --shard-count above 32 is unsafe; "
+            "clamping to 32.",
+            file=sys.stderr,
+        )
         args.shard_count = 32
+
     if args.shard_count > 1 and args.out == "-":
-        raise RuntimeError("--shard-count cannot be used with --out -")
+        raise RuntimeError(
+            "--shard-count cannot be used with --out -"
+        )
 
 
 def main() -> int:

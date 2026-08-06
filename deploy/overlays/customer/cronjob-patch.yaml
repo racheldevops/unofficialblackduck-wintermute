@@ -21,6 +21,13 @@ spec:
               args:
                 - --dry-run
                 - --strict
+                - --resolve-bom-names
+                - --workers
+                - "8"
+                - --parent-workers
+                - "8"
+                - --rollup-workers
+                - "8"
                 - --config
                 - /etc/blackduck-harness/jira-rollup-config.json
               env:
@@ -51,8 +58,8 @@ spec:
                       key: JIRA_API_TOKEN
               resources:
                 requests:
-                  cpu: 250m
+                  cpu: "1"
                   memory: 512Mi
                 limits:
-                  cpu: "2"
+                  cpu: "4"
                   memory: 2Gi

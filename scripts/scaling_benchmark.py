@@ -304,6 +304,7 @@ def normalized_pipeline_args(
     value_options = {
         "--workers",
         "--parent-workers",
+        "--rollup-workers",
         "--config",
     }
     removed_options = value_options | {
@@ -333,6 +334,8 @@ def normalized_pipeline_args(
         "--workers",
         str(workers),
         "--parent-workers",
+        str(workers),
+        "--rollup-workers",
         str(workers),
         "--config",
         config_path,

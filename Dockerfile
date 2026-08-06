@@ -56,4 +56,4 @@ WORKDIR /app
 USER 10001:10001
 
 ENTRYPOINT ["blackduck-jira-pipeline"]
-CMD ["--dry-run"]
+CMD ["--dry-run", "--strict", "--resolve-bom-names", "--workers", "8", "--parent-workers", "8", "--rollup-workers", "8"]

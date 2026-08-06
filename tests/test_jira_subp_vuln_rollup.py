@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import argparse
 import copy
 import csv
@@ -723,3 +724,96 @@ def test_dedupe_findings_uses_rollup_key() -> None:
     assert rollup.dedupe_findings(
         [first, duplicate, second]
     ) == [first, second]
+
+def test_parallel_collection_preserves_relationship_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = rollup.BlackDuckClient(
+        base_url="https://bd.example",
+        api_token="token",
+    )
+    client.bearer_token = "bearer"
+
+    subprojects = [
+        {
+            "project_name": "Slow",
+            "version_name": "1",
+            "version_href": "https://bd.example/slow/1",
+            "version": {},
+            "source": "test",
+        },
+        {
+            "project_name": "Fast",
+            "version_name": "1",
+            "version_href": "https://bd.example/fast/1",
+            "version": {},
+            "source": "test",
+        },
+    ]
+
+    def fake_collect(
+        client: Any,
+        parent_project: str,
+        parent_version: str,
+        subproject_ref: dict[str, Any],
+        threshold: float,
+        score_field: str,
+        entity_custom_field: str,
+        require_entity: bool,
+    ) -> list[dict[str, Any]]:
+        del (
+            client,
+            parent_project,
+            parent_version,
+            threshold,
+            score_field,
+            entity_custom_field,
+            require_entity,
+        )
+
+        if subproject_ref["project_name"] == "Slow":
+            time.sleep(0.03)
+
+        return [
+            {
+                "rollup_key": subproject_ref["project_name"],
+            }
+        ]
+
+    monkeypatch.setattr(
+        rollup,
+        "collect_findings_for_subproject",
+        fake_collect,
+    )
+
+    args = argparse.Namespace(
+        debug=False,
+        threshold=7.0,
+        score_field="overallScore",
+        entity_custom_field="foo Entity",
+        require_entity=False,
+        workers=2,
+    )
+
+    findings, failures = rollup.collect_findings_for_subprojects(
+        client,
+        subprojects,
+        args,
+        default_parent_project="Parent",
+        default_parent_version="1",
+    )
+
+    assert failures == []
+    assert [
+        finding["rollup_key"]
+        for finding in findings
+    ] == ["Slow", "Fast"]
+
+
+def test_validate_args_clamps_rollup_workers() -> None:
+    args = valid_args(workers=100)
+
+    rollup.validate_args(args)
+
+    assert args.workers == rollup.MAX_IO_WORKERS
+

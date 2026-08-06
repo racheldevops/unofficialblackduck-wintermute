@@ -407,3 +407,118 @@ def test_write_changes_reports_added_and_removed_rows(
 
     assert {row["change_type"] for row in rows} == {"added", "removed"}
     assert len(rows) == 2
+
+
+def test_default_page_limit_is_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = parents.BlackDuckClient(
+        "https://bd.example",
+        "token",
+        page_limit=17,
+    )
+    limits: list[int] = []
+
+    def fake_get(
+        path: str,
+        params: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        del path
+        limits.append(int((params or {})["limit"]))
+        return {"items": [], "totalCount": 0}
+
+    monkeypatch.setattr(client, "get", fake_get)
+
+    assert client.paged_get("/api/items") == []
+    assert limits == [17]
+
+
+def test_version_inventory_fetches_projects_concurrently() -> None:
+    import threading
+    import time
+
+    projects = [
+        {
+            "name": f"Project {index}",
+            "_meta": {
+                "href": f"https://bd.example/api/projects/{index}",
+                "links": [
+                    {
+                        "rel": "versions",
+                        "href": (
+                            f"https://bd.example/api/projects/"
+                            f"{index}/versions"
+                        ),
+                    }
+                ],
+            },
+        }
+        for index in range(4)
+    ]
+
+    class Client:
+        base_url = "https://bd.example"
+
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.active = 0
+            self.max_active = 0
+
+        def clone_for_worker(self) -> Client:
+            return self
+
+        def paged_get(
+            self,
+            path: str,
+            params: dict[str, object] | None = None,
+            limit: int | None = None,
+        ) -> list[dict[str, object]]:
+            del params, limit
+
+            if path == "/api/projects":
+                return projects
+
+            with self.lock:
+                self.active += 1
+                self.max_active = max(
+                    self.max_active,
+                    self.active,
+                )
+
+            try:
+                time.sleep(0.03)
+                project_id = path.split("/")[-2]
+                return [
+                    {
+                        "versionName": "1.0",
+                        "_meta": {
+                            "href": (
+                                f"https://bd.example/api/projects/"
+                                f"{project_id}/versions/1"
+                            )
+                        },
+                    }
+                ]
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    client = Client()
+    inventory = parents.build_version_inventory(
+        client,
+        project_name_contains=None,
+        max_projects=None,
+        debug=False,
+        workers=4,
+    )
+
+    assert client.max_active > 1
+    assert [
+        item.project_name
+        for item in inventory
+    ] == [
+        "Project 0",
+        "Project 1",
+        "Project 2",
+        "Project 3",
+    ]

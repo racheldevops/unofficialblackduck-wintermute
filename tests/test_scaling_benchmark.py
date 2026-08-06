@@ -285,3 +285,23 @@ def test_read_pipeline_summary_excludes_stage_arguments(
     assert summary["stages"]["stage-one"]["elapsed_seconds"] == 4
     assert "arguments" not in rendered
     assert "must-not-be-copied" not in rendered
+
+
+def test_normalized_pipeline_args_sets_rollup_workers() -> None:
+    arguments = benchmark.normalized_pipeline_args(
+        [
+            "--dry-run",
+            "--rollup-workers",
+            "99",
+            "--config",
+            "old.json",
+        ],
+        workers=4,
+        config_path="new.json",
+    )
+
+    assert arguments.count("--rollup-workers") == 1
+    assert arguments[
+        arguments.index("--rollup-workers") + 1
+    ] == "4"
+    assert "99" not in arguments

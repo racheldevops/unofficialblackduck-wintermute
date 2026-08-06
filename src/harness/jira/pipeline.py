@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from harness.concurrency import MAX_IO_WORKERS, bounded_worker_count
 from harness.jira import find_parent_projects, findings_hierarchy_plan, findings_to_jira, subp_vuln_rollup
 from harness.paths import ensure_parent_dir, output_root, package_path
 EXIT_SUCCESS = 0
@@ -273,6 +274,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--parent-timeout', type=int, default=90, help='Parent-discovery HTTP timeout. Default: 90.')
     parser.add_argument('--parent-retries', type=int, default=2, help='Parent-discovery retry count. Default: 2.')
     parser.add_argument('--parent-workers', type=int, help='Parent-discovery worker count. When omitted, --workers is used.')
+    parser.add_argument('--rollup-workers', type=int, help='Vulnerability-rollup worker count. When omitted, --workers is used.')
     parser.add_argument('--rollup-timeout', type=int, default=30, help='Vulnerability-rollup HTTP timeout. Default: 30.')
     parser.add_argument('--rollup-retries', type=int, default=1, help='Vulnerability-rollup retry count. Default: 1.')
     parser.add_argument('--hierarchy-limit', type=int, help='Optional findings limit passed to hierarchy planning. This may produce incomplete component aggregation.')
@@ -280,41 +282,138 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def validate_args(args: argparse.Namespace) -> None:
-    args.resolve_bom_names = bool(getattr(args, 'resolve_bom_names', False))
-    args.allow_empty = bool(getattr(args, 'allow_empty', False))
-    args.parent_timeout = int(getattr(args, 'parent_timeout', getattr(args, 'timeout', 90)))
-    args.parent_retries = int(getattr(args, 'parent_retries', getattr(args, 'retries', 2)))
-    parent_workers = getattr(args, 'parent_workers', None)
-    args.parent_workers = int(parent_workers if parent_workers is not None else getattr(args, 'workers', 2))
-    args.rollup_timeout = int(getattr(args, 'rollup_timeout', getattr(args, 'timeout', 30)))
-    args.rollup_retries = int(getattr(args, 'rollup_retries', getattr(args, 'retries', 1)))
-    args.hierarchy_limit = getattr(args, 'hierarchy_limit', None)
+    args.resolve_bom_names = bool(
+        getattr(args, "resolve_bom_names", False)
+    )
+    args.allow_empty = bool(
+        getattr(args, "allow_empty", False)
+    )
+    args.workers = int(getattr(args, "workers", 2))
+    args.parent_timeout = int(
+        getattr(args, "parent_timeout", getattr(args, "timeout", 90))
+    )
+    args.parent_retries = int(
+        getattr(args, "parent_retries", getattr(args, "retries", 2))
+    )
+
+    parent_workers = getattr(args, "parent_workers", None)
+    rollup_workers = getattr(args, "rollup_workers", None)
+
+    args.parent_workers = int(
+        parent_workers
+        if parent_workers is not None
+        else args.workers
+    )
+    args.rollup_workers = int(
+        rollup_workers
+        if rollup_workers is not None
+        else args.workers
+    )
+    args.rollup_timeout = int(
+        getattr(args, "rollup_timeout", getattr(args, "timeout", 30))
+    )
+    args.rollup_retries = int(
+        getattr(args, "rollup_retries", getattr(args, "retries", 1))
+    )
+    args.hierarchy_limit = getattr(args, "hierarchy_limit", None)
+
     if args.max_create is not None and args.max_create < 1:
-        raise PipelineFailure('--max-create must be greater than zero', EXIT_ARGUMENT_ERROR)
+        raise PipelineFailure(
+            "--max-create must be greater than zero",
+            EXIT_ARGUMENT_ERROR,
+        )
+
     if args.timeout <= 0:
-        raise PipelineFailure('--timeout must be greater than zero', EXIT_ARGUMENT_ERROR)
+        raise PipelineFailure(
+            "--timeout must be greater than zero",
+            EXIT_ARGUMENT_ERROR,
+        )
+
     if args.retries < 0:
-        raise PipelineFailure('--retries cannot be negative', EXIT_ARGUMENT_ERROR)
+        raise PipelineFailure(
+            "--retries cannot be negative",
+            EXIT_ARGUMENT_ERROR,
+        )
+
     if args.parent_timeout <= 0:
-        raise PipelineFailure('--parent-timeout must be greater than zero', EXIT_ARGUMENT_ERROR)
+        raise PipelineFailure(
+            "--parent-timeout must be greater than zero",
+            EXIT_ARGUMENT_ERROR,
+        )
+
     if args.parent_retries < 0:
-        raise PipelineFailure('--parent-retries cannot be negative', EXIT_ARGUMENT_ERROR)
-    if args.parent_workers <= 0:
-        raise PipelineFailure('--parent-workers must be greater than zero', EXIT_ARGUMENT_ERROR)
+        raise PipelineFailure(
+            "--parent-retries cannot be negative",
+            EXIT_ARGUMENT_ERROR,
+        )
+
     if args.rollup_timeout <= 0:
-        raise PipelineFailure('--rollup-timeout must be greater than zero', EXIT_ARGUMENT_ERROR)
+        raise PipelineFailure(
+            "--rollup-timeout must be greater than zero",
+            EXIT_ARGUMENT_ERROR,
+        )
+
     if args.rollup_retries < 0:
-        raise PipelineFailure('--rollup-retries cannot be negative', EXIT_ARGUMENT_ERROR)
+        raise PipelineFailure(
+            "--rollup-retries cannot be negative",
+            EXIT_ARGUMENT_ERROR,
+        )
+
+    for flag, value in (
+        ("--workers", args.workers),
+        ("--parent-workers", args.parent_workers),
+        ("--rollup-workers", args.rollup_workers),
+    ):
+        if value <= 0:
+            raise PipelineFailure(
+                f"{flag} must be greater than zero",
+                EXIT_ARGUMENT_ERROR,
+            )
+
+        if value > MAX_IO_WORKERS:
+            print(
+                f"Warning: {flag} {value} exceeds maximum "
+                f"{MAX_IO_WORKERS}; clamping.",
+                file=sys.stderr,
+            )
+
+    args.workers = bounded_worker_count(
+        args.workers,
+        maximum=MAX_IO_WORKERS,
+    )
+    args.parent_workers = bounded_worker_count(
+        args.parent_workers,
+        maximum=MAX_IO_WORKERS,
+    )
+    args.rollup_workers = bounded_worker_count(
+        args.rollup_workers,
+        maximum=MAX_IO_WORKERS,
+    )
+
     if args.hierarchy_limit is not None and args.hierarchy_limit < 1:
-        raise PipelineFailure('--hierarchy-limit must be greater than zero', EXIT_ARGUMENT_ERROR)
+        raise PipelineFailure(
+            "--hierarchy-limit must be greater than zero",
+            EXIT_ARGUMENT_ERROR,
+        )
+
     if args.page_limit <= 0:
-        raise PipelineFailure('--page-limit must be greater than zero', EXIT_ARGUMENT_ERROR)
-    if args.workers <= 0:
-        raise PipelineFailure('--workers must be greater than zero', EXIT_ARGUMENT_ERROR)
+        raise PipelineFailure(
+            "--page-limit must be greater than zero",
+            EXIT_ARGUMENT_ERROR,
+        )
+
     if args.retain_runs < 1:
-        raise PipelineFailure('--retain-runs must be greater than zero', EXIT_ARGUMENT_ERROR)
+        raise PipelineFailure(
+            "--retain-runs must be greater than zero",
+            EXIT_ARGUMENT_ERROR,
+        )
+
     if args.lock_stale_seconds < 60:
-        raise PipelineFailure('--lock-stale-seconds must be at least 60', EXIT_ARGUMENT_ERROR)
+        raise PipelineFailure(
+            "--lock-stale-seconds must be at least 60",
+            EXIT_ARGUMENT_ERROR,
+        )
+
     if not args.apply:
         args.dry_run = True
 
@@ -331,6 +430,11 @@ def run_pipeline(args: argparse.Namespace) -> int:
     run_dir = runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     summary: dict[str, Any] = {'run_id': run_id, 'status': 'starting', 'mode': 'apply' if args.apply else 'dry-run', 'strict': bool(args.strict), 'started_at': now_iso(), 'finished_at': '', 'elapsed_seconds': None, 'run_directory': str(run_dir), 'active_directory': str(active_dir), 'stages': [], 'failure_counts': {'parent_scan_failures': 0, 'rollup_failures': 0}, 'promoted_outputs': [], 'error': '', 'exit_code': None}
+    summary['concurrency'] = {
+        'workers': args.workers,
+        'parent_workers': args.parent_workers,
+        'rollup_workers': args.rollup_workers,
+    }
     active_summary = active_dir / 'pipeline-run-summary.json'
     run_summary = run_dir / 'pipeline-run-summary.json'
     start_seconds = time.monotonic()
@@ -357,6 +461,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
             parent_output = run_dir / 'parent_projects.csv'
             parent_changes = run_dir / 'parent_project_changes.csv'
             parent_arguments = ['--out', str(parent_output), '--changes-out', str(parent_changes), '--cache', str(parent_cache), '--refresh-older-than-days', '7', '--timeout', str(args.parent_timeout), '--retries', str(args.parent_retries), '--retry-delay', str(args.retry_delay), '--workers', str(args.parent_workers)]
+            parent_arguments.extend(
+                ['--page-limit', str(args.page_limit)]
+            )
             if args.refresh_parents:
                 parent_arguments.append('--refresh-all')
             if args.resolve_bom_names:
@@ -381,6 +488,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
             findings_output = run_dir / 'findings.csv'
             rollup_failures = run_dir / 'subp_vuln_rollup_failures.csv'
             rollup_arguments = ['--parents-csv', str(parent_output), '--out', str(findings_output), '--failures-out', str(rollup_failures), '--api-cache', str(rollup_cache), '--threshold', str(args.threshold), '--score-field', args.score_field, '--entity-custom-field', args.entity_custom_field, '--timeout', str(args.rollup_timeout), '--retries', str(args.rollup_retries), '--retry-delay', str(args.retry_delay), '--page-limit', str(args.page_limit)]
+            rollup_arguments.extend(
+                ['--workers', str(args.rollup_workers)]
+            )
             if args.only_parent_project:
                 rollup_arguments.extend(['--parent-project', args.only_parent_project])
             if args.only_parent_version:

@@ -11,14 +11,23 @@ import re
 import shlex
 import ssl
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from collections.abc import Callable
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from harness.concurrency import (
+    DEFAULT_IO_WORKERS,
+    MAX_IO_WORKERS,
+    SingleFlight,
+    bounded_worker_count,
+    ordered_parallel_map,
+)
 from harness.paths import ensure_parent_dir, jira_output_path
 
 
@@ -59,6 +68,15 @@ class FailedRelationship:
     error: str
 
 
+@dataclass
+class RelationshipCollectionResult:
+    index: int
+    label: str
+    findings: list[dict[str, Any]]
+    failure: FailedRelationship | None
+    elapsed_seconds: float
+
+
 class ApiResponseCache:
     def __init__(
             self,
@@ -73,6 +91,11 @@ class ApiResponseCache:
         self.max_age_hours = max_age_hours
         self.max_entries = max_entries
         self.debug = debug
+        self._lock = threading.RLock()
+        self._singleflight: SingleFlight[
+            str,
+            list[dict[str, Any]],
+        ] = SingleFlight()
         self.data: dict[str, Any] = {
             "schema_version": ROLLUP_API_CACHE_SCHEMA_VERSION,
             "base_url": self.base_url,
@@ -162,35 +185,71 @@ class ApiResponseCache:
 
         return cache
 
-    def get_items(self, source_url: str) -> list[dict[str, Any]] | None:
-        entry = self._entry_for_url(source_url)
+    def get_items(
+            self,
+            source_url: str,
+    ) -> list[dict[str, Any]] | None:
+        with self._lock:
+            entry = self._entry_for_url(source_url)
 
-        if not entry:
-            return None
+            if not entry:
+                return None
 
-        if self._is_stale(entry):
+            if self._is_stale(entry):
+                if self.debug:
+                    print(
+                        f"API cache stale, fetching fresh: {source_url}",
+                        file=sys.stderr,
+                    )
+                return None
+
+            items = entry.get("items")
+
+            if not isinstance(items, list):
+                return None
+
+            entry["last_used_at"] = now_iso()
+            entry["hit_count"] = int(entry.get("hit_count") or 0) + 1
+
             if self.debug:
                 print(
-                    f"API cache stale, fetching fresh: {source_url}",
+                    f"Reusing API cache: {source_url} "
+                    f"({len(items)} cached item(s), age={self._age_label(entry)})",
                     file=sys.stderr,
                 )
-            return None
 
-        items = entry.get("items")
-        if not isinstance(items, list):
-            return None
+            return copy.deepcopy(items)
 
-        entry["last_used_at"] = now_iso()
-        entry["hit_count"] = int(entry.get("hit_count") or 0) + 1
+    def get_or_load_items(
+            self,
+            source_url: str,
+            loader: Callable[
+                [],
+                tuple[list[dict[str, Any]], int | None],
+            ],
+    ) -> list[dict[str, Any]]:
+        cached = self.get_items(source_url)
 
-        if self.debug:
-            print(
-                f"Reusing API cache: {source_url} "
-                f"({len(items)} cached item(s), age={self._age_label(entry)})",
-                file=sys.stderr,
+        if cached is not None:
+            return cached
+
+        def load_once() -> list[dict[str, Any]]:
+            cached_after_wait = self.get_items(source_url)
+
+            if cached_after_wait is not None:
+                return cached_after_wait
+
+            items, total_count = loader()
+            self.put_items(
+                source_url,
+                items,
+                total_count=total_count,
             )
+            return copy.deepcopy(items)
 
-        return copy.deepcopy(items)
+        return copy.deepcopy(
+            self._singleflight.run(source_url, load_once)
+        )
 
     def put_items(
             self,
@@ -198,40 +257,49 @@ class ApiResponseCache:
             items: list[dict[str, Any]],
             total_count: int | None = None,
     ) -> None:
-        entries = self.data.setdefault("entries", {})
-        key = self._key_for_url(source_url)
-        timestamp = now_iso()
+        with self._lock:
+            entries = self.data.setdefault("entries", {})
+            key = self._key_for_url(source_url)
+            timestamp = now_iso()
 
-        entries[key] = {
-            "source_url": source_url,
-            "cached_at": timestamp,
-            "last_used_at": timestamp,
-            "hit_count": 0,
-            "item_count": len(items),
-            "total_count": total_count,
-            "items": copy.deepcopy(items),
-        }
+            entries[key] = {
+                "source_url": source_url,
+                "cached_at": timestamp,
+                "last_used_at": timestamp,
+                "hit_count": 0,
+                "item_count": len(items),
+                "total_count": total_count,
+                "items": copy.deepcopy(items),
+            }
 
-        if self.debug:
-            total_label = total_count if total_count is not None else "unknown"
-            print(
-                f"Stored API cache: {source_url} "
-                f"({len(items)} item(s), totalCount={total_label})",
-                file=sys.stderr,
-            )
+            if self.debug:
+                total_label = (
+                    total_count
+                    if total_count is not None
+                    else "unknown"
+                )
+                print(
+                    f"Stored API cache: {source_url} "
+                    f"({len(items)} item(s), totalCount={total_label})",
+                    file=sys.stderr,
+                )
 
-        self.prune()
+            self._prune_locked()
 
     def prune(self) -> None:
+        with self._lock:
+            self._prune_locked()
+
+    def _prune_locked(self) -> None:
         entries = self.data.setdefault("entries", {})
         stale_keys = [
             key
             for key, entry in entries.items()
-            if isinstance(entry, dict) and self._is_stale(entry)
+            if not isinstance(entry, dict) or self._is_stale(entry)
         ]
 
         for key in stale_keys:
-            del entries[key]
+            entries.pop(key, None)
 
         if stale_keys and self.debug:
             print(
@@ -242,21 +310,19 @@ class ApiResponseCache:
         if len(entries) <= self.max_entries:
             return
 
-        sortable_entries: list[tuple[str, str]] = []
-
-        for key, entry in entries.items():
-            if isinstance(entry, dict):
-                last_used_at = str(
+        sortable_entries = sorted(
+            (
+                str(
                     entry.get("last_used_at")
                     or entry.get("cached_at")
                     or ""
                 )
-            else:
-                last_used_at = ""
-
-            sortable_entries.append((last_used_at, key))
-
-        sortable_entries.sort()
+                if isinstance(entry, dict)
+                else "",
+                key,
+            )
+            for key, entry in entries.items()
+        )
         remove_count = len(entries) - self.max_entries
 
         for _, key in sortable_entries[:remove_count]:
@@ -270,22 +336,28 @@ class ApiResponseCache:
             )
 
     def save(self) -> None:
-        self.prune()
-        self.data["updated_at"] = now_iso()
-        self.data.setdefault("settings", {})
-        self.data["settings"]["max_age_hours"] = self.max_age_hours
-        self.data["settings"]["max_entries"] = self.max_entries
+        with self._lock:
+            self._prune_locked()
+            self.data["updated_at"] = now_iso()
+            self.data.setdefault("settings", {})
+            self.data["settings"]["max_age_hours"] = self.max_age_hours
+            self.data["settings"]["max_entries"] = self.max_entries
+            tmp_path = f"{self.path}.tmp"
 
-        tmp_path = f"{self.path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as cache_file:
+                json.dump(
+                    self.data,
+                    cache_file,
+                    indent=2,
+                    sort_keys=True,
+                )
 
-        with open(tmp_path, "w", encoding="utf-8") as cache_file:
-            json.dump(self.data, cache_file, indent=2, sort_keys=True)
-
-        os.replace(tmp_path, self.path)
+            os.replace(tmp_path, self.path)
+            entry_count = len(self.data.get("entries", {}))
 
         print(
             f"Wrote API cache: {self.path} "
-            f"({len(self.data.get('entries', {}))} entrie(s))",
+            f"({entry_count} entrie(s))",
             file=sys.stderr,
         )
 
@@ -359,6 +431,22 @@ class BlackDuckClient:
         self.raw_get_cache: dict[str, dict[str, Any]] = {}
         self.paged_result_cache: dict[str, list[dict[str, Any]]] = {}
         self.vulnerability_summary_cache: dict[tuple[str, str, float], list[dict[str, Any]]] = {}
+
+    def clone_for_worker(self) -> BlackDuckClient:
+        worker = BlackDuckClient(
+            base_url=self.base_url,
+            api_token=self.api_token,
+            insecure=False,
+            timeout=self.timeout,
+            retries=self.retries,
+            retry_delay=self.retry_delay,
+            page_limit=self.page_limit,
+            debug=self.debug,
+            api_cache=self.api_cache,
+        )
+        worker.ssl_context = self.ssl_context
+        worker.bearer_token = self.bearer_token
+        return worker
 
     def authenticate(self) -> None:
         url = f"{self.base_url}/api/tokens/authenticate"
@@ -531,7 +619,10 @@ class BlackDuckClient:
         page_limit = limit if limit is not None else self.page_limit
         cache_source_url = self._make_url(url_or_path, params)
 
-        in_run_cached_items = self.paged_result_cache.get(cache_source_url)
+        in_run_cached_items = self.paged_result_cache.get(
+            cache_source_url
+        )
+
         if in_run_cached_items is not None:
             if self.debug:
                 print(
@@ -539,15 +630,38 @@ class BlackDuckClient:
                     f"({len(in_run_cached_items)} item(s))",
                     file=sys.stderr,
                 )
-            return in_run_cached_items
+
+            return copy.deepcopy(in_run_cached_items)
+
+        def load_pages() -> tuple[
+            list[dict[str, Any]],
+            int | None,
+        ]:
+            return self._fetch_paged_items(
+                url_or_path=url_or_path,
+                params=params,
+                page_limit=page_limit,
+            )
 
         if self.api_cache is not None:
-            cached_items = self.api_cache.get_items(cache_source_url)
+            all_items = self.api_cache.get_or_load_items(
+                cache_source_url,
+                load_pages,
+            )
+        else:
+            all_items, _ = load_pages()
 
-            if cached_items is not None:
-                self.paged_result_cache[cache_source_url] = cached_items
-                return cached_items
+        self.paged_result_cache[cache_source_url] = copy.deepcopy(
+            all_items
+        )
+        return copy.deepcopy(all_items)
 
+    def _fetch_paged_items(
+            self,
+            url_or_path: str,
+            params: dict[str, Any] | None,
+            page_limit: int,
+    ) -> tuple[list[dict[str, Any]], int | None]:
         all_items: list[dict[str, Any]] = []
         offset = 0
         final_total_count: int | None = None
@@ -564,55 +678,39 @@ class BlackDuckClient:
                     file=sys.stderr,
                 )
 
-            payload = self.get(url_or_path, params=page_params)
+            payload = self.get(
+                url_or_path,
+                params=page_params,
+            )
 
             if "items" not in payload:
-                single_payload_result = [payload]
-
-                if self.api_cache is not None:
-                    self.api_cache.put_items(
-                        cache_source_url,
-                        single_payload_result,
-                        total_count=1,
-                    )
-
-                self.paged_result_cache[cache_source_url] = single_payload_result
-                return single_payload_result
+                return [payload], 1
 
             items = payload.get("items", [])
             all_items.extend(items)
 
             total_count = payload.get("totalCount")
-            final_total_count = int(total_count) if total_count is not None else None
-
-            if self.debug:
-                total_label = total_count if total_count is not None else "unknown"
-                print(
-                    f"Fetched {len(items)} item(s) from page; "
-                    f"running total={len(all_items)}, totalCount={total_label}",
-                    file=sys.stderr,
-                )
+            final_total_count = (
+                int(total_count)
+                if total_count is not None
+                else None
+            )
 
             if not items:
                 break
 
             offset += len(items)
 
-            if total_count is not None and offset >= total_count:
+            if (
+                final_total_count is not None
+                and offset >= final_total_count
+            ):
                 break
 
             if len(items) < page_limit:
                 break
 
-        if self.api_cache is not None:
-            self.api_cache.put_items(
-                cache_source_url,
-                all_items,
-                total_count=final_total_count,
-            )
-
-        self.paged_result_cache[cache_source_url] = all_items
-        return all_items
+        return all_items, final_total_count
 
     def _make_url(self, url_or_path: str, params: dict[str, Any] | None = None) -> str:
         if url_or_path.startswith("http://") or url_or_path.startswith("https://"):
@@ -1831,6 +1929,7 @@ def load_subproject_refs_from_parent_csv(
         parent_version_filter: str | None,
         debug: bool,
         failures: list[FailedRelationship] | None = None,
+        workers: int = 1,
 ) -> list[dict[str, Any]]:
     required_columns = {
         "parent_project",
@@ -1844,8 +1943,8 @@ def load_subproject_refs_from_parent_csv(
     with open(csv_path, newline="", encoding="utf-8") as csv_file:
         reader = csv.DictReader(csv_file)
         fieldnames = set(reader.fieldnames or [])
-
         missing_columns = required_columns - fieldnames
+
         if missing_columns:
             raise RuntimeError(
                 f"{csv_path} is missing required column(s): "
@@ -1854,20 +1953,28 @@ def load_subproject_refs_from_parent_csv(
 
         rows = [dict(row) for row in reader]
 
-    subproject_refs: list[dict[str, Any]] = []
+    stubs: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
 
     for row in rows:
         parent_project = str(row.get("parent_project") or "")
         parent_version = str(row.get("parent_version") or "")
 
-        if parent_project_filter and parent_project != parent_project_filter:
+        if (
+            parent_project_filter
+            and parent_project != parent_project_filter
+        ):
             continue
 
-        if parent_version_filter and parent_version != parent_version_filter:
+        if (
+            parent_version_filter
+            and parent_version != parent_version_filter
+        ):
             continue
 
-        child_version_href = canonical_href(str(row.get("child_version_href") or ""))
+        child_version_href = canonical_href(
+            str(row.get("child_version_href") or "")
+        )
 
         if not child_version_href:
             continue
@@ -1878,41 +1985,123 @@ def load_subproject_refs_from_parent_csv(
             continue
 
         seen.add(key)
-
         child_project = str(row.get("child_project") or "")
         child_version_name = str(row.get("child_version") or "")
 
-        subproject_stub = {
-            "parent_project": parent_project,
-            "parent_version": parent_version,
-            "parent_version_href": canonical_href(str(row.get("parent_version_href") or "")),
-            "project_name": child_project,
-            "version_name": child_version_name,
-            "version_href": child_version_href,
-            "source": str(row.get("detection_method") or "parent-csv"),
-            "path": f"{child_project}/{child_version_name}",
-        }
+        stubs.append(
+            {
+                "parent_project": parent_project,
+                "parent_version": parent_version,
+                "parent_version_href": canonical_href(
+                    str(row.get("parent_version_href") or "")
+                ),
+                "project_name": child_project,
+                "version_name": child_version_name,
+                "version_href": child_version_href,
+                "source": str(
+                    row.get("detection_method") or "parent-csv"
+                ),
+                "path": f"{child_project}/{child_version_name}",
+            }
+        )
 
-        start_seconds = time.monotonic()
+    unique_hrefs = list(
+        dict.fromkeys(
+            str(stub["version_href"])
+            for stub in stubs
+        )
+    )
+
+    if not unique_hrefs:
+        return []
+
+    worker_count = min(
+        bounded_worker_count(
+            workers,
+            maximum=MAX_IO_WORKERS,
+        ),
+        len(unique_hrefs),
+    )
+    worker_local = threading.local()
+
+    def worker_client() -> BlackDuckClient:
+        if worker_count == 1:
+            return client
+
+        local_client = getattr(
+            worker_local,
+            "blackduck_client",
+            None,
+        )
+
+        if local_client is None:
+            local_client = client.clone_for_worker()
+            worker_local.blackduck_client = local_client
+
+        return local_client
+
+    def load_version(
+            href: str,
+    ) -> tuple[str, dict[str, Any] | None, str, float]:
+        started = time.monotonic()
 
         try:
-            child_version = client.get(child_version_href)
+            return (
+                href,
+                worker_client().get(href),
+                "",
+                time.monotonic() - started,
+            )
         except RuntimeError as error:
-            elapsed_seconds = time.monotonic() - start_seconds
+            return (
+                href,
+                None,
+                str(error),
+                time.monotonic() - started,
+            )
 
+    loaded = ordered_parallel_map(
+        unique_hrefs,
+        load_version,
+        workers=worker_count,
+        maximum=MAX_IO_WORKERS,
+    )
+    versions_by_href = {
+        href: version
+        for href, version, error, _ in loaded
+        if version is not None and not error
+    }
+    errors_by_href = {
+        href: (error, elapsed)
+        for href, _, error, elapsed in loaded
+        if error
+    }
+
+    subproject_refs: list[dict[str, Any]] = []
+
+    for stub in stubs:
+        href = str(stub["version_href"])
+        child_version = versions_by_href.get(href)
+
+        if child_version is None:
+            error, elapsed = errors_by_href.get(
+                href,
+                ("Child version was not loaded", 0.0),
+            )
             print(
-                f"Warning: failed to read child version {child_version_href} "
-                f"for {parent_project} / {parent_version} after "
-                f"{format_duration(elapsed_seconds)}: {error}",
+                f"Warning: failed to read child version {href} "
+                f"for {stub['parent_project']} / "
+                f"{stub['parent_version']} after "
+                f"{format_duration(elapsed)}: {error}",
                 file=sys.stderr,
             )
 
             if failures is not None:
                 failures.append(
                     failed_relationship_from_subproject(
-                        subproject_stub,
+                        stub,
                         stage="load-child-version",
-                        elapsed_seconds=elapsed_seconds,
+                        elapsed_seconds=elapsed,
                         client=client,
                         error=error,
                     )
@@ -1923,14 +2112,16 @@ def load_subproject_refs_from_parent_csv(
         if debug:
             print(
                 f"Loaded relationship from CSV: "
-                f"{parent_project} / {parent_version} -> "
-                f"{child_project} / {child_version_name}",
+                f"{stub['parent_project']} / "
+                f"{stub['parent_version']} -> "
+                f"{stub['project_name']} / "
+                f"{stub['version_name']}",
                 file=sys.stderr,
             )
 
-        subproject_ref = dict(subproject_stub)
-        subproject_ref["version"] = child_version
-        subproject_refs.append(subproject_ref)
+        ref = dict(stub)
+        ref["version"] = child_version
+        subproject_refs.append(ref)
 
     return subproject_refs
 
@@ -1980,6 +2171,69 @@ def relationship_label(
     return f"{subproject['project_name']} {subproject['version_name']}"
 
 
+def collect_one_relationship(
+        client: BlackDuckClient,
+        index: int,
+        subproject: dict[str, Any],
+        args: argparse.Namespace,
+        default_parent_project: str,
+        default_parent_version: str,
+) -> RelationshipCollectionResult:
+    label = relationship_label(
+        subproject,
+        default_parent_project=default_parent_project,
+        default_parent_version=default_parent_version,
+    )
+    parent_project = str(
+        subproject.get("parent_project")
+        or default_parent_project
+    )
+    parent_version = str(
+        subproject.get("parent_version")
+        or default_parent_version
+    )
+    started = time.monotonic()
+
+    try:
+        findings = collect_findings_for_subproject(
+            client,
+            parent_project=parent_project,
+            parent_version=parent_version,
+            subproject_ref=subproject,
+            threshold=args.threshold,
+            score_field=args.score_field,
+            entity_custom_field=args.entity_custom_field,
+            require_entity=args.require_entity,
+        )
+
+        return RelationshipCollectionResult(
+            index=index,
+            label=label,
+            findings=findings,
+            failure=None,
+            elapsed_seconds=time.monotonic() - started,
+        )
+
+    except RuntimeError as error:
+        elapsed = time.monotonic() - started
+
+        return RelationshipCollectionResult(
+            index=index,
+            label=label,
+            findings=[],
+            failure=failed_relationship_from_subproject(
+                subproject,
+                stage="collect-vulnerabilities",
+                elapsed_seconds=elapsed,
+                client=client,
+                error=error,
+                default_parent_project=default_parent_project,
+                default_parent_version=default_parent_version,
+            ),
+            elapsed_seconds=elapsed,
+        )
+
+
 def collect_findings_for_subprojects(
         client: BlackDuckClient,
         subprojects: list[dict[str, Any]],
@@ -1991,77 +2245,93 @@ def collect_findings_for_subprojects(
     failures: list[FailedRelationship] = []
     total = len(subprojects)
 
-    for index, subproject in enumerate(subprojects, start=1):
-        label = relationship_label(
-            subproject,
+    if total == 0:
+        return findings, failures
+
+    requested_workers = int(getattr(args, "workers", 1))
+    worker_count = min(
+        bounded_worker_count(
+            requested_workers,
+            maximum=MAX_IO_WORKERS,
+        ),
+        total,
+    )
+    worker_local = threading.local()
+
+    print(
+        f"Collecting vulnerabilities for {total} relationship(s) "
+        f"with {worker_count} worker(s).",
+        file=sys.stderr,
+    )
+
+    def worker_client() -> BlackDuckClient:
+        if worker_count == 1:
+            return client
+
+        local_client = getattr(
+            worker_local,
+            "blackduck_client",
+            None,
+        )
+
+        if local_client is None:
+            local_client = client.clone_for_worker()
+            worker_local.blackduck_client = local_client
+
+        return local_client
+
+    def collect(
+            item: tuple[int, dict[str, Any]],
+    ) -> RelationshipCollectionResult:
+        index, subproject = item
+
+        if args.debug:
+            print(
+                f"[{index}/{total}] Checking "
+                f"{relationship_label(subproject, default_parent_project, default_parent_version)} "
+                f"from {subproject.get('source')}",
+                file=sys.stderr,
+            )
+
+        return collect_one_relationship(
+            client=worker_client(),
+            index=index,
+            subproject=subproject,
+            args=args,
             default_parent_project=default_parent_project,
             default_parent_version=default_parent_version,
         )
 
+    results = ordered_parallel_map(
+        enumerate(subprojects, start=1),
+        collect,
+        workers=worker_count,
+        maximum=MAX_IO_WORKERS,
+    )
+
+    for result in results:
+        if result.failure is not None:
+            print(
+                f"Warning: failed checking {result.label} after "
+                f"{format_duration(result.elapsed_seconds)}; "
+                f"continuing: {result.failure.error}",
+                file=sys.stderr,
+            )
+            failures.append(result.failure)
+            continue
+
+        findings.extend(result.findings)
+
         if args.debug:
             print(
-                f"[{index}/{total}] Checking {label} from "
-                f"{subproject.get('source')}",
+                f"[{result.index}/{total}] Completed "
+                f"{result.label}: {len(result.findings)} finding(s) "
+                f"in {format_duration(result.elapsed_seconds)}",
                 file=sys.stderr,
-            )
-
-        parent_project = str(
-            subproject.get("parent_project")
-            or default_parent_project
-        )
-        parent_version = str(
-            subproject.get("parent_version")
-            or default_parent_version
-        )
-
-        start_seconds = time.monotonic()
-
-        try:
-            child_findings = collect_findings_for_subproject(
-                client,
-                parent_project=parent_project,
-                parent_version=parent_version,
-                subproject_ref=subproject,
-                threshold=args.threshold,
-                score_field=args.score_field,
-                entity_custom_field=args.entity_custom_field,
-                require_entity=args.require_entity,
-            )
-
-            elapsed_seconds = time.monotonic() - start_seconds
-            findings.extend(child_findings)
-
-            if args.debug:
-                print(
-                    f"[{index}/{total}] Completed {label}: "
-                    f"{len(child_findings)} finding(s) in "
-                    f"{format_duration(elapsed_seconds)}",
-                    file=sys.stderr,
-                )
-
-        except RuntimeError as error:
-            elapsed_seconds = time.monotonic() - start_seconds
-
-            print(
-                f"Warning: failed checking {label} after "
-                f"{format_duration(elapsed_seconds)}; continuing: "
-                f"{error}",
-                file=sys.stderr,
-            )
-
-            failures.append(
-                failed_relationship_from_subproject(
-                    subproject,
-                    stage="collect-vulnerabilities",
-                    elapsed_seconds=elapsed_seconds,
-                    client=client,
-                    error=error,
-                    default_parent_project=default_parent_project,
-                    default_parent_version=default_parent_version,
-                )
             )
 
     return findings, failures
+
 
 def write_csv(
         findings: list[dict[str, Any]],
@@ -2297,6 +2567,8 @@ def build_retry_command(
             str(args.retry_delay),
             "--page-limit",
             str(args.page_limit),
+            "--workers",
+            str(getattr(args, "workers", DEFAULT_IO_WORKERS)),
         ]
     )
 
@@ -2515,6 +2787,15 @@ def parse_args() -> argparse.Namespace:
         help="Black Duck API page size.",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_IO_WORKERS,
+        help=(
+            "Concurrent child project-version vulnerability pulls. "
+            f"Values above {MAX_IO_WORKERS} are clamped."
+        ),
+    )
+    parser.add_argument(
         "--api-cache",
         default=jira_output_path(
             "cache",
@@ -2563,6 +2844,25 @@ def validate_args(args: argparse.Namespace) -> None:
 
     if args.page_limit <= 0:
         raise RuntimeError("--page-limit must be greater than 0")
+
+    requested_workers = int(
+        getattr(args, "workers", DEFAULT_IO_WORKERS)
+    )
+
+    if requested_workers <= 0:
+        raise RuntimeError("--workers must be greater than 0")
+
+    if requested_workers > MAX_IO_WORKERS:
+        print(
+            f"Warning: --workers {requested_workers} exceeds "
+            f"maximum {MAX_IO_WORKERS}; clamping.",
+            file=sys.stderr,
+        )
+
+    args.workers = bounded_worker_count(
+        requested_workers,
+        maximum=MAX_IO_WORKERS,
+    )
 
     if args.depth < 1:
         raise RuntimeError("--depth must be 1 or greater")
@@ -2678,6 +2978,7 @@ def main() -> int:
                 parent_version_filter=args.parent_version,
                 debug=args.debug,
                 failures=failed_relationships,
+                workers=args.workers,
             )
 
             subprojects = filter_subprojects_for_targeting(

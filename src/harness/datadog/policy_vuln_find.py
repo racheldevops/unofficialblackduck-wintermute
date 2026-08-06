@@ -8,6 +8,7 @@ import json
 import os
 import ssl
 import sys
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
@@ -17,12 +18,17 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from harness.concurrency import (
+    MAX_IO_WORKERS,
+    bounded_worker_count,
+    ordered_parallel_map,
+)
 from harness.paths import datadog_output_path, ensure_parent_dir
 
 
 SCHEMA_VERSION = 1
 CACHE_SCHEMA_VERSION = 1
-MAX_WORKERS = 8
+MAX_WORKERS = MAX_IO_WORKERS
 
 FIELDNAMES = [
     "project",
@@ -246,6 +252,21 @@ class BlackDuckClient:
         self.debug = debug
         self.bearer_token: str | None = bearer_token
         self.ssl_context = ssl._create_unverified_context() if insecure else None
+
+    def clone_for_worker(self) -> BlackDuckClient:
+        worker = BlackDuckClient(
+            base_url=self.base_url,
+            api_token=self.api_token,
+            insecure=False,
+            timeout=self.timeout,
+            retries=self.retries,
+            retry_delay=self.retry_delay,
+            page_limit=self.page_limit,
+            debug=self.debug,
+            bearer_token=self.bearer_token,
+        )
+        worker.ssl_context = self.ssl_context
+        return worker
 
     def authenticate(self) -> None:
         url = f"{self.base_url}/api/tokens/authenticate"
@@ -530,46 +551,126 @@ def get_project_versions(client: BlackDuckClient, project: dict[str, Any]) -> li
 
 
 def build_inventory(
-    client: BlackDuckClient,
-    args: argparse.Namespace,
+        client: BlackDuckClient,
+        args: argparse.Namespace,
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     projects = client.paged_get("/api/projects")
-    inventory: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    seen_projects = 0
+    selected_projects: list[dict[str, Any]] = []
 
     for project in projects:
         project_name = str(project.get("name") or "")
 
-        if args.project_name and project_name != args.project_name:
+        if (
+            args.project_name
+            and project_name != args.project_name
+        ):
             continue
 
-        if args.project_name_contains and args.project_name_contains.lower() not in project_name.lower():
+        if (
+            args.project_name_contains
+            and args.project_name_contains.lower()
+            not in project_name.lower()
+        ):
             continue
 
-        seen_projects += 1
+        selected_projects.append(project)
 
-        if args.max_projects is not None and seen_projects > args.max_projects:
+        if (
+            args.max_projects is not None
+            and len(selected_projects) >= args.max_projects
+        ):
             break
 
+    if not selected_projects:
+        return []
+
+    requested_workers = int(
+        getattr(args, "workers", 1)
+    )
+    worker_count = min(
+        bounded_worker_count(
+            requested_workers,
+            maximum=MAX_IO_WORKERS,
+        ),
+        len(selected_projects),
+    )
+    worker_local = threading.local()
+
+    def worker_client() -> BlackDuckClient:
+        if worker_count == 1:
+            return client
+
+        local_client = getattr(
+            worker_local,
+            "blackduck_client",
+            None,
+        )
+
+        if local_client is None:
+            local_client = client.clone_for_worker()
+            worker_local.blackduck_client = local_client
+
+        return local_client
+
+    def load_project_versions(
+            project: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], str]:
         try:
-            versions = get_project_versions(client, project)
+            return (
+                get_project_versions(
+                    worker_client(),
+                    project,
+                ),
+                "",
+            )
         except RuntimeError as error:
-            print(f"Warning: failed reading versions for {project_name}: {error}", file=sys.stderr)
+            return [], str(error)
+
+    version_results = ordered_parallel_map(
+        selected_projects,
+        load_project_versions,
+        workers=worker_count,
+        maximum=MAX_IO_WORKERS,
+    )
+    inventory: list[
+        tuple[dict[str, Any], dict[str, Any]]
+    ] = []
+
+    for project, (versions, error) in zip(
+        selected_projects,
+        version_results,
+        strict=True,
+    ):
+        project_name = str(project.get("name") or "")
+
+        if error:
+            print(
+                f"Warning: failed reading versions for "
+                f"{project_name}: {error}",
+                file=sys.stderr,
+            )
             continue
 
         for version in versions:
-            if args.max_versions is not None and len(inventory) >= args.max_versions:
-                return inventory
-
-            if args.version_name and version_name(version) != args.version_name:
+            if (
+                args.version_name
+                and version_name(version) != args.version_name
+            ):
                 continue
 
-            if args.phase and str(version.get("phase") or "") != args.phase:
+            if (
+                args.phase
+                and str(version.get("phase") or "")
+                != args.phase
+            ):
                 continue
 
             inventory.append((project, version))
 
-            if args.max_versions is not None and len(inventory) >= args.max_versions:
+            if (
+                args.max_versions is not None
+                and len(inventory) >= args.max_versions
+            ):
                 return inventory
 
     return inventory
@@ -1490,27 +1591,58 @@ def parse_args() -> argparse.Namespace:
 def validate_args(args: argparse.Namespace) -> None:
     if args.timeout <= 0:
         raise RuntimeError("--timeout must be greater than 0")
+
     if args.retries < 0:
         raise RuntimeError("--retries must be 0 or greater")
+
     if args.retry_delay < 0:
         raise RuntimeError("--retry-delay must be 0 or greater")
+
     if args.page_limit <= 0:
         raise RuntimeError("--page-limit must be greater than 0")
+
     if args.refresh_older_than_hours < -1:
-        raise RuntimeError("--refresh-older-than-hours must be -1 or greater")
+        raise RuntimeError(
+            "--refresh-older-than-hours must be -1 or greater"
+        )
+
     if args.workers <= 0:
         raise RuntimeError("--workers must be greater than 0")
+
     if args.workers > MAX_WORKERS:
-        print(f"Warning: --workers {args.workers} exceeds max {MAX_WORKERS}; clamping to {MAX_WORKERS}.", file=sys.stderr)
-        args.workers = MAX_WORKERS
+        print(
+            f"Warning: --workers {args.workers} exceeds max "
+            f"{MAX_WORKERS}; clamping to {MAX_WORKERS}.",
+            file=sys.stderr,
+        )
+
+    args.workers = bounded_worker_count(
+        args.workers,
+        maximum=MAX_WORKERS,
+    )
+
     if args.progress_every <= 0:
         raise RuntimeError("--progress-every must be greater than 0")
+
     if args.cache_save_every <= 0:
         raise RuntimeError("--cache-save-every must be greater than 0")
-    if args.max_runtime_minutes is not None and args.max_runtime_minutes <= 0:
-        raise RuntimeError("--max-runtime-minutes must be greater than 0")
-    if (args.policy_name or args.policy_rule_id) and args.skip_policy_rules:
-        raise RuntimeError("--skip-policy-rules cannot be used with --policy-name or --policy-rule-id")
+
+    if (
+        args.max_runtime_minutes is not None
+        and args.max_runtime_minutes <= 0
+    ):
+        raise RuntimeError(
+            "--max-runtime-minutes must be greater than 0"
+        )
+
+    if (
+        (args.policy_name or args.policy_rule_id)
+        and args.skip_policy_rules
+    ):
+        raise RuntimeError(
+            "--skip-policy-rules cannot be used with "
+            "--policy-name or --policy-rule-id"
+        )
 
 
 def main() -> int:

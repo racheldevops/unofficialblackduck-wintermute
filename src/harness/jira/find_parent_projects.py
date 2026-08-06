@@ -8,6 +8,7 @@ import os
 import re
 import ssl
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -17,6 +18,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from harness.concurrency import (
+    MAX_IO_WORKERS,
+    bounded_worker_count,
+    ordered_parallel_map,
+)
 from harness.paths import ensure_parent_dir, jira_output_path
 
 
@@ -79,6 +85,7 @@ class BlackDuckClient:
             timeout: int = 60,
             retries: int = 2,
             retry_delay: float = 2.0,
+            page_limit: int = 500,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_token = api_token
@@ -86,16 +93,34 @@ class BlackDuckClient:
         self.timeout = timeout
         self.retries = retries
         self.retry_delay = retry_delay
+        self.page_limit = page_limit
 
         if insecure and ca_bundle:
-            raise ValueError("Use either --insecure or --ca-bundle, not both.")
+            raise ValueError(
+                "Use either --insecure or --ca-bundle, not both."
+            )
 
         if insecure:
             self.ssl_context = ssl._create_unverified_context()
         elif ca_bundle:
-            self.ssl_context = ssl.create_default_context(cafile=ca_bundle)
+            self.ssl_context = ssl.create_default_context(
+                cafile=ca_bundle
+            )
         else:
             self.ssl_context = None
+
+    def clone_for_worker(self) -> BlackDuckClient:
+        worker = BlackDuckClient(
+            base_url=self.base_url,
+            api_token=self.api_token,
+            timeout=self.timeout,
+            retries=self.retries,
+            retry_delay=self.retry_delay,
+            page_limit=self.page_limit,
+        )
+        worker.ssl_context = self.ssl_context
+        worker.bearer_token = self.bearer_token
+        return worker
 
     def authenticate(self) -> None:
         url = f"{self.base_url}/api/tokens/authenticate"
@@ -226,17 +251,25 @@ class BlackDuckClient:
             self,
             url_or_path: str,
             params: dict[str, Any] | None = None,
-            limit: int = 100,
+            limit: int | None = None,
     ) -> list[dict[str, Any]]:
+        page_limit = (
+            limit
+            if limit is not None
+            else self.page_limit
+        )
         all_items: list[dict[str, Any]] = []
         offset = 0
 
         while True:
             page_params = dict(params or {})
             page_params["offset"] = offset
-            page_params["limit"] = limit
+            page_params["limit"] = page_limit
 
-            payload = self.get(url_or_path, params=page_params)
+            payload = self.get(
+                url_or_path,
+                params=page_params,
+            )
 
             if "items" not in payload:
                 return [payload]
@@ -245,16 +278,21 @@ class BlackDuckClient:
             all_items.extend(items)
 
             total_count = payload.get("totalCount")
+            total = (
+                int(total_count)
+                if total_count is not None
+                else None
+            )
 
             if not items:
                 break
 
             offset += len(items)
 
-            if total_count is not None and offset >= total_count:
+            if total is not None and offset >= total:
                 break
 
-            if len(items) < limit:
+            if len(items) < page_limit:
                 break
 
         return all_items
@@ -438,38 +476,90 @@ def build_version_inventory(
         project_name_contains: str | None,
         max_projects: int | None,
         debug: bool,
+        workers: int = 1,
 ) -> list[VersionInfo]:
     projects = client.paged_get("/api/projects")
-    inventory: list[VersionInfo] = []
-
-    scanned_projects = 0
+    selected_projects: list[
+        tuple[dict[str, Any], str, str]
+    ] = []
 
     for project in projects:
         project_name = str(project.get("name") or "")
 
-        if project_name_contains:
-            if project_name_contains.lower() not in project_name.lower():
-                continue
+        if (
+            project_name_contains
+            and project_name_contains.lower()
+            not in project_name.lower()
+        ):
+            continue
 
         project_href = get_self_href(project)
 
         if not project_href:
             continue
 
-        project_href = canonical_href(project_href)
-        scanned_projects += 1
+        selected_projects.append(
+            (
+                project,
+                project_name,
+                canonical_href(project_href),
+            )
+        )
+
+        if (
+            max_projects is not None
+            and len(selected_projects) >= max_projects
+        ):
+            break
+
+    if not selected_projects:
+        return []
+
+    worker_count = min(
+        bounded_worker_count(
+            workers,
+            maximum=MAX_IO_WORKERS,
+        ),
+        len(selected_projects),
+    )
+    worker_local = threading.local()
+
+    def worker_client() -> BlackDuckClient:
+        if worker_count == 1:
+            return client
+
+        local_client = getattr(
+            worker_local,
+            "blackduck_client",
+            None,
+        )
+
+        if local_client is None:
+            local_client = client.clone_for_worker()
+            worker_local.blackduck_client = local_client
+
+        return local_client
+
+    def load_project(
+            item: tuple[dict[str, Any], str, str],
+    ) -> tuple[list[VersionInfo], str]:
+        project, project_name, project_href = item
 
         if debug:
-            print(f"Indexing project: {project_name}", file=sys.stderr)
-
-        try:
-            versions = get_project_versions(client, project)
-        except RuntimeError as error:
             print(
-                f"Warning: failed to read versions for project {project_name}: {error}",
+                f"Indexing project: {project_name}",
                 file=sys.stderr,
             )
-            continue
+
+        try:
+            versions = get_project_versions(
+                worker_client(),
+                project,
+            )
+        except RuntimeError as error:
+            return [], str(error)
+
+        inventory: list[VersionInfo] = []
 
         for version in versions:
             version_href = get_self_href(version)
@@ -489,8 +579,36 @@ def build_version_inventory(
                 )
             )
 
-        if max_projects is not None and scanned_projects >= max_projects:
-            break
+        return inventory, ""
+
+    project_results = ordered_parallel_map(
+        selected_projects,
+        load_project,
+        workers=worker_count,
+        maximum=MAX_IO_WORKERS,
+    )
+    inventory: list[VersionInfo] = []
+
+    for (
+        project,
+        project_name,
+        project_href,
+    ), (versions, error) in zip(
+        selected_projects,
+        project_results,
+        strict=True,
+    ):
+        del project, project_href
+
+        if error:
+            print(
+                f"Warning: failed to read versions for project "
+                f"{project_name}: {error}",
+                file=sys.stderr,
+            )
+            continue
+
+        inventory.extend(versions)
 
     return inventory
 
@@ -918,18 +1036,37 @@ def scan_versions(
         resolve_bom_names: bool,
         workers: int,
         debug: bool,
-) -> list[tuple[VersionInfo, str, list[dict[str, str]], str | None]]:
+) -> list[
+    tuple[
+        VersionInfo,
+        str,
+        list[dict[str, str]],
+        str | None,
+    ]
+]:
     if not scan_plan:
         return []
 
-    results: list[tuple[VersionInfo, str, list[dict[str, str]], str | None]] = []
+    worker_count = min(
+        bounded_worker_count(
+            workers,
+            maximum=MAX_IO_WORKERS,
+        ),
+        len(scan_plan),
+    )
 
-    if workers <= 1:
-        for index, (parent, reason) in enumerate(scan_plan, start=1):
+    if worker_count == 1:
+        results = []
+
+        for index, (parent, reason) in enumerate(
+            scan_plan,
+            start=1,
+        ):
             if debug:
                 print(
                     f"[{index}/{len(scan_plan)}] Scanning "
-                    f"{parent.project_name} / {parent.version_name} ({reason})",
+                    f"{parent.project_name} / "
+                    f"{parent.version_name} ({reason})",
                     file=sys.stderr,
                 )
 
@@ -947,41 +1084,75 @@ def scan_versions(
 
         return results
 
-    worker_count = max(1, min(workers, 4))
-
     print(
-        f"Scanning {len(scan_plan)} project version(s) with {worker_count} worker(s).",
+        f"Scanning {len(scan_plan)} project version(s) "
+        f"with {worker_count} worker(s).",
         file=sys.stderr,
     )
 
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+    worker_local = threading.local()
+
+    def worker_client() -> BlackDuckClient:
+        local_client = getattr(
+            worker_local,
+            "blackduck_client",
+            None,
+        )
+
+        if local_client is None:
+            local_client = client.clone_for_worker()
+            worker_local.blackduck_client = local_client
+
+        return local_client
+
+    ordered_results: list[
+        tuple[
+            VersionInfo,
+            str,
+            list[dict[str, str]],
+            str | None,
+        ]
+        | None
+    ] = [None] * len(scan_plan)
+
+    with ThreadPoolExecutor(
+        max_workers=worker_count
+    ) as executor:
         futures = {
             executor.submit(
                 scan_one_parent,
-                client,
+                worker_client(),
                 parent,
                 reason,
                 versions_by_href,
                 versions_by_name,
                 resolve_bom_names,
                 debug,
-            ): (parent, reason)
-            for parent, reason in scan_plan
+            ): (index, parent, reason)
+            for index, (parent, reason)
+            in enumerate(scan_plan)
         }
 
-        for index, future in enumerate(as_completed(futures), start=1):
-            parent, reason = futures[future]
+        for completed, future in enumerate(
+            as_completed(futures),
+            start=1,
+        ):
+            index, parent, reason = futures[future]
+            ordered_results[index] = future.result()
 
             if debug:
                 print(
-                    f"[{index}/{len(scan_plan)}] Completed "
-                    f"{parent.project_name} / {parent.version_name} ({reason})",
+                    f"[{completed}/{len(scan_plan)}] Completed "
+                    f"{parent.project_name} / "
+                    f"{parent.version_name} ({reason})",
                     file=sys.stderr,
                 )
 
-            results.append(future.result())
-
-    return results
+    return [
+        result
+        for result in ordered_results
+        if result is not None
+    ]
 
 
 def update_cache_with_scan_results(
@@ -1256,7 +1427,13 @@ def parse_args() -> argparse.Namespace:
         "--workers",
         type=int,
         default=1,
-        help="Concurrent project-version BOM checks. Use 1-4.",
+        help="Concurrent project-version BOM checks. Use 1-8.",
+    )
+    parser.add_argument(
+        "--page-limit",
+        type=int,
+        default=500,
+        help="Black Duck API page size. Default: 500.",
     )
     parser.add_argument(
         "--debug",
@@ -1269,6 +1446,26 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
+    if args.page_limit <= 0:
+        print("ERROR: --page-limit must be greater than zero", file=sys.stderr)
+        return 2
+
+    if args.workers <= 0:
+        print("ERROR: --workers must be greater than zero", file=sys.stderr)
+        return 2
+
+    if args.workers > MAX_IO_WORKERS:
+        print(
+            f"Warning: --workers {args.workers} exceeds maximum "
+            f"{MAX_IO_WORKERS}; clamping.",
+            file=sys.stderr,
+        )
+
+    args.workers = bounded_worker_count(
+        args.workers,
+        maximum=MAX_IO_WORKERS,
+    )
+
     client = BlackDuckClient(
         base_url=args.bd_url,
         api_token=args.api_token,
@@ -1277,6 +1474,7 @@ def main() -> int:
         timeout=args.timeout,
         retries=args.retries,
         retry_delay=args.retry_delay,
+        page_limit=args.page_limit,
     )
     client.authenticate()
 
@@ -1288,6 +1486,7 @@ def main() -> int:
         project_name_contains=args.project_name_contains,
         max_projects=args.max_projects,
         debug=args.debug,
+        workers=args.workers,
     )
 
     versions_by_href, versions_by_name = build_indexes(inventory)

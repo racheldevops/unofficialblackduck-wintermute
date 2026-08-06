@@ -476,3 +476,95 @@ def test_validate_args_rejects_invalid_values(
 
     with pytest.raises(RuntimeError, match=message):
         finder.validate_args(args)
+
+
+def test_inventory_fetches_project_versions_concurrently() -> None:
+    import threading
+    import time
+
+    projects = [
+        {
+            "name": f"Service {index}",
+            "_meta": {
+                "href": f"https://bd.example/api/projects/{index}",
+                "links": [
+                    {
+                        "rel": "versions",
+                        "href": (
+                            f"https://bd.example/api/projects/"
+                            f"{index}/versions"
+                        ),
+                    }
+                ],
+            },
+        }
+        for index in range(4)
+    ]
+
+    class Client:
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.active = 0
+            self.max_active = 0
+
+        def clone_for_worker(self) -> Client:
+            return self
+
+        def paged_get(
+            self,
+            path: str,
+            params: dict[str, Any] | None = None,
+        ) -> list[dict[str, Any]]:
+            del params
+
+            if path == "/api/projects":
+                return projects
+
+            with self.lock:
+                self.active += 1
+                self.max_active = max(
+                    self.max_active,
+                    self.active,
+                )
+
+            try:
+                time.sleep(0.03)
+                project_id = path.split("/")[-2]
+                return [
+                    {
+                        "versionName": "1.0",
+                        "phase": "RELEASED",
+                        "_meta": {
+                            "href": (
+                                f"https://bd.example/api/projects/"
+                                f"{project_id}/versions/1"
+                            )
+                        },
+                    }
+                ]
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    args = argparse.Namespace(
+        project_name=None,
+        project_name_contains=None,
+        max_projects=None,
+        max_versions=None,
+        version_name=None,
+        phase=None,
+        workers=4,
+    )
+    client = Client()
+    inventory = finder.build_inventory(client, args)
+
+    assert client.max_active > 1
+    assert [
+        project["name"]
+        for project, version in inventory
+    ] == [
+        "Service 0",
+        "Service 1",
+        "Service 2",
+        "Service 3",
+    ]

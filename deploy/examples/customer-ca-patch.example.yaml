@@ -12,6 +12,13 @@ spec:
               args:
                 - --dry-run
                 - --strict
+                - --resolve-bom-names
+                - --workers
+                - "8"
+                - --parent-workers
+                - "8"
+                - --rollup-workers
+                - "8"
                 - --ca-bundle
                 - /etc/blackduck-harness/ca/customer-ca.pem
                 - --config
