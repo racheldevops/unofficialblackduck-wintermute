@@ -23,4 +23,4 @@ blackduck-wintermute-pull --help
 
 For production deployment, start with the [cohort deployment guide](READMEs/COHORT_DEPLOYMENT_README.md). Existing Jira and Datadog commands remain available as compatibility workflows.
 
-> Wintermute is an unofficial personal project and is not supported by Black Duck. Validate dry-run output and customer configuration before enabling destination changes.
+> Wintermute is an unofficial personal project and is not supported by Black Duck. Validate dry-run output and customer configuration before enabling destination changes. Contribution is welcomed.
