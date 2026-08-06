@@ -2,29 +2,42 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import csv
 import hashlib
 import json
 import os
-import ssl
 import subprocess
 import sys
-import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
-from urllib.request import Request, urlopen
 
+from wintermute.blackduck.client import BlackDuckClient as SharedBlackDuckClient
+from wintermute.blackduck.cache import ApiResponseCache as SharedApiResponseCache
+from wintermute.blackduck.resources import (
+    boolish as shared_boolish,
+    canonical_href as shared_canonical_href,
+    first_value_by_key as shared_first_value_by_key,
+    get_link as shared_get_link,
+    get_self_href as shared_get_self_href,
+    to_float as shared_to_float,
+)
+from wintermute.blackduck.vulnerabilities import (
+    extract_exploit_available as shared_extract_exploit_available,
+    extract_reachability as shared_extract_reachability,
+    extract_vulnerability_candidates as shared_extract_vulnerability_candidates,
+    looks_like_vulnerability as shared_looks_like_vulnerability,
+    vulnerability_identifier as shared_vulnerability_identifier,
+    vulnerability_severity as shared_vulnerability_severity,
+)
 from wintermute.concurrency import (
     MAX_COMPONENT_WORKERS as SHARED_MAX_COMPONENT_WORKERS,
     MAX_IO_WORKERS,
     bounded_worker_count,
 )
+from wintermute.datadog.collection import collect_candidate_findings
 from wintermute.paths import datadog_output_path, ensure_parent_dir
 
 
@@ -106,9 +119,6 @@ class PullTarget:
 
 
 @dataclass
-class ComponentPullResult:
-    findings: list[dict[str, str]]
-    failures: list[dict[str, str]]
 
 
 @dataclass
@@ -145,251 +155,95 @@ def sha256_hex(value: str) -> str:
 
 
 def canonical_href(href: str) -> str:
-    href = str(href or "").strip()
-
-    if not href:
-        return ""
-
-    parsed = urlparse(href)
-
-    if not parsed.scheme or not parsed.netloc:
-        return href.rstrip("/")
-
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "", ""))
+    return shared_canonical_href(href)
 
 
 def get_self_href(resource: dict[str, Any]) -> str:
-    return str((resource.get("_meta") or {}).get("href") or "")
+    return shared_get_self_href(resource)
 
 
-def get_link(resource: dict[str, Any], rel_names: tuple[str, ...]) -> str:
-    wanted = {rel.lower() for rel in rel_names}
-    links = (resource.get("_meta") or {}).get("links") or []
-
-    for link in links:
-        rel = str(link.get("rel") or "").lower()
-        href = str(link.get("href") or "")
-
-        if href and rel in wanted:
-            return href
-
-    for link in links:
-        rel = str(link.get("rel") or "").lower()
-        href = str(link.get("href") or "")
-
-        if href and any(wanted_rel in rel for wanted_rel in wanted):
-            return href
-
-    return ""
+def get_link(
+        resource: dict[str, Any],
+        rel_names: tuple[str, ...],
+) -> str:
+    return shared_get_link(resource, rel_names)
 
 
-def first_value_by_key(value: Any, keys: list[str]) -> Any:
-    wanted = {key.lower() for key in keys}
-
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key.lower() in wanted and item not in (None, ""):
-                return item
-
-        for item in value.values():
-            found = first_value_by_key(item, keys)
-            if found not in (None, ""):
-                return found
-
-    elif isinstance(value, list):
-        for item in value:
-            found = first_value_by_key(item, keys)
-            if found not in (None, ""):
-                return found
-
-    return None
+def first_value_by_key(
+        value: Any,
+        keys: list[str],
+) -> Any:
+    return shared_first_value_by_key(value, keys)
 
 
 def to_float(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return shared_to_float(value)
 
 
 def boolish(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-
-    text = str(value or "").strip().lower()
-
-    return text in {
-        "1",
-        "true",
-        "yes",
-        "y",
-        "available",
-        "exploit_available",
-        "exploitable",
-        "reachable",
-        "confirmed",
-        "high",
-    }
+    return shared_boolish(value)
 
 
-def vulnerability_identifier(value: dict[str, Any]) -> str:
-    return str(
-        first_value_by_key(
-            value,
-            [
-                "vulnerabilityName",
-                "vulnerabilityId",
-                "vulnerabilityExternalId",
-                "externalId",
-                "cveId",
-                "cve",
-                "bdsaId",
-                "name",
-                "id",
-            ],
-        )
-        or "UNKNOWN"
+def vulnerability_identifier(
+        value: dict[str, Any],
+) -> str:
+    return shared_vulnerability_identifier(value)
+
+
+def vulnerability_severity(
+        value: dict[str, Any],
+) -> str:
+    return shared_vulnerability_severity(
+        value,
+        uppercase=True,
     )
 
 
-def vulnerability_severity(value: dict[str, Any]) -> str:
-    return str(
-        first_value_by_key(
-            value,
-            [
-                "severity",
-                "vulnerabilitySeverity",
-                "sourceSeverity",
-            ],
-        )
-        or ""
-    ).upper()
-
-
-def looks_like_vulnerability(value: dict[str, Any], score_field: str) -> bool:
-    has_id = first_value_by_key(
+def looks_like_vulnerability(
+        value: dict[str, Any],
+        score_field: str,
+) -> bool:
+    return shared_looks_like_vulnerability(
         value,
-        [
-            "vulnerabilityName",
-            "vulnerabilityId",
-            "vulnerabilityExternalId",
-            "externalId",
-            "cveId",
-            "cve",
-            "bdsaId",
-            "name",
-            "id",
-        ],
-    ) is not None
-
-    has_score = first_value_by_key(
-        value,
-        [
+        score_fields=(
             score_field,
             "overallScore",
             "baseScore",
             "cvssScore",
-        ],
-    ) is not None
-
-    has_severity = first_value_by_key(
-        value,
-        [
-            "severity",
-            "vulnerabilitySeverity",
-            "sourceSeverity",
-        ],
-    ) is not None
-
-    return has_id and (has_score or has_severity)
-
-
-def extract_vulnerability_candidates(value: Any, score_field: str) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-
-    def walk(item: Any) -> None:
-        if isinstance(item, dict):
-            nested = item.get("vulnerability")
-
-            if isinstance(nested, dict):
-                merged = dict(nested)
-
-                for key, nested_item in item.items():
-                    if key != "vulnerability" and key not in merged:
-                        merged[key] = nested_item
-
-                if looks_like_vulnerability(merged, score_field):
-                    candidates.append(merged)
-
-            if looks_like_vulnerability(item, score_field):
-                candidates.append(item)
-
-            for nested_item in item.values():
-                walk(nested_item)
-
-        elif isinstance(item, list):
-            for nested_item in item:
-                walk(nested_item)
-
-    walk(value)
-
-    unique: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    for candidate in candidates:
-        key = (
-            f"{vulnerability_identifier(candidate)}|"
-            f"{first_value_by_key(candidate, [score_field, 'overallScore'])}|"
-            f"{json.dumps(candidate, sort_keys=True, default=str)[:300]}"
-        )
-
-        if key not in seen:
-            seen.add(key)
-            unique.append(candidate)
-
-    return unique
-
-
-def extract_exploit_available(value: dict[str, Any]) -> tuple[bool, str]:
-    direct = first_value_by_key(
-        value,
-        [
-            "exploitAvailable",
-            "exploit_available",
-            "exploitable",
-            "hasExploit",
-            "exploitability",
-            "exploitStatus",
-        ],
+        ),
     )
 
-    if direct not in (None, ""):
-        return boolish(direct), str(direct)
 
-    for key, item in value.items():
-        key_lower = str(key).lower()
-
-        if "exploit" in key_lower and "score" not in key_lower and boolish(item):
-            return True, str(item)
-
-    return False, ""
-
-
-def extract_reachability(value: dict[str, Any]) -> tuple[bool, str, str]:
-    direct = first_value_by_key(
+def extract_vulnerability_candidates(
+        value: Any,
+        score_field: str,
+) -> list[dict[str, Any]]:
+    return shared_extract_vulnerability_candidates(
         value,
-        [
-            "reachable",
-            "reachability",
-            "reachabilityStatus",
-            "isReachable",
-        ],
+        score_fields=(
+            score_field,
+            "overallScore",
+            "baseScore",
+            "cvssScore",
+        ),
+        dedupe_score_fields=(
+            score_field,
+            "overallScore",
+        ),
+        dedupe_payload_limit=300,
     )
 
-    if direct not in (None, ""):
-        return boolish(direct), str(direct), "field"
 
-    return False, "", ""
+def extract_exploit_available(
+        value: dict[str, Any],
+) -> tuple[bool, str]:
+    return shared_extract_exploit_available(value)
+
+
+def extract_reachability(
+        value: dict[str, Any],
+) -> tuple[bool, str, str]:
+    return shared_extract_reachability(value)
 
 
 def format_duration(seconds: float) -> str:
@@ -409,378 +263,12 @@ def format_duration(seconds: float) -> str:
     return f"{hours}h {remaining_minutes}m {remainder}s"
 
 
-class ApiResponseCache:
-    def __init__(
-        self,
-        path: str,
-        base_url: str,
-        max_age_hours: float,
-        max_entries: int,
-        refresh: bool,
-        debug: bool = False,
-    ):
-        self.path = path
-        self.base_url = base_url.rstrip("/")
-        self.max_age_hours = max_age_hours
-        self.max_entries = max_entries
-        self.debug = debug
-        self.lock = threading.RLock()
-        self.data: dict[str, Any] = {
-            "schema_version": CACHE_SCHEMA_VERSION,
-            "base_url": self.base_url,
-            "created_at": now_iso(),
-            "updated_at": now_iso(),
-            "entries": {},
-        }
+class ApiResponseCache(SharedApiResponseCache):
+    pass
 
-        if refresh:
-            print(f"Refreshing API cache; ignoring existing cache at {path}.", file=sys.stderr)
-            return
 
-        if not os.path.exists(path):
-            print(f"No API cache found at {path}; fresh API reads required.", file=sys.stderr)
-            return
-
-        try:
-            with open(path, encoding="utf-8") as input_file:
-                loaded = json.load(input_file)
-        except (OSError, json.JSONDecodeError) as error:
-            print(f"Warning: failed to read API cache {path}: {error}; starting fresh.", file=sys.stderr)
-            return
-
-        if loaded.get("schema_version") != CACHE_SCHEMA_VERSION:
-            print(f"API cache schema mismatch in {path}; starting fresh.", file=sys.stderr)
-            return
-
-        if str(loaded.get("base_url") or "").rstrip("/") != self.base_url:
-            print("API cache base URL differs from current Black Duck URL; starting fresh.", file=sys.stderr)
-            return
-
-        loaded.setdefault("entries", {})
-        self.data = loaded
-        self.prune()
-
-        print(
-            f"Loaded API cache from {path} with {len(self.data.get('entries', {})):,} entrie(s).",
-            file=sys.stderr,
-        )
-
-    def get_items(self, url: str) -> list[dict[str, Any]] | None:
-        key = sha256_hex(url)
-
-        with self.lock:
-            entry = self.data.setdefault("entries", {}).get(key)
-
-            if not isinstance(entry, dict):
-                return None
-
-            cached_at = parse_iso(str(entry.get("cached_at") or ""))
-
-            if self.max_age_hours >= 0 and (
-                not cached_at
-                or (datetime.now(timezone.utc) - cached_at).total_seconds() / 3600 >= self.max_age_hours
-            ):
-                return None
-
-            items = entry.get("items")
-
-            if not isinstance(items, list):
-                return None
-
-            entry["last_used_at"] = now_iso()
-            entry["hit_count"] = int(entry.get("hit_count") or 0) + 1
-
-            return copy.deepcopy(items)
-
-    def put_items(self, url: str, items: list[dict[str, Any]]) -> None:
-        with self.lock:
-            entries = self.data.setdefault("entries", {})
-            entries[sha256_hex(url)] = {
-                "source_url": url,
-                "cached_at": now_iso(),
-                "last_used_at": now_iso(),
-                "hit_count": 0,
-                "items": copy.deepcopy(items),
-            }
-
-            self.prune_locked()
-
-    def prune(self) -> None:
-        with self.lock:
-            self.prune_locked()
-
-    def prune_locked(self) -> None:
-        entries = self.data.setdefault("entries", {})
-
-        if self.max_age_hours >= 0:
-            stale_keys: list[str] = []
-            for key, entry in entries.items():
-                if not isinstance(entry, dict):
-                    stale_keys.append(key)
-                    continue
-
-                cached_at = parse_iso(str(entry.get("cached_at") or ""))
-                if not cached_at:
-                    stale_keys.append(key)
-                    continue
-
-                age_hours = (datetime.now(timezone.utc) - cached_at).total_seconds() / 3600
-                if age_hours >= self.max_age_hours:
-                    stale_keys.append(key)
-
-            for key in stale_keys:
-                entries.pop(key, None)
-
-        if len(entries) <= self.max_entries:
-            return
-
-        remove_count = len(entries) - self.max_entries
-        remove_keys = sorted(
-            entries,
-            key=lambda key: str((entries.get(key) or {}).get("last_used_at") or ""),
-        )[:remove_count]
-
-        for key in remove_keys:
-            entries.pop(key, None)
-
-    def save(self) -> None:
-        ensure_parent_dir(self.path)
-        with self.lock:
-            self.prune_locked()
-            self.data["updated_at"] = now_iso()
-            tmp_path = f"{self.path}.tmp"
-
-            with open(tmp_path, "w", encoding="utf-8") as output_file:
-                json.dump(self.data, output_file, indent=2, sort_keys=True)
-
-            os.replace(tmp_path, self.path)
-
-        print(
-            f"Wrote API cache: {self.path} ({len(self.data.get('entries', {})):,} entrie(s)).",
-            file=sys.stderr,
-        )
-
-
-class BlackDuckClient:
-    def __init__(
-        self,
-        base_url: str,
-        api_token: str,
-        insecure: bool,
-        timeout: int,
-        retries: int,
-        retry_delay: float,
-        page_limit: int,
-        debug: bool,
-        api_cache: ApiResponseCache | None,
-        bearer_token: str | None = None,
-    ):
-        self.base_url = base_url.rstrip("/")
-        self.api_token = api_token
-        self.timeout = timeout
-        self.retries = retries
-        self.retry_delay = retry_delay
-        self.page_limit = page_limit
-        self.debug = debug
-        self.api_cache = api_cache
-        self.bearer_token: str | None = bearer_token
-        self.ssl_context = ssl._create_unverified_context() if insecure else None
-
-    def authenticate(self) -> None:
-        url = f"{self.base_url}/api/tokens/authenticate"
-        headers = {
-            "Authorization": f"token {self.api_token}",
-            "Accept": "application/json",
-        }
-
-        for attempt in range(self.retries + 1):
-            request = Request(url, data=b"", headers=headers, method="POST")
-
-            try:
-                with urlopen(
-                    request,
-                    timeout=self.timeout,
-                    context=self.ssl_context,
-                ) as response:
-                    text = response.read().decode("utf-8")
-
-                try:
-                    payload = json.loads(text)
-                except json.JSONDecodeError as error:
-                    raise RuntimeError(f"Authentication returned invalid JSON: {error}") from error
-
-                self.bearer_token = str(payload["bearerToken"])
-                return
-
-            except (HTTPError, URLError, TimeoutError, OSError) as error:
-                if isinstance(error, HTTPError):
-                    body = error.read().decode("utf-8", errors="replace")
-                    retryable = error.code in {429, 500, 502, 503, 504}
-                    message = f"HTTP {error.code} {error.reason}: {body[:1000]}"
-                else:
-                    retryable = True
-                    message = str(error)
-
-                if not retryable or attempt >= self.retries:
-                    raise RuntimeError(f"Authentication failed: {message}") from error
-
-                time.sleep(self.retry_delay * (attempt + 1))
-
-        raise RuntimeError("Authentication failed unexpectedly")
-
-    def _make_url(self, url_or_path: str, params: dict[str, Any] | None = None) -> str:
-        if url_or_path.startswith(("http://", "https://")):
-            url = url_or_path
-        else:
-            url = f"{self.base_url}/{url_or_path.lstrip('/')}"
-
-        if not params:
-            return url
-
-        parsed = urlparse(url)
-        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-
-        for key, value in params.items():
-            if value is not None:
-                query[key] = str(value)
-
-        return urlunparse(
-            (
-                parsed.scheme,
-                parsed.netloc,
-                parsed.path,
-                parsed.params,
-                urlencode(query),
-                parsed.fragment,
-            )
-        )
-
-    def get(self, url_or_path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        url = self._make_url(url_or_path, params)
-        headers = {"Accept": "application/json"}
-
-        if self.bearer_token:
-            headers["Authorization"] = f"Bearer {self.bearer_token}"
-
-        token_refreshed = False
-        attempt = 0
-        max_attempt = self.retries
-
-        while attempt <= max_attempt:
-            request = Request(url, headers=headers, method="GET")
-
-            try:
-                with urlopen(
-                    request,
-                    timeout=self.timeout,
-                    context=self.ssl_context,
-                ) as response:
-                    text = response.read().decode("utf-8")
-
-                if not text:
-                    return {}
-
-                try:
-                    return json.loads(text)
-                except json.JSONDecodeError as error:
-                    raise RuntimeError(f"GET {url} returned invalid JSON: {error}") from error
-
-            except (HTTPError, URLError, TimeoutError, OSError) as error:
-                if isinstance(error, HTTPError):
-                    body = error.read().decode("utf-8", errors="replace")
-                    message = f"HTTP {error.code} {error.reason}: {body[:1000]}"
-
-                    if error.code == 401 and not token_refreshed:
-                        token_refreshed = True
-                        max_attempt += 1
-
-                        if self.debug:
-                            print(
-                                f"GET {url} returned HTTP 401; refreshing Black Duck bearer token and retrying once.",
-                                file=sys.stderr,
-                            )
-
-                        try:
-                            self.authenticate()
-                        except RuntimeError as auth_error:
-                            raise RuntimeError(
-                                f"GET {url} failed: HTTP 401 Unauthorized and bearer-token refresh failed: {auth_error}"
-                            ) from error
-
-                        if self.bearer_token:
-                            headers["Authorization"] = f"Bearer {self.bearer_token}"
-
-                        continue
-
-                    retryable = error.code in {429, 500, 502, 503, 504}
-                else:
-                    retryable = True
-                    message = str(error)
-
-                if not retryable or attempt >= max_attempt:
-                    raise RuntimeError(f"GET {url} failed: {message}") from error
-
-                if self.debug:
-                    print(f"Retrying GET {url}: {message}", file=sys.stderr)
-
-                time.sleep(self.retry_delay * (attempt + 1))
-                attempt += 1
-
-        raise RuntimeError(f"GET {url} failed unexpectedly")
-
-    def paged_get(
-        self,
-        url_or_path: str,
-        params: dict[str, Any] | None = None,
-        limit: int | None = None,
-    ) -> list[dict[str, Any]]:
-        source_url = self._make_url(url_or_path, params)
-
-        if self.api_cache:
-            cached = self.api_cache.get_items(source_url)
-            if cached is not None:
-                return cached
-
-        page_limit = limit or self.page_limit
-        offset = 0
-        all_items: list[dict[str, Any]] = []
-
-        while True:
-            page_params = dict(params or {})
-            page_params["offset"] = offset
-            page_params["limit"] = page_limit
-
-            payload = self.get(url_or_path, page_params)
-
-            if "items" not in payload:
-                result = [payload] if payload else []
-
-                if self.api_cache:
-                    self.api_cache.put_items(source_url, result)
-
-                return result
-
-            items = payload.get("items") or []
-            all_items.extend(items)
-
-            total_count = payload.get("totalCount")
-            total_int = int(total_count) if total_count is not None else None
-
-            if not items:
-                break
-
-            offset += len(items)
-
-            if total_int is not None and offset >= total_int:
-                break
-
-            if len(items) < page_limit:
-                break
-
-        if self.api_cache:
-            self.api_cache.put_items(source_url, all_items)
-
-        return all_items
+class BlackDuckClient(SharedBlackDuckClient):
+    pass
 
 
 def read_candidates(path: str) -> list[dict[str, str]]:
@@ -872,117 +360,18 @@ def candidate_identity(candidate: dict[str, str]) -> str:
     return sha256_hex(key)
 
 
-def get_vulnerable_components(
-    client: BlackDuckClient,
-    project_version_href: str,
-) -> list[dict[str, Any]]:
-    try:
-        return client.paged_get(f"{project_version_href}/vulnerable-bom-components")
-    except RuntimeError:
-        version = client.get(project_version_href)
-        linked = get_link(
-            version,
-            (
-                "vulnerable-bom-components",
-                "vulnerableBomComponents",
-                "vulnerable-components",
-            ),
-        )
-
-        if linked:
-            return client.paged_get(linked)
-
-        raise
 
 
-def should_fetch_policy_rules(settings: PullSettings) -> bool:
-    if settings.skip_policy_rules:
-        return False
-
-    return bool(
-        settings.policy_name
-        or settings.policy_rule_id
-        or settings.include_policy_rule_details
-    )
 
 
-def get_policy_rules(client: BlackDuckClient, component: dict[str, Any]) -> list[dict[str, Any]]:
-    url = get_link(
-        component,
-        (
-            "policy-rules",
-            "policyRules",
-            "policy-rule",
-        ),
-    )
-
-    if not url:
-        return []
-
-    try:
-        return client.paged_get(url)
-    except RuntimeError:
-        return []
 
 
-def policy_match(
-    policy_rules: list[dict[str, Any]],
-    settings: PullSettings,
-) -> tuple[bool, str, str]:
-    names: list[str] = []
-    hrefs: list[str] = []
-
-    if not settings.policy_name and not settings.policy_rule_id:
-        if not policy_rules:
-            return True, "", ""
-
-    for rule in policy_rules:
-        name = str(first_value_by_key(rule, ["name", "policyName", "policyRuleName"]) or "")
-        href = canonical_href(get_self_href(rule) or get_link(rule, ("self",)))
-
-        if name:
-            names.append(name)
-
-        if href:
-            hrefs.append(href)
-
-        if settings.policy_name and name == settings.policy_name:
-            return True, name, href
-
-        if settings.policy_rule_id and settings.policy_rule_id in href:
-            return True, name, href
-
-    if settings.policy_name or settings.policy_rule_id:
-        return False, "", ""
-
-    return True, ";".join(sorted(set(names))), ";".join(sorted(set(hrefs)))
 
 
-def score_passes(score: float | None, settings: PullSettings) -> bool:
-    if score is None:
-        return False
-
-    if settings.score_operator == "gte":
-        return score >= settings.threshold
-
-    return score > settings.threshold
 
 
-def build_project_group_key(project: str, project_version: str, group_by: str) -> str:
-    if group_by == "project-version":
-        return "|".join([project, project_version])
-
-    return project
 
 
-def build_finding_key(
-    project: str,
-    project_version: str,
-    component: str,
-    component_version: str,
-    vulnerability: str,
-) -> str:
-    return "|".join([project, project_version, component, component_version, vulnerability])
 
 
 def failure_for_candidate(
@@ -1000,234 +389,21 @@ def failure_for_candidate(
     }
 
 
-def collect_for_component(
-    client: BlackDuckClient,
-    candidate: dict[str, str],
-    component: dict[str, Any],
-    settings: PullSettings,
-    fetch_policy_rules: bool,
-) -> ComponentPullResult:
-    project = candidate.get("project", "")
-    project_version = candidate.get("project_version", "")
-    project_href = candidate.get("project_href", "")
-    project_version_href = canonical_href(candidate.get("project_version_href", ""))
-
-    try:
-        component_name = str(first_value_by_key(component, ["componentName", "name"]) or "")
-        component_version = str(
-            first_value_by_key(
-                component,
-                [
-                    "componentVersionName",
-                    "componentVersion",
-                    "versionName",
-                ],
-            )
-            or ""
-        )
-        component_origin_id = str(
-            first_value_by_key(
-                component,
-                [
-                    "componentOriginId",
-                    "originId",
-                    "externalId",
-                ],
-            )
-            or ""
-        )
-        bom_component_url = canonical_href(get_self_href(component))
-
-        policy_rules = get_policy_rules(client, component) if fetch_policy_rules else []
-        matched_policy, policy_name, policy_href = policy_match(policy_rules, settings)
-
-        if not matched_policy:
-            return ComponentPullResult(findings=[], failures=[])
-
-        vulnerabilities_url = get_link(component, ("vulnerabilities", "vulnerability"))
-        vulnerability_items: list[dict[str, Any]] = []
-
-        if vulnerabilities_url:
-            for item in client.paged_get(vulnerabilities_url):
-                extracted = extract_vulnerability_candidates(item, settings.score_field)
-                vulnerability_items.extend(extracted or [item])
-        else:
-            vulnerability_items.extend(extract_vulnerability_candidates(component, settings.score_field))
-
-        findings: list[dict[str, str]] = []
-
-        for vulnerability in vulnerability_items:
-            vulnerability_id = vulnerability_identifier(vulnerability)
-            score = to_float(
-                first_value_by_key(
-                    vulnerability,
-                    [
-                        settings.score_field,
-                        "overallScore",
-                        "baseScore",
-                        "cvssScore",
-                    ],
-                )
-            )
-
-            if not score_passes(score, settings):
-                continue
-
-            exploit_available, exploit_raw = extract_exploit_available(vulnerability)
-
-            if settings.require_exploit_available and not exploit_available:
-                continue
-
-            reachable, reachability_raw, reachability_source = extract_reachability(vulnerability)
-
-            if settings.require_reachable and not reachable:
-                continue
-
-            if settings.reachability_mode == "ai" and not reachability_source:
-                reachability_source = "ai-reserved"
-
-            group_key = build_project_group_key(project, project_version, settings.group_by)
-            finding_key = build_finding_key(
-                project,
-                project_version,
-                component_name,
-                component_version,
-                vulnerability_id,
-            )
-
-            blackduck_url = canonical_href(
-                get_link(vulnerability, ("self",)) or get_self_href(vulnerability)
-            )
-
-            findings.append(
-                {
-                    "project": project,
-                    "project_version": project_version,
-                    "project_href": project_href,
-                    "project_version_href": project_version_href,
-                    "project_group_key": group_key,
-                    "project_group_external_id": sha256_hex(group_key),
-                    "candidate_key": candidate.get("candidate_key", ""),
-                    "candidate_external_id": candidate_identity(candidate),
-                    "component": component_name,
-                    "component_version": component_version,
-                    "component_origin_id": component_origin_id,
-                    "vulnerability": vulnerability_id,
-                    "severity": vulnerability_severity(vulnerability),
-                    "score_field": settings.score_field,
-                    "score": "" if score is None else str(score),
-                    "exploit_available": str(bool(exploit_available)).lower(),
-                    "exploitable": exploit_raw,
-                    "reachable": str(bool(reachable)).lower(),
-                    "reachability": reachability_raw,
-                    "reachability_source": reachability_source,
-                    "policy_name": policy_name,
-                    "policy_rule_href": policy_href,
-                    "policy_matched": str(bool(matched_policy)).lower(),
-                    "blackduck_url": blackduck_url,
-                    "bom_component_url": bom_component_url,
-                    "finding_key": finding_key,
-                    "finding_external_id": sha256_hex(finding_key),
-                    "first_seen_source": "blackduck-policy-vuln-pull",
-                }
-            )
-
-        return ComponentPullResult(findings=findings, failures=[])
-
-    except Exception as error:
-        component_label = " ".join(
-            str(part or "").strip()
-            for part in [
-                first_value_by_key(component, ["componentName", "name"]),
-                first_value_by_key(component, ["componentVersionName", "componentVersion", "versionName"]),
-            ]
-            if str(part or "").strip()
-        ) or canonical_href(get_self_href(component)) or "unknown component"
-
-        return ComponentPullResult(
-            findings=[],
-            failures=[
-                failure_for_candidate(
-                    candidate,
-                    "component-details",
-                    f"{component_label}: {error}",
-                )
-            ],
-        )
 
 
 def collect_for_candidate(
-    client: BlackDuckClient,
-    candidate: dict[str, str],
-    settings: PullSettings,
-) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    project_version_href = canonical_href(candidate.get("project_version_href", ""))
-
-    if not project_version_href:
-        raise RuntimeError("candidate row has no project_version_href")
-
-    components = get_vulnerable_components(client, project_version_href)
-    fetch_policy_rules = should_fetch_policy_rules(settings)
-
-    if settings.debug:
-        print(
-            f"Candidate {candidate.get('project', '')} / {candidate.get('project_version', '')}: "
-            f"{len(components):,} vulnerable component(s), component_workers={settings.component_workers}",
-            file=sys.stderr,
-        )
-
-    findings: list[dict[str, str]] = []
-    failures: list[dict[str, str]] = []
-
-    if settings.component_workers <= 1 or len(components) <= 1:
-        for component in components:
-            result = collect_for_component(
-                client=client,
-                candidate=candidate,
-                component=component,
-                settings=settings,
-                fetch_policy_rules=fetch_policy_rules,
-            )
-            findings.extend(result.findings)
-            failures.extend(result.failures)
-        return findings, failures
-
-    max_workers = min(settings.component_workers, len(components))
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_component = {
-            executor.submit(
-                collect_for_component,
-                client,
-                candidate,
-                component,
-                settings,
-                fetch_policy_rules,
-            ): component
-            for component in components
-        }
-
-        for future in future_to_component:
-            try:
-                result = future.result()
-            except Exception as error:
-                component = future_to_component[future]
-                component_label = canonical_href(get_self_href(component)) or "unknown component"
-                result = ComponentPullResult(
-                    findings=[],
-                    failures=[
-                        failure_for_candidate(
-                            candidate,
-                            "component-details",
-                            f"{component_label}: {error}",
-                        )
-                    ],
-                )
-
-            findings.extend(result.findings)
-            failures.extend(result.failures)
-
-    return findings, failures
+        client: BlackDuckClient,
+        candidate: dict[str, str],
+        settings: PullSettings,
+) -> tuple[
+    list[dict[str, str]],
+    list[dict[str, str]],
+]:
+    return collect_candidate_findings(
+        client,
+        candidate,
+        settings,
+    )
 
 
 def is_auth_failure_text(value: object) -> bool:

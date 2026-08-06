@@ -6,17 +6,13 @@ import csv
 import json
 import os
 import re
-import ssl
 import sys
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse, urlunparse
 
 from wintermute.blackduck.inventory import (
     InventoryFilter,
