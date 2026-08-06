@@ -12,7 +12,6 @@ from wintermute.blackduck.cli import load_input_rows
 from wintermute.blackduck.client import BlackDuckClient
 from wintermute.blackduck.cohort import (
     create_cohort_id,
-    prune_cohorts,
     write_cohort,
 )
 from wintermute.blackduck.custom_fields import (
@@ -93,10 +92,6 @@ def validate_args(args: argparse.Namespace) -> None:
                 "greater than zero"
             )
 
-    if args.retain_cohorts < 1:
-        raise RuntimeError(
-            "--retain-cohorts must be greater than zero"
-        )
 
     if args.retries < 0:
         raise RuntimeError(
@@ -235,14 +230,6 @@ def run(args: argparse.Namespace) -> int:
     summary["cohort_directory"] = str(
         cohort_directory
     )
-    pruned_cohorts = prune_cohorts(
-        args.cohort_root,
-        retain_count=args.retain_cohorts,
-        protected_ids={cohort_id},
-    )
-    summary["pruned_cohorts"] = list(
-        pruned_cohorts
-    )
     summary["status"] = (
         "partial"
         if execution.failure_count
@@ -304,11 +291,6 @@ def parse_args(
         default=default_cohort_root(),
     )
     parser.add_argument("--cohort-id")
-    parser.add_argument(
-        "--retain-cohorts",
-        type=int,
-        default=10,
-    )
     parser.add_argument("--cohort-id-out")
     parser.add_argument(
         "--summary-out",
@@ -334,10 +316,10 @@ def parse_args(
     parser.add_argument(
         "--minimum-score",
         type=float,
-        default=0.0,
+        default=7.0,
     )
     parser.set_defaults(
-        include_policy_rule_details=True,
+        include_policy_rule_details=False,
         resolve_bom_names=True,
         strict=True,
     )

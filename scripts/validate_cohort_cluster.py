@@ -112,24 +112,39 @@ def validate_rendered_manifest(
             f"Rendered manifest does not target namespace {namespace}"
         )
 
-    expected_images = {
-        "source": 2,
+    expected_runtime_references = {
+        "source": 3,
         "jira": 1,
         "datadog": 1,
     }
 
-    for target, expected_count in expected_images.items():
-        pattern = re.compile(
-            rf"(?m)^\s*image:\s*\S*"
+    for target, expected_count in (
+        expected_runtime_references.items()
+    ):
+        parameter_reference = (
+            f"{{{{workflow.parameters.{target}-image}}}}"
+        )
+        reference_count = manifest.count(
+            parameter_reference
+        )
+
+        if reference_count != expected_count:
+            errors.append(
+                f"Expected {expected_count} runtime "
+                f"{target} image parameter reference(s), "
+                f"found {reference_count}"
+            )
+
+        value_pattern = re.compile(
+            rf"(?m)^\s*value:\s*\S*"
             rf"blackduck-wintermute-{target}:"
             rf"[A-Za-z0-9_.-]+\s*$"
         )
-        actual_count = len(pattern.findall(manifest))
 
-        if actual_count != expected_count:
+        if not value_pattern.search(manifest):
             errors.append(
-                f"Expected {expected_count} {target} image reference(s), "
-                f"found {actual_count}"
+                f"Missing immutable {target} image "
+                "parameter value"
             )
 
     if re.search(

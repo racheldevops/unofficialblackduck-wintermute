@@ -625,11 +625,33 @@ def load_cohort(
     )
 
 
+def mark_cohort_complete(
+    directory: str | Path,
+    *,
+    destination_statuses: dict[str, str] | None = None,
+) -> Path:
+    cohort = load_cohort(directory)
+    complete_path = cohort.directory / "COMPLETE"
+    atomic_write_json(
+        complete_path,
+        {
+            "schema_version": COHORT_SCHEMA_VERSION,
+            "cohort_id": cohort.cohort_id,
+            "completed_at": now_iso(),
+            "destination_statuses": dict(
+                destination_statuses or {}
+            ),
+        },
+    )
+    return complete_path
+
+
 def prune_cohorts(
     root: str | Path,
     *,
     retain_count: int,
     protected_ids: set[str] | None = None,
+    require_complete: bool = True,
 ) -> tuple[str, ...]:
     if retain_count < 1:
         raise CohortError(
@@ -653,6 +675,12 @@ def prune_cohorts(
             or directory.name == ".staging"
             or not (directory / "READY").is_file()
             or not (directory / "metadata.json").is_file()
+        ):
+            continue
+
+        if (
+            require_complete
+            and not (directory / "COMPLETE").is_file()
         ):
             continue
 

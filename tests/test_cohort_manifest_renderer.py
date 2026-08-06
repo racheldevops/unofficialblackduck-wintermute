@@ -61,28 +61,25 @@ def test_latest_image_tag_is_rejected() -> None:
         )
 
 
-def test_image_patch_contains_all_targets() -> None:
+def test_schedule_patch_contains_all_images() -> None:
     images = renderer.image_names(
         "registry.example",
         "security/blackduck-wintermute",
         "commit123",
     )
-    patch = renderer.workflow_image_patch(
-        images
+    patch = renderer.schedule_patch(
+        schedule="0 2 * * *",
+        timezone="Etc/UTC",
+        suspend=True,
+        jira_mode="dry-run",
+        datadog_mode="dry-run",
+        confirm_apply=False,
+        retain_cohorts=10,
+        images=images,
     )
 
-    assert patch.count(
-        "registry.example/security/"
-        "blackduck-wintermute-source:commit123"
-    ) == 2
-    assert patch.count(
-        "registry.example/security/"
-        "blackduck-wintermute-jira:commit123"
-    ) == 1
-    assert patch.count(
-        "registry.example/security/"
-        "blackduck-wintermute-datadog:commit123"
-    ) == 1
+    for image in images.values():
+        assert f"value: {image}" in patch
 
 
 def test_schedule_defaults_are_safe() -> None:
@@ -134,25 +131,31 @@ def test_renderer_rewrites_argo_images(
     text = output.read_text(
         encoding="utf-8"
     )
-
-    for target, count in (
-        ("source", 2),
-        ("jira", 1),
-        ("datadog", 1),
-    ):
-        image = (
+    expected = {
+        "source": (
             "registry.example/security/"
-            f"blackduck-wintermute-{target}:"
-            "commit123"
+            "blackduck-wintermute-source:commit123"
+        ),
+        "jira": (
+            "registry.example/security/"
+            "blackduck-wintermute-jira:commit123"
+        ),
+        "datadog": (
+            "registry.example/security/"
+            "blackduck-wintermute-datadog:commit123"
+        ),
+    }
+
+    for target, image in expected.items():
+        assert text.count(f"value: {image}") == 1
+        expected_runtime_count = (
+            3 if target == "source" else 1
         )
         assert text.count(
-            f"image: {image}"
-        ) == count
+            f"{{{{workflow.parameters.{target}-image}}}}"
+        ) == expected_runtime_count
 
     assert "namespace: blackduck-wintermute-test" in text
-    assert "suspend: true" in text
-    assert "registry.invalid" not in text
-    assert ":replace-me" not in text
     assert (
         "name: blackduck-wintermute-cohort-jira-config"
         in text
@@ -161,3 +164,5 @@ def test_renderer_rewrites_argo_images(
         "blackduck-wintermute-test-cohort-jira-config"
         not in text
     )
+    assert "registry.invalid" not in text
+    assert ":replace-me" not in text

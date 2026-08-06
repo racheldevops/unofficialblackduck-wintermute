@@ -27,6 +27,7 @@ blackduck-wintermute-pull = "wintermute.blackduck.cli:main"
 blackduck-wintermute-cohort-source = "wintermute.blackduck.cohort_source:main"
 blackduck-wintermute-jira-cohort = "wintermute.jira.cohort_pipeline:main"
 blackduck-wintermute-datadog-cohort = "wintermute.datadog.cohort_pipeline:main"
+blackduck-wintermute-cohort-finalize = "wintermute.blackduck.cohort_finalize:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

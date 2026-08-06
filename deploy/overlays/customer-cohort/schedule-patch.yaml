@@ -10,6 +10,12 @@ spec:
   workflowSpec:
     arguments:
       parameters:
+        - name: source-image
+          value: registry.invalid/customer/blackduck-wintermute-source:replace-me
+        - name: jira-image
+          value: registry.invalid/customer/blackduck-wintermute-jira:replace-me
+        - name: datadog-image
+          value: registry.invalid/customer/blackduck-wintermute-datadog:replace-me
         - name: jira-mode
           value: dry-run
         - name: datadog-mode

@@ -20,27 +20,30 @@ def test_customer_cohort_overlay_uses_three_images() -> None:
     kustomization = (
         OVERLAY / "kustomization.yaml"
     ).read_text(encoding="utf-8")
-    image_patch = (
-        OVERLAY / "workflow-images-patch.yaml"
+    schedule_patch = (
+        OVERLAY / "schedule-patch.yaml"
     ).read_text(encoding="utf-8")
 
     assert (
-        "path: workflow-images-patch.yaml"
-        in kustomization
+        "workflow-images-patch.yaml"
+        not in kustomization
     )
-    assert image_patch.count(
-        "registry.invalid/customer/"
-        "blackduck-wintermute-source:replace-me"
-    ) == 2
-    assert image_patch.count(
-        "registry.invalid/customer/"
-        "blackduck-wintermute-jira:replace-me"
-    ) == 1
-    assert image_patch.count(
-        "registry.invalid/customer/"
-        "blackduck-wintermute-datadog:replace-me"
-    ) == 1
-    assert image_patch.count("- op: replace") == 4
+    assert not (
+        OVERLAY
+        / "workflow-images-patch.yaml"
+    ).exists()
+
+    for target in (
+        "source",
+        "jira",
+        "datadog",
+    ):
+        assert (
+            "registry.invalid/customer/"
+            f"blackduck-wintermute-{target}:"
+            "replace-me"
+            in schedule_patch
+        )
 
 
 def test_customer_schedule_is_safe_by_default() -> None:
@@ -175,30 +178,37 @@ def test_customer_render_rewrites_argo_images() -> None:
     assert completed.returncode == 0, completed.stderr
 
     expected_images = {
-        (
+        "source": (
             "registry.invalid/customer/"
             "blackduck-wintermute-source:replace-me"
         ),
-        (
+        "jira": (
             "registry.invalid/customer/"
             "blackduck-wintermute-jira:replace-me"
         ),
-        (
+        "datadog": (
             "registry.invalid/customer/"
             "blackduck-wintermute-datadog:replace-me"
         ),
     }
 
-    for image in expected_images:
-        assert f"image: {image}" in completed.stdout
-
-    for logical_name in (
-        "blackduck-wintermute-source",
-        "blackduck-wintermute-jira",
-        "blackduck-wintermute-datadog",
-    ):
+    for target, image in expected_images.items():
+        assert f"value: {image}" in completed.stdout
         assert (
-            f"image: {logical_name}\n"
-            not in completed.stdout
+            f"{{{{workflow.parameters.{target}-image}}}}"
+            in completed.stdout
         )
+
+    assert (
+        "image: blackduck-wintermute-source\n"
+        not in completed.stdout
+    )
+    assert (
+        "image: blackduck-wintermute-jira\n"
+        not in completed.stdout
+    )
+    assert (
+        "image: blackduck-wintermute-datadog\n"
+        not in completed.stdout
+    )
 

@@ -17,6 +17,12 @@ spec:
       name: blackduck-wintermute-cohort
     arguments:
       parameters:
+        - name: source-image
+          value: blackduck-wintermute-source
+        - name: jira-image
+          value: blackduck-wintermute-jira
+        - name: datadog-image
+          value: blackduck-wintermute-datadog
         - name: jira-mode
           value: dry-run
         - name: datadog-mode

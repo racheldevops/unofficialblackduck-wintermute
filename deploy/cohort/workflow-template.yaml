@@ -12,6 +12,12 @@ spec:
     - name: blackduck-wintermute-registry
   arguments:
     parameters:
+      - name: source-image
+        value: blackduck-wintermute-source
+      - name: jira-image
+        value: blackduck-wintermute-jira
+      - name: datadog-image
+        value: blackduck-wintermute-datadog
       - name: jira-mode
         value: dry-run
         enum:
@@ -82,6 +88,15 @@ spec:
               parameters:
                 - name: cohort-id
                   value: "{{tasks.source.outputs.parameters.cohort-id}}"
+          - name: finalize
+            depends: >-
+              source.Succeeded &&
+              (datadog.Succeeded || datadog.Failed || datadog.Errored)
+            template: finalize
+            arguments:
+              parameters:
+                - name: cohort-id
+                  value: "{{tasks.source.outputs.parameters.cohort-id}}"
 
     - name: validate-modes
       inputs:
@@ -96,7 +111,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       script:
-        image: blackduck-wintermute-source
+        image: "{{workflow.parameters.source-image}}"
         imagePullPolicy: IfNotPresent
         command:
           - python
@@ -142,7 +157,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       container:
-        image: blackduck-wintermute-source
+        image: "{{workflow.parameters.source-image}}"
         imagePullPolicy: IfNotPresent
         args:
           - --scope
@@ -155,12 +170,13 @@ spec:
           - "2"
           - --page-limit
           - "500"
+          - --minimum-score
+          - "7"
+          - --skip-policy-rule-details
           - --cohort-root
           - /var/lib/blackduck-wintermute/cohorts
           - --cohort-id-out
           - /tmp/cohort-id
-          - --retain-cohorts
-          - "{{workflow.parameters.retain-cohorts}}"
         envFrom:
           - secretRef:
               name: blackduck-wintermute-blackduck-credentials
@@ -202,7 +218,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       container:
-        image: blackduck-wintermute-jira
+        image: "{{workflow.parameters.jira-image}}"
         imagePullPolicy: IfNotPresent
         args:
           - --cohort
@@ -257,7 +273,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       container:
-        image: blackduck-wintermute-datadog
+        image: "{{workflow.parameters.datadog-image}}"
         imagePullPolicy: IfNotPresent
         args:
           - --cohort
@@ -293,3 +309,45 @@ spec:
             mountPath: /var/lib/blackduck-wintermute/destinations/datadog
           - name: tmp
             mountPath: /tmp
+
+    - name: finalize
+      inputs:
+        parameters:
+          - name: cohort-id
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      container:
+        image: "{{workflow.parameters.source-image}}"
+        imagePullPolicy: IfNotPresent
+        command:
+          - python
+          - -m
+          - wintermute.blackduck.cohort_finalize
+        args:
+          - --cohort-root
+          - /var/lib/blackduck-wintermute/cohorts
+          - --cohort-id
+          - "{{inputs.parameters.cohort-id}}"
+          - --retain-cohorts
+          - "{{workflow.parameters.retain-cohorts}}"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+        volumeMounts:
+          - name: cohort-data
+            mountPath: /var/lib/blackduck-wintermute/cohorts

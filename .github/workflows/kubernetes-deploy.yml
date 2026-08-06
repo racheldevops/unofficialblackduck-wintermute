@@ -1,4 +1,4 @@
-name: Deploy to Kubernetes
+name: Compatibility Jira Kubernetes deployment
 
 on:
   workflow_dispatch:

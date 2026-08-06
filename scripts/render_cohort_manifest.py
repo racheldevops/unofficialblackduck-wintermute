@@ -114,39 +114,6 @@ def image_names(
     }
 
 
-def workflow_image_patch(
-    images: dict[str, str],
-) -> str:
-    operations = (
-        (
-            "/spec/templates/1/script/image",
-            images["source"],
-        ),
-        (
-            "/spec/templates/2/container/image",
-            images["source"],
-        ),
-        (
-            "/spec/templates/3/container/image",
-            images["jira"],
-        ),
-        (
-            "/spec/templates/4/container/image",
-            images["datadog"],
-        ),
-    )
-
-    return "\n".join(
-        [
-            line
-            for path, image in operations
-            for line in (
-                "- op: replace",
-                f"  path: {path}",
-                f"  value: {image}",
-            )
-        ]
-    ) + "\n"
 
 
 def schedule_patch(
@@ -158,7 +125,14 @@ def schedule_patch(
     datadog_mode: str,
     confirm_apply: bool,
     retain_cohorts: int,
+    images: dict[str, str] | None = None,
 ) -> str:
+    images = images or {
+        "source": "blackduck-wintermute-source",
+        "jira": "blackduck-wintermute-jira",
+        "datadog": "blackduck-wintermute-datadog",
+    }
+
     return f"""apiVersion: argoproj.io/v1alpha1
 kind: CronWorkflow
 metadata:
@@ -171,6 +145,12 @@ spec:
   workflowSpec:
     arguments:
       parameters:
+        - name: source-image
+          value: {images["source"]}
+        - name: jira-image
+          value: {images["jira"]}
+        - name: datadog-image
+          value: {images["datadog"]}
         - name: jira-mode
           value: {jira_mode}
         - name: datadog-mode
@@ -243,13 +223,6 @@ def render_manifest(
         )
         (
             temporary_directory
-            / "workflow-images-patch.yaml"
-        ).write_text(
-            workflow_image_patch(images),
-            encoding="utf-8",
-        )
-        (
-            temporary_directory
             / "schedule-patch.yaml"
         ).write_text(
             schedule_patch(
@@ -260,6 +233,7 @@ def render_manifest(
                 datadog_mode=datadog_mode,
                 confirm_apply=confirm_apply,
                 retain_cohorts=retain_cohorts,
+                images=images,
             ),
             encoding="utf-8",
         )

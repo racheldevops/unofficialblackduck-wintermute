@@ -38,19 +38,30 @@ metadata:
   name: blackduck-wintermute-cohort
   namespace: blackduck-wintermute
 spec:
+  arguments:
+    parameters:
+      - name: source-image
+        value: registry.example/security/blackduck-wintermute-source:abc123
+      - name: jira-image
+        value: registry.example/security/blackduck-wintermute-jira:abc123
+      - name: datadog-image
+        value: registry.example/security/blackduck-wintermute-datadog:abc123
   templates:
     - name: validate-modes
       script:
-        image: registry.example/security/blackduck-wintermute-source:abc123
+        image: '{{workflow.parameters.source-image}}'
     - name: source
       container:
-        image: registry.example/security/blackduck-wintermute-source:abc123
+        image: '{{workflow.parameters.source-image}}'
     - name: jira
       container:
-        image: registry.example/security/blackduck-wintermute-jira:abc123
+        image: '{{workflow.parameters.jira-image}}'
     - name: datadog
       container:
-        image: registry.example/security/blackduck-wintermute-datadog:abc123
+        image: '{{workflow.parameters.datadog-image}}'
+    - name: finalize
+      container:
+        image: '{{workflow.parameters.source-image}}'
 """
 
 
@@ -77,19 +88,28 @@ def test_placeholders_are_rejected() -> None:
 
 
 def test_missing_destination_image_is_rejected() -> None:
+    datadog_template = (
+        "    - name: datadog\n"
+        "      container:\n"
+        "        image: "
+        "'{{workflow.parameters.datadog-image}}'\n"
+    )
+    manifest = valid_manifest()
+
+    assert datadog_template in manifest
+
     errors = validator.validate_rendered_manifest(
-        valid_manifest().replace(
-            "    - name: datadog\n"
-            "      container:\n"
-            "        image: registry.example/security/"
-            "blackduck-wintermute-datadog:abc123\n",
+        manifest.replace(
+            datadog_template,
             "",
+            1,
         ),
         "blackduck-wintermute",
     )
 
     assert any(
-        "datadog image" in error
+        "runtime datadog image parameter"
+        in error
         for error in errors
     )
 

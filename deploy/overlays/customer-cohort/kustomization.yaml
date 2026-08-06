@@ -9,12 +9,6 @@ resources:
 
 patches:
   - path: schedule-patch.yaml
-  - target:
-      group: argoproj.io
-      version: v1alpha1
-      kind: WorkflowTemplate
-      name: blackduck-wintermute-cohort
-    path: workflow-images-patch.yaml
 
 configMapGenerator:
   - name: blackduck-wintermute-cohort-jira-config

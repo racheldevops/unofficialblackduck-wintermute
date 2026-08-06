@@ -35,6 +35,10 @@ def create_ready_cohort(
         "{}\n",
         encoding="utf-8",
     )
+    (directory / "COMPLETE").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
     (directory / "metadata.json").write_text(
         (
             "{"
@@ -121,5 +125,5 @@ def test_workflow_is_failure_independent_and_storage_isolated() -> None:
     assert "claimName: blackduck-wintermute-datadog-data" in text
     assert text.count(
         "mountPath: /var/lib/blackduck-wintermute/cohorts"
-    ) == 3
+    ) == 4
     assert text.count("readOnly: true") >= 3
