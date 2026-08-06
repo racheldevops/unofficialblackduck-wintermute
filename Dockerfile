@@ -18,7 +18,7 @@ FROM python:3.12.10-slim-bookworm AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    WINTERMUTE_OUTPUT_DIR=/var/lib/blackduck-wintermute \
+    HARNESS_OUTPUT_DIR=/var/lib/blackduck-wintermute \
     TMPDIR=/tmp
 
 RUN apt-get update \
