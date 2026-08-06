@@ -16,8 +16,17 @@ from wintermute.paths import ensure_parent_dir, jira_output_path
 
 
 SCHEMA_VERSION = 3
+HIERARCHY_MODE_VULNERABILITY_REMEDIATION = "vulnerability-remediation"
+HIERARCHY_MODE_PROJECT_LINEAGE = "project-lineage"
 HIERARCHY_MODE_VULNERABILITY_PROJECT = "vulnerability-project"
 HIERARCHY_MODE_PROJECT_SUBPROJECT_VULNERABILITY = "project-subproject-vulnerability"
+
+HIERARCHY_MODE_ALIASES = {
+    HIERARCHY_MODE_VULNERABILITY_REMEDIATION: HIERARCHY_MODE_VULNERABILITY_REMEDIATION,
+    HIERARCHY_MODE_PROJECT_LINEAGE: HIERARCHY_MODE_PROJECT_LINEAGE,
+    HIERARCHY_MODE_VULNERABILITY_PROJECT: HIERARCHY_MODE_VULNERABILITY_REMEDIATION,
+    HIERARCHY_MODE_PROJECT_SUBPROJECT_VULNERABILITY: HIERARCHY_MODE_PROJECT_LINEAGE,
+}
 
 REQUIRED_FINDING_FIELDS = [
     "parent_project",
@@ -54,6 +63,21 @@ SEVERITY_SORT_RANK = {
     "UNKNOWN": 4,
 }
 
+
+
+def normalize_hierarchy_mode(value: str) -> str:
+    normalized = str(value or "").strip()
+
+    try:
+        return HIERARCHY_MODE_ALIASES[normalized]
+    except KeyError as error:
+        supported = ", ".join(
+            sorted(HIERARCHY_MODE_ALIASES)
+        )
+        raise RuntimeError(
+            f"Unsupported hierarchy mode {value!r}; "
+            f"expected one of: {supported}"
+        ) from error
 
 def now_iso() -> str:
     return (
@@ -462,7 +486,7 @@ def parent_context_label(finding: dict[str, str]) -> str:
     return format_project_version(finding.get("parent_project", ""), finding.get("parent_version", ""))
 
 
-def build_legacy_epic_summary(context: dict[str, str]) -> str:
+def build_project_lineage_epic_summary(context: dict[str, str]) -> str:
     return truncate(
         f"[Black Duck Rollup] "
         f"{format_project_version(context['parent_project'], context['parent_version'])}",
@@ -470,7 +494,7 @@ def build_legacy_epic_summary(context: dict[str, str]) -> str:
     )
 
 
-def build_legacy_story_summary(context: dict[str, str]) -> str:
+def build_project_lineage_story_summary(context: dict[str, str]) -> str:
     child_label = format_project_version(
         context["subproject"],
         context["subproject_version"],
@@ -479,7 +503,7 @@ def build_legacy_story_summary(context: dict[str, str]) -> str:
     return truncate(f"[Black Duck Subproject] {child_label}", 255)
 
 
-def build_legacy_vulnerability_summary(context: dict[str, str]) -> str:
+def build_project_lineage_vulnerability_summary(context: dict[str, str]) -> str:
     severity = context.get("severity", "")
     vulnerability = context.get("vulnerability", "") or "Unknown vulnerability"
     component = context.get("component", "") or "unknown component"
@@ -492,7 +516,7 @@ def build_legacy_vulnerability_summary(context: dict[str, str]) -> str:
     )
 
 
-def build_legacy_epic_description(
+def build_project_lineage_epic_description(
         context: dict[str, str],
         stats: dict[str, Any],
 ) -> str:
@@ -512,7 +536,7 @@ def build_legacy_epic_description(
     )
 
 
-def build_legacy_story_description(
+def build_project_lineage_story_description(
         context: dict[str, Any],
         stats: dict[str, Any],
 ) -> str:
@@ -537,7 +561,7 @@ def build_legacy_story_description(
     )
 
 
-def build_legacy_vulnerability_description(context: dict[str, str]) -> str:
+def build_project_lineage_vulnerability_description(context: dict[str, str]) -> str:
     return "\n".join(
         [
             "Black Duck vulnerability rollup finding.",
@@ -781,7 +805,7 @@ def build_cve_project_task_description(
 
     return "\n".join(lines)
 
-def build_project_subproject_vulnerability_nodes(
+def build_project_lineage_nodes(
         findings: list[dict[str, str]],
         hash_length: int,
 ) -> list[dict[str, Any]]:
@@ -828,13 +852,13 @@ def build_project_subproject_vulnerability_nodes(
 
         nodes.append(
             {
-                "hierarchy_mode": HIERARCHY_MODE_PROJECT_SUBPROJECT_VULNERABILITY,
+                "hierarchy_mode": HIERARCHY_MODE_PROJECT_LINEAGE,
                 "node_type": "epic",
                 "external_id": external_id,
                 "lookup_label": lookup_label,
                 "parent_external_id": "",
-                "summary": build_legacy_epic_summary(context),
-                "description": build_legacy_epic_description(context, stats),
+                "summary": build_project_lineage_epic_summary(context),
+                "description": build_project_lineage_epic_description(context, stats),
                 "labels": base_labels("bd_rollup_parent", lookup_label),
                 "context": context,
                 "stats": stats,
@@ -879,13 +903,13 @@ def build_project_subproject_vulnerability_nodes(
 
         nodes.append(
             {
-                "hierarchy_mode": HIERARCHY_MODE_PROJECT_SUBPROJECT_VULNERABILITY,
+                "hierarchy_mode": HIERARCHY_MODE_PROJECT_LINEAGE,
                 "node_type": "story",
                 "external_id": external_id,
                 "lookup_label": lookup_label,
                 "parent_external_id": parent_external_ids[parent_key],
-                "summary": build_legacy_story_summary(context),
-                "description": build_legacy_story_description(context, stats),
+                "summary": build_project_lineage_story_summary(context),
+                "description": build_project_lineage_story_description(context, stats),
                 "labels": base_labels("bd_rollup_child", lookup_label),
                 "context": context,
                 "stats": stats,
@@ -906,13 +930,13 @@ def build_project_subproject_vulnerability_nodes(
 
         nodes.append(
             {
-                "hierarchy_mode": HIERARCHY_MODE_PROJECT_SUBPROJECT_VULNERABILITY,
+                "hierarchy_mode": HIERARCHY_MODE_PROJECT_LINEAGE,
                 "node_type": "vulnerability",
                 "external_id": external_id,
                 "lookup_label": lookup_label,
                 "parent_external_id": story_external_ids[story_key],
-                "summary": build_legacy_vulnerability_summary(context),
-                "description": build_legacy_vulnerability_description(context),
+                "summary": build_project_lineage_vulnerability_summary(context),
+                "description": build_project_lineage_vulnerability_description(context),
                 "labels": sorted(labels),
                 "context": context,
                 "stats": {
@@ -1042,7 +1066,7 @@ def build_vulnerability_project_nodes(
         nodes.append(
             {
                 "hierarchy_mode": (
-                    HIERARCHY_MODE_VULNERABILITY_PROJECT
+                    HIERARCHY_MODE_VULNERABILITY_REMEDIATION
                 ),
                 "node_type": "epic",
                 "external_id": external_id,
@@ -1184,7 +1208,7 @@ def build_vulnerability_project_nodes(
         nodes.append(
             {
                 "hierarchy_mode": (
-                    HIERARCHY_MODE_VULNERABILITY_PROJECT
+                    HIERARCHY_MODE_VULNERABILITY_REMEDIATION
                 ),
                 "node_type": "story",
                 "external_id": external_id,
@@ -1217,13 +1241,27 @@ def build_vulnerability_project_nodes(
 
     return nodes
 
+
+def build_project_subproject_vulnerability_nodes(
+        findings: list[dict[str, str]],
+        hash_length: int,
+) -> list[dict[str, Any]]:
+    return build_project_lineage_nodes(
+        findings=findings,
+        hash_length=hash_length,
+    )
+
 def build_nodes(
         findings: list[dict[str, str]],
         hash_length: int,
         hierarchy_mode: str,
 ) -> list[dict[str, Any]]:
-    if hierarchy_mode == HIERARCHY_MODE_PROJECT_SUBPROJECT_VULNERABILITY:
-        return build_project_subproject_vulnerability_nodes(
+    normalized_mode = normalize_hierarchy_mode(
+        hierarchy_mode
+    )
+
+    if normalized_mode == HIERARCHY_MODE_PROJECT_LINEAGE:
+        return build_project_lineage_nodes(
             findings=findings,
             hash_length=hash_length,
         )
@@ -1647,11 +1685,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hierarchy-mode",
         choices=[
+            HIERARCHY_MODE_VULNERABILITY_REMEDIATION,
+            HIERARCHY_MODE_PROJECT_LINEAGE,
             HIERARCHY_MODE_VULNERABILITY_PROJECT,
             HIERARCHY_MODE_PROJECT_SUBPROJECT_VULNERABILITY,
         ],
-        default=HIERARCHY_MODE_VULNERABILITY_PROJECT,
-        help="Jira hierarchy model.",
+        default=HIERARCHY_MODE_VULNERABILITY_REMEDIATION,
+        help=(
+            "Jira hierarchy model. Canonical modes are "
+            "vulnerability-remediation and project-lineage."
+        ),
     )
     parser.add_argument(
         "--plan-out",
@@ -1719,6 +1762,9 @@ def validate_args(args: argparse.Namespace) -> None:
 
 def process(args: argparse.Namespace) -> int:
     validate_args(args)
+    args.hierarchy_mode = normalize_hierarchy_mode(
+        args.hierarchy_mode
+    )
 
     raw_findings = read_findings(args.findings)
     unique_findings = dedupe_findings(raw_findings)
@@ -1752,7 +1798,7 @@ def process(args: argparse.Namespace) -> int:
     print(f"Unique rollup findings:  {len(unique_findings)}")
     print(f"Planned findings:        {len(filtered_findings)}")
 
-    if args.hierarchy_mode == HIERARCHY_MODE_VULNERABILITY_PROJECT:
+    if args.hierarchy_mode == HIERARCHY_MODE_VULNERABILITY_REMEDIATION:
         print(f"CVE Epic nodes:          {node_counts['epic_count']}")
         print(f"Project-version Tasks:   {node_counts['story_count']}")
     else:
