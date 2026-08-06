@@ -37,10 +37,16 @@ def argument_values(path: Path) -> list[str]:
 
 
 def test_docker_default_uses_high_concurrency() -> None:
-    text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    text = (ROOT / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    runtime_stage = text.split(
+        "FROM runtime-base AS runtime",
+        1,
+    )[1]
     command = next(
         line
-        for line in text.splitlines()
+        for line in runtime_stage.splitlines()
         if line.startswith("CMD ")
     )
 

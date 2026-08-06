@@ -9,16 +9,16 @@ COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
 
 RUN python -m pip wheel \
-    --no-deps \
-    --wheel-dir /build/wheels \
-    .
+        --no-deps \
+        --wheel-dir /build/wheels \
+        .
 
-FROM python:3.12.10-slim-bookworm AS runtime
+FROM python:3.12.10-slim-bookworm AS runtime-base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    HARNESS_OUTPUT_DIR=/var/lib/blackduck-wintermute \
+    WINTERMUTE_OUTPUT_DIR=/var/lib/blackduck-wintermute \
     TMPDIR=/tmp
 
 RUN apt-get update \
@@ -54,6 +54,23 @@ RUN python -m pip install \
 
 WORKDIR /app
 USER 10001:10001
+
+FROM runtime-base AS source
+
+ENTRYPOINT ["blackduck-wintermute-cohort-source"]
+CMD ["--scope", "parent-rollup", "--strict", "--resolve-bom-names", "--workers", "8", "--component-workers", "2", "--page-limit", "500"]
+
+FROM runtime-base AS jira
+
+ENTRYPOINT ["blackduck-wintermute-jira-cohort"]
+CMD ["--dry-run", "--strict"]
+
+FROM runtime-base AS datadog
+
+ENTRYPOINT ["blackduck-wintermute-datadog-cohort"]
+CMD ["--dry-run", "--strict"]
+
+FROM runtime-base AS runtime
 
 ENTRYPOINT ["blackduck-jira-pipeline"]
 CMD ["--dry-run", "--strict", "--resolve-bom-names", "--workers", "8", "--parent-workers", "8", "--rollup-workers", "8"]
