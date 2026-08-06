@@ -18,6 +18,22 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from wintermute.blackduck.inventory import (
+    InventoryFilter,
+    build_project_version_inventory,
+    get_project_versions as shared_get_project_versions,
+)
+from wintermute.blackduck.lineage import (
+    discover_lineage_contexts as shared_discover_lineage_contexts,
+    extract_project_version_hrefs as shared_extract_project_version_hrefs,
+    get_bom_components as shared_get_bom_components,
+    lineage_context_to_row,
+    project_href_from_version_href as shared_project_href_from_version_href,
+    resolve_project_version,
+)
+from wintermute.blackduck.models import ProjectVersionRef
+from wintermute.blackduck import discovery_cache as shared_discovery_cache
+from wintermute.blackduck.client import BlackDuckClient as SharedBlackDuckClient
 from wintermute.concurrency import (
     MAX_IO_WORKERS,
     bounded_worker_count,
@@ -75,254 +91,9 @@ class VersionInfo:
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
-class BlackDuckClient:
-    def __init__(
-            self,
-            base_url: str,
-            api_token: str,
-            insecure: bool = False,
-            ca_bundle: str | None = None,
-            timeout: int = 60,
-            retries: int = 2,
-            retry_delay: float = 2.0,
-            page_limit: int = 500,
-    ):
-        self.base_url = base_url.rstrip("/")
-        self.api_token = api_token
-        self.bearer_token: str | None = None
-        self.timeout = timeout
-        self.retries = retries
-        self.retry_delay = retry_delay
-        self.page_limit = page_limit
-
-        if insecure and ca_bundle:
-            raise ValueError(
-                "Use either --insecure or --ca-bundle, not both."
-            )
-
-        if insecure:
-            self.ssl_context = ssl._create_unverified_context()
-        elif ca_bundle:
-            self.ssl_context = ssl.create_default_context(
-                cafile=ca_bundle
-            )
-        else:
-            self.ssl_context = None
-
-    def clone_for_worker(self) -> BlackDuckClient:
-        worker = BlackDuckClient(
-            base_url=self.base_url,
-            api_token=self.api_token,
-            timeout=self.timeout,
-            retries=self.retries,
-            retry_delay=self.retry_delay,
-            page_limit=self.page_limit,
-        )
-        worker.ssl_context = self.ssl_context
-        worker.bearer_token = self.bearer_token
-        return worker
-
-    def authenticate(self) -> None:
-        url = f"{self.base_url}/api/tokens/authenticate"
-        headers = {
-            "Authorization": f"token {self.api_token}",
-            "Accept": "application/json",
-        }
-
-        retryable_statuses = {429, 500, 502, 503, 504}
-
-        for attempt in range(self.retries + 1):
-            request = Request(url, data=b"", headers=headers, method="POST")
-
-            try:
-                with urlopen(
-                        request,
-                        context=self.ssl_context,
-                        timeout=self.timeout,
-                ) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
-                    self.bearer_token = payload["bearerToken"]
-                    return
-
-            except HTTPError as error:
-                body = error.read().decode("utf-8", errors="replace")
-
-                if error.code not in retryable_statuses or attempt >= self.retries:
-                    raise RuntimeError(
-                        f"Authentication failed: HTTP {error.code} {error.reason}\n{body}"
-                    ) from error
-
-                sleep_seconds = self.retry_delay * (attempt + 1)
-                print(
-                    f"Retrying authentication after HTTP {error.code}; "
-                    f"attempt {attempt + 1}/{self.retries}, sleeping {sleep_seconds}s",
-                    file=sys.stderr,
-                )
-                time.sleep(sleep_seconds)
-
-            except (TimeoutError, URLError) as error:
-                if attempt >= self.retries:
-                    raise RuntimeError(
-                        f"Authentication failed after {self.retries + 1} attempt(s): {error}"
-                    ) from error
-
-                sleep_seconds = self.retry_delay * (attempt + 1)
-                print(
-                    f"Retrying authentication after network error: {error}; "
-                    f"attempt {attempt + 1}/{self.retries}, sleeping {sleep_seconds}s",
-                    file=sys.stderr,
-                )
-                time.sleep(sleep_seconds)
-
-        raise RuntimeError("Authentication failed unexpectedly")
-
-    def get(self, url_or_path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self.request("GET", url_or_path, params=params)
-
-    def request(
-            self,
-            method: str,
-            url_or_path: str,
-            params: dict[str, Any] | None = None,
-            body: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        url = self._make_url(url_or_path, params)
-
-        headers = {
-            "Accept": "application/json",
-        }
-
-        if self.bearer_token:
-            headers["Authorization"] = f"Bearer {self.bearer_token}"
-
-        data = None
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-            data = json.dumps(body).encode("utf-8")
-
-        retryable_statuses = {429, 500, 502, 503, 504}
-
-        for attempt in range(self.retries + 1):
-            request = Request(url, data=data, headers=headers, method=method)
-
-            try:
-                with urlopen(
-                        request,
-                        context=self.ssl_context,
-                        timeout=self.timeout,
-                ) as response:
-                    text = response.read().decode("utf-8")
-                    return json.loads(text) if text else {}
-
-            except HTTPError as error:
-                response_body = error.read().decode("utf-8", errors="replace")
-
-                if error.code not in retryable_statuses or attempt >= self.retries:
-                    raise RuntimeError(
-                        f"{method} {url} failed: HTTP {error.code} {error.reason}\n"
-                        f"{response_body[:4000]}"
-                    ) from error
-
-                sleep_seconds = self.retry_delay * (attempt + 1)
-                print(
-                    f"Retrying {method} {url} after HTTP {error.code}; "
-                    f"attempt {attempt + 1}/{self.retries}, sleeping {sleep_seconds}s",
-                    file=sys.stderr,
-                )
-                time.sleep(sleep_seconds)
-
-            except (TimeoutError, URLError) as error:
-                if attempt >= self.retries:
-                    raise RuntimeError(
-                        f"{method} {url} failed after {self.retries + 1} attempt(s): {error}"
-                    ) from error
-
-                sleep_seconds = self.retry_delay * (attempt + 1)
-                print(
-                    f"Retrying {method} {url} after network error: {error}; "
-                    f"attempt {attempt + 1}/{self.retries}, sleeping {sleep_seconds}s",
-                    file=sys.stderr,
-                )
-                time.sleep(sleep_seconds)
-
-        raise RuntimeError(f"{method} {url} failed unexpectedly")
-
-    def paged_get(
-            self,
-            url_or_path: str,
-            params: dict[str, Any] | None = None,
-            limit: int | None = None,
-    ) -> list[dict[str, Any]]:
-        page_limit = (
-            limit
-            if limit is not None
-            else self.page_limit
-        )
-        all_items: list[dict[str, Any]] = []
-        offset = 0
-
-        while True:
-            page_params = dict(params or {})
-            page_params["offset"] = offset
-            page_params["limit"] = page_limit
-
-            payload = self.get(
-                url_or_path,
-                params=page_params,
-            )
-
-            if "items" not in payload:
-                return [payload]
-
-            items = payload.get("items", [])
-            all_items.extend(items)
-
-            total_count = payload.get("totalCount")
-            total = (
-                int(total_count)
-                if total_count is not None
-                else None
-            )
-
-            if not items:
-                break
-
-            offset += len(items)
-
-            if total is not None and offset >= total:
-                break
-
-            if len(items) < page_limit:
-                break
-
-        return all_items
-
-    def _make_url(self, url_or_path: str, params: dict[str, Any] | None = None) -> str:
-        if url_or_path.startswith("http://") or url_or_path.startswith("https://"):
-            url = url_or_path
-        else:
-            url = f"{self.base_url}/{url_or_path.lstrip('/')}"
-
-        if not params:
-            return url
-
-        parsed = urlparse(url)
-        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-
-        for key, value in params.items():
-            if value is not None:
-                query[key] = str(value)
-
-        return urlunparse(
-            (
-                parsed.scheme,
-                parsed.netloc,
-                parsed.path,
-                parsed.params,
-                urlencode(query),
-                parsed.fragment,
-            )
-        )
+class BlackDuckClient(SharedBlackDuckClient):
+    cache_raw_gets = False
+    cache_paged_results = False
 
 
 def now_iso() -> str:
@@ -382,27 +153,25 @@ def iter_hrefs(value: Any) -> list[str]:
     return hrefs
 
 
-def extract_project_version_hrefs(raw_href: str, base_url: str) -> list[str]:
-    hrefs: list[str] = []
-
-    for match in PROJECT_VERSION_RE.finditer(raw_href):
-        path = match.group(0)
-
-        if raw_href.startswith("http://") or raw_href.startswith("https://"):
-            parsed = urlparse(raw_href)
-            hrefs.append(canonical_href(f"{parsed.scheme}://{parsed.netloc}{path}"))
-        else:
-            hrefs.append(canonical_href(f"{base_url}{path}"))
-
-    return hrefs
-
-
-def project_href_from_version_href(version_href: str) -> str | None:
-    match = re.search(
-        r"(.*/api/projects/[0-9a-fA-F-]+)/versions/[0-9a-fA-F-]+",
-        version_href,
+def extract_project_version_hrefs(
+        raw_href: str,
+        base_url: str,
+) -> list[str]:
+    return shared_extract_project_version_hrefs(
+        raw_href,
+        base_url,
     )
-    return canonical_href(match.group(1)) if match else None
+
+
+def project_href_from_version_href(
+        version_href: str,
+) -> str | None:
+    return (
+        shared_project_href_from_version_href(
+            version_href
+        )
+        or None
+    )
 
 
 def version_name(version: dict[str, Any]) -> str:
@@ -459,16 +228,14 @@ def extract_created_timestamp(version: dict[str, Any]) -> str:
     return str(value or "")
 
 
-def get_project_versions(client: BlackDuckClient, project: dict[str, Any]) -> list[dict[str, Any]]:
-    versions_url = get_link(project, ("versions",))
-
-    if not versions_url:
-        project_href = get_self_href(project)
-        if not project_href:
-            return []
-        versions_url = f"{project_href}/versions"
-
-    return client.paged_get(versions_url)
+def get_project_versions(
+        client: BlackDuckClient,
+        project: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return shared_get_project_versions(
+        client,
+        project,
+    )
 
 
 def build_version_inventory(
@@ -478,139 +245,37 @@ def build_version_inventory(
         debug: bool,
         workers: int = 1,
 ) -> list[VersionInfo]:
-    projects = client.paged_get("/api/projects")
-    selected_projects: list[
-        tuple[dict[str, Any], str, str]
-    ] = []
-
-    for project in projects:
-        project_name = str(project.get("name") or "")
-
-        if (
-            project_name_contains
-            and project_name_contains.lower()
-            not in project_name.lower()
-        ):
-            continue
-
-        project_href = get_self_href(project)
-
-        if not project_href:
-            continue
-
-        selected_projects.append(
-            (
-                project,
-                project_name,
-                canonical_href(project_href),
-            )
-        )
-
-        if (
-            max_projects is not None
-            and len(selected_projects) >= max_projects
-        ):
-            break
-
-    if not selected_projects:
-        return []
-
-    worker_count = min(
-        bounded_worker_count(
-            workers,
-            maximum=MAX_IO_WORKERS,
+    result = build_project_version_inventory(
+        client,
+        filters=InventoryFilter(
+            project_name_contains=(
+                project_name_contains or ""
+            ),
+            max_projects=max_projects,
         ),
-        len(selected_projects),
+        workers=workers,
+        debug=debug,
     )
-    worker_local = threading.local()
 
-    def worker_client() -> BlackDuckClient:
-        if worker_count == 1:
-            return client
-
-        local_client = getattr(
-            worker_local,
-            "blackduck_client",
-            None,
+    for failure in result.failures:
+        print(
+            f"Warning: failed to read versions for project "
+            f"{failure.project}: {failure.error}",
+            file=sys.stderr,
         )
 
-        if local_client is None:
-            local_client = client.clone_for_worker()
-            worker_local.blackduck_client = local_client
-
-        return local_client
-
-    def load_project(
-            item: tuple[dict[str, Any], str, str],
-    ) -> tuple[list[VersionInfo], str]:
-        project, project_name, project_href = item
-
-        if debug:
-            print(
-                f"Indexing project: {project_name}",
-                file=sys.stderr,
-            )
-
-        try:
-            versions = get_project_versions(
-                worker_client(),
-                project,
-            )
-        except RuntimeError as error:
-            return [], str(error)
-
-        inventory: list[VersionInfo] = []
-
-        for version in versions:
-            version_href = get_self_href(version)
-
-            if not version_href:
-                continue
-
-            inventory.append(
-                VersionInfo(
-                    project_name=project_name,
-                    version_name=version_name(version),
-                    project_href=project_href,
-                    version_href=canonical_href(version_href),
-                    phase=str(version.get("phase") or ""),
-                    updated=extract_updated_timestamp(version),
-                    created=extract_created_timestamp(version),
-                )
-            )
-
-        return inventory, ""
-
-    project_results = ordered_parallel_map(
-        selected_projects,
-        load_project,
-        workers=worker_count,
-        maximum=MAX_IO_WORKERS,
-    )
-    inventory: list[VersionInfo] = []
-
-    for (
-        project,
-        project_name,
-        project_href,
-    ), (versions, error) in zip(
-        selected_projects,
-        project_results,
-        strict=True,
-    ):
-        del project, project_href
-
-        if error:
-            print(
-                f"Warning: failed to read versions for project "
-                f"{project_name}: {error}",
-                file=sys.stderr,
-            )
-            continue
-
-        inventory.extend(versions)
-
-    return inventory
+    return [
+        VersionInfo(
+            project_name=item.project_version.project,
+            version_name=item.project_version.version,
+            project_href=item.project_version.project_href,
+            version_href=item.project_version.version_href,
+            phase=item.project_version.phase,
+            updated=item.project_version.updated,
+            created=item.created,
+        )
+        for item in result.items
+    ]
 
 
 def build_indexes(
@@ -632,166 +297,127 @@ def resolve_version_href(
         versions_by_href: dict[str, VersionInfo],
 ) -> VersionInfo | None:
     version_href = canonical_href(version_href)
+    existing = versions_by_href.get(version_href)
 
-    if version_href in versions_by_href:
-        return versions_by_href[version_href]
+    if existing is not None:
+        return existing
 
-    project_href = project_href_from_version_href(version_href)
+    shared_by_href = {
+        href: ProjectVersionRef(
+            instance_url=client.base_url,
+            project=value.project_name,
+            version=value.version_name,
+            project_href=value.project_href,
+            version_href=value.version_href,
+            phase=value.phase,
+            updated=value.updated,
+        )
+        for href, value in versions_by_href.items()
+    }
+    resolved = resolve_project_version(
+        client,
+        version_href,
+        shared_by_href,
+    )
 
-    if not project_href:
-        return None
-
-    try:
-        project = client.get(project_href)
-        version = client.get(version_href)
-    except RuntimeError:
-        return None
-
-    project_name = str(project.get("name") or "")
-    child_version_name = version_name(version)
-
-    if not project_name or not child_version_name:
+    if resolved is None:
         return None
 
     return VersionInfo(
-        project_name=project_name,
-        version_name=child_version_name,
-        project_href=project_href,
-        version_href=version_href,
-        phase=str(version.get("phase") or ""),
-        updated=extract_updated_timestamp(version),
-        created=extract_created_timestamp(version),
+        project_name=resolved.project,
+        version_name=resolved.version,
+        project_href=resolved.project_href,
+        version_href=resolved.version_href,
+        phase=resolved.phase,
+        updated=resolved.updated,
     )
 
 
-def get_bom_components(client: BlackDuckClient, version_info: VersionInfo) -> list[dict[str, Any]]:
-    components_url = f"{version_info.version_href}/components"
-
-    try:
-        return client.paged_get(components_url)
-    except RuntimeError as direct_error:
-        try:
-            version = client.get(version_info.version_href)
-            linked_components_url = get_link(
-                version,
-                (
-                    "components",
-                    "bom-components",
-                    "bomComponents",
-                ),
-            )
-
-            if linked_components_url:
-                return client.paged_get(linked_components_url)
-
-        except RuntimeError:
-            pass
-
-        raise direct_error
+def get_bom_components(
+        client: BlackDuckClient,
+        version_info: VersionInfo,
+) -> list[dict[str, Any]]:
+    return shared_get_bom_components(
+        client,
+        ProjectVersionRef(
+            instance_url=client.base_url,
+            project=version_info.project_name,
+            version=version_info.version_name,
+            project_href=version_info.project_href,
+            version_href=version_info.version_href,
+            phase=version_info.phase,
+            updated=version_info.updated,
+        ),
+    )
 
 
 def discover_subprojects_for_version(
         client: BlackDuckClient,
         parent: VersionInfo,
         versions_by_href: dict[str, VersionInfo],
-        versions_by_name: dict[tuple[str, str], list[VersionInfo]],
+        versions_by_name: dict[
+            tuple[str, str],
+            list[VersionInfo],
+        ],
         resolve_bom_names: bool,
         debug: bool,
 ) -> list[dict[str, str]]:
-    relations: list[dict[str, str]] = []
-    seen_child_hrefs: set[str] = set()
-
-    bom_components = get_bom_components(client, parent)
-
-    for bom_item in bom_components:
-        bom_component_name = str(
-            first_value_by_key(bom_item, ["componentName", "name"]) or ""
+    parent_ref = ProjectVersionRef(
+        instance_url=client.base_url,
+        project=parent.project_name,
+        version=parent.version_name,
+        project_href=parent.project_href,
+        version_href=parent.version_href,
+        phase=parent.phase,
+        updated=parent.updated,
+    )
+    shared_by_href = {
+        href: ProjectVersionRef(
+            instance_url=client.base_url,
+            project=value.project_name,
+            version=value.version_name,
+            project_href=value.project_href,
+            version_href=value.version_href,
+            phase=value.phase,
+            updated=value.updated,
         )
-        bom_component_version = str(
-            first_value_by_key(
-                bom_item,
-                ["componentVersionName", "componentVersion", "versionName"],
+        for href, value in versions_by_href.items()
+    }
+    shared_by_name = {
+        key: [
+            ProjectVersionRef(
+                instance_url=client.base_url,
+                project=value.project_name,
+                version=value.version_name,
+                project_href=value.project_href,
+                version_href=value.version_href,
+                phase=value.phase,
+                updated=value.updated,
             )
-            or ""
-        )
+            for value in values
+        ]
+        for key, values in versions_by_name.items()
+    }
 
-        detected_hrefs: list[str] = []
-
-        for raw_href in iter_hrefs(bom_item):
-            detected_hrefs.extend(
-                extract_project_version_hrefs(raw_href, client.base_url)
+    contexts = shared_discover_lineage_contexts(
+        client,
+        parent_ref,
+        shared_by_href,
+        shared_by_name,
+        resolve_bom_names=resolve_bom_names,
+        debug=debug,
+        bom_loader=lambda current_client, _: (
+            get_bom_components(
+                current_client,
+                parent,
             )
+        ),
+    )
 
-        for detected_href in detected_hrefs:
-            detected_href = canonical_href(detected_href)
-
-            if detected_href == parent.version_href:
-                continue
-
-            if detected_href in seen_child_hrefs:
-                continue
-
-            child = resolve_version_href(client, detected_href, versions_by_href)
-
-            if not child:
-                continue
-
-            seen_child_hrefs.add(child.version_href)
-
-            relations.append(
-                {
-                    "parent_project": parent.project_name,
-                    "parent_version": parent.version_name,
-                    "parent_phase": parent.phase,
-                    "parent_updated": parent.updated,
-                    "child_project": child.project_name,
-                    "child_version": child.version_name,
-                    "child_phase": child.phase,
-                    "detection_method": "api-href",
-                    "bom_component_name": bom_component_name,
-                    "bom_component_version": bom_component_version,
-                    "parent_version_href": parent.version_href,
-                    "child_version_href": child.version_href,
-                }
-            )
-
-        if resolve_bom_names and bom_component_name and bom_component_version:
-            matches = versions_by_name.get((bom_component_name, bom_component_version), [])
-
-            if len(matches) > 1 and debug:
-                print(
-                    f"Ambiguous BOM name match for {bom_component_name} / "
-                    f"{bom_component_version}: {len(matches)} project versions",
-                    file=sys.stderr,
-                )
-
-            for child in matches:
-                if child.version_href == parent.version_href:
-                    continue
-
-                if child.version_href in seen_child_hrefs:
-                    continue
-
-                seen_child_hrefs.add(child.version_href)
-
-                relations.append(
-                    {
-                        "parent_project": parent.project_name,
-                        "parent_version": parent.version_name,
-                        "parent_phase": parent.phase,
-                        "parent_updated": parent.updated,
-                        "child_project": child.project_name,
-                        "child_version": child.version_name,
-                        "child_phase": child.phase,
-                        "detection_method": "bom-component-name-version",
-                        "bom_component_name": bom_component_name,
-                        "bom_component_version": bom_component_version,
-                        "parent_version_href": parent.version_href,
-                        "child_version_href": child.version_href,
-                    }
-                )
-
-    return relations
+    return [
+        lineage_context_to_row(context)
+        for context in contexts
+    ]
 
 
 def relation_identity(relation: dict[str, str]) -> tuple[str, str]:
@@ -817,192 +443,125 @@ def dedupe_relations(relations: list[dict[str, str]]) -> list[dict[str, str]]:
     return unique
 
 
-def new_cache(base_url: str, resolve_bom_names: bool) -> dict[str, Any]:
-    timestamp = now_iso()
-    return {
-        "schema_version": CACHE_SCHEMA_VERSION,
-        "base_url": base_url.rstrip("/"),
-        "settings": {
-            "resolve_bom_names": resolve_bom_names,
-        },
-        "created_at": timestamp,
-        "updated_at": timestamp,
-        "entries": {},
-    }
+def new_cache(
+    base_url: str,
+    resolve_bom_names: bool,
+) -> dict[str, Any]:
+    return shared_discovery_cache.new_cache(
+        base_url,
+        resolve_bom_names,
+    )
 
 
-def load_cache(path: str, base_url: str, resolve_bom_names: bool) -> dict[str, Any]:
-    if not os.path.exists(path):
-        print(f"No cache found at {path}; full scan required.", file=sys.stderr)
-        return new_cache(base_url, resolve_bom_names)
+def load_cache(
+    path: str,
+    base_url: str,
+    resolve_bom_names: bool,
+) -> dict[str, Any]:
+    return shared_discovery_cache.load_cache(
+        path,
+        base_url,
+        resolve_bom_names,
+    )
 
-    try:
-        with open(path, encoding="utf-8") as cache_file:
-            cache = json.load(cache_file)
-    except (OSError, json.JSONDecodeError) as error:
-        print(
-            f"Warning: failed to read cache {path}: {error}; full scan required.",
-            file=sys.stderr,
+
+def save_cache(
+    path: str,
+    cache: dict[str, Any],
+) -> None:
+    shared_discovery_cache.save_cache(
+        path,
+        cache,
+    )
+
+def cache_entry_for_version(
+    cache: dict[str, Any],
+    version_info: VersionInfo,
+) -> dict[str, Any] | None:
+    return (
+        shared_discovery_cache
+        .cache_entry_for_version(
+            cache,
+            version_info,
         )
-        return new_cache(base_url, resolve_bom_names)
-
-    if cache.get("schema_version") != CACHE_SCHEMA_VERSION:
-        print(
-            f"Cache schema mismatch in {path}; full scan required.",
-            file=sys.stderr,
-        )
-        return new_cache(base_url, resolve_bom_names)
-
-    if str(cache.get("base_url", "")).rstrip("/") != base_url.rstrip("/"):
-        print(
-            f"Cache base URL differs from current Black Duck URL; full scan required.",
-            file=sys.stderr,
-        )
-        return new_cache(base_url, resolve_bom_names)
-
-    cached_settings = cache.get("settings", {})
-
-    if bool(cached_settings.get("resolve_bom_names")) != resolve_bom_names:
-        print(
-            "Cache was created with different --resolve-bom-names setting; "
-            "full scan required.",
-            file=sys.stderr,
-        )
-        return new_cache(base_url, resolve_bom_names)
-
-    entries = cache.get("entries")
-    if not isinstance(entries, dict):
-        print(
-            f"Cache entries are invalid in {path}; full scan required.",
-            file=sys.stderr,
-        )
-        return new_cache(base_url, resolve_bom_names)
-
-    print(f"Loaded cache from {path} with {len(entries)} entries.", file=sys.stderr)
-    return cache
+    )
 
 
-def save_cache(path: str, cache: dict[str, Any]) -> None:
-    ensure_parent_dir(path)
-    cache["updated_at"] = now_iso()
-    tmp_path = f"{path}.tmp"
-
-    with open(tmp_path, "w", encoding="utf-8") as cache_file:
-        json.dump(cache, cache_file, indent=2, sort_keys=True)
-
-    os.replace(tmp_path, path)
-    print(f"Wrote cache: {path}", file=sys.stderr)
-
-def cache_entry_for_version(cache: dict[str, Any], version_info: VersionInfo) -> dict[str, Any] | None:
-    entry = cache.get("entries", {}).get(version_info.version_href)
-    return entry if isinstance(entry, dict) else None
-
-
-def cache_age_days(entry: dict[str, Any]) -> float | None:
-    scanned_at = parse_iso(str(entry.get("scanned_at") or ""))
-
-    if not scanned_at:
-        return None
-
-    return (datetime.now(timezone.utc) - scanned_at).total_seconds() / 86400
+def cache_age_days(
+    entry: dict[str, Any],
+) -> float | None:
+    return (
+        shared_discovery_cache
+        .cache_age_days(entry)
+    )
 
 
 def scan_reason_for_version(
-        version_info: VersionInfo,
-        entry: dict[str, Any] | None,
-        refresh_all: bool,
-        refresh_failed: bool,
-        refresh_older_than_days: float,
-        trust_cache_without_update_marker: bool,
+    version_info: VersionInfo,
+    entry: dict[str, Any] | None,
+    refresh_all: bool,
+    refresh_failed: bool,
+    refresh_older_than_days: float,
+    trust_cache_without_update_marker: bool,
 ) -> str | None:
-    if refresh_all:
-        return "refresh-all"
-
-    if not entry:
-        return "new-version"
-
-    if entry.get("signature") != version_info.signature():
-        return "version-changed"
-
-    if entry.get("status") == "failed" and refresh_failed:
-        return "previous-scan-failed"
-
-    if not version_info.updated and not trust_cache_without_update_marker:
-        return "no-update-marker"
-
-    if refresh_older_than_days >= 0:
-        age = cache_age_days(entry)
-        if age is None:
-            return "cache-age-unknown"
-        if age >= refresh_older_than_days:
-            return f"cache-older-than-{refresh_older_than_days}-days"
-
-    return None
+    return (
+        shared_discovery_cache
+        .scan_reason_for_version(
+            version_info,
+            entry,
+            refresh_all,
+            refresh_failed,
+            refresh_older_than_days,
+            trust_cache_without_update_marker,
+        )
+    )
 
 
 def relation_with_cache_metadata(
-        relation: dict[str, str],
-        entry: dict[str, Any],
+    relation: dict[str, str],
+    entry: dict[str, Any],
 ) -> dict[str, str]:
-    enriched = dict(relation)
-    enriched.setdefault("parent_updated", "")
-    enriched["cache_entry_status"] = str(entry.get("status") or "")
-    enriched["cache_reuse_reason"] = str(entry.get("reuse_reason") or "")
-    enriched["parent_scanned_at"] = str(entry.get("scanned_at") or "")
-    enriched["parent_scan_error"] = str(entry.get("error") or "")
-    return enriched
+    return (
+        shared_discovery_cache
+        .relation_with_cache_metadata(
+            relation,
+            entry,
+        )
+    )
 
 
 def collect_relations_from_cache(
-        cache: dict[str, Any],
-        inventory: list[VersionInfo],
+    cache: dict[str, Any],
+    inventory: list[VersionInfo],
 ) -> list[dict[str, str]]:
-    relations: list[dict[str, str]] = []
-    entries = cache.get("entries", {})
-
-    for version_info in inventory:
-        entry = entries.get(version_info.version_href)
-
-        if not isinstance(entry, dict):
-            continue
-
-        for relation in entry.get("relations", []):
-            if isinstance(relation, dict):
-                relations.append(relation_with_cache_metadata(relation, entry))
-
-    return dedupe_relations(relations)
+    return (
+        shared_discovery_cache
+        .collect_relations_from_cache(
+            cache,
+            inventory,
+        )
+    )
 
 
 def plan_scan(
-        cache: dict[str, Any],
-        inventory: list[VersionInfo],
-        refresh_all: bool,
-        refresh_failed: bool,
-        refresh_older_than_days: float,
-        trust_cache_without_update_marker: bool,
-) -> tuple[list[tuple[VersionInfo, str]], int]:
-    to_scan: list[tuple[VersionInfo, str]] = []
-    reused_count = 0
-
-    for version_info in inventory:
-        entry = cache_entry_for_version(cache, version_info)
-        reason = scan_reason_for_version(
-            version_info=version_info,
-            entry=entry,
-            refresh_all=refresh_all,
-            refresh_failed=refresh_failed,
-            refresh_older_than_days=refresh_older_than_days,
-            trust_cache_without_update_marker=trust_cache_without_update_marker,
-        )
-
-        if reason:
-            to_scan.append((version_info, reason))
-        else:
-            reused_count += 1
-            if entry is not None:
-                entry["reuse_reason"] = "unchanged-cache-hit"
-
-    return to_scan, reused_count
+    cache: dict[str, Any],
+    inventory: list[VersionInfo],
+    refresh_all: bool,
+    refresh_failed: bool,
+    refresh_older_than_days: float,
+    trust_cache_without_update_marker: bool,
+) -> tuple[
+    list[tuple[VersionInfo, str]],
+    int,
+]:
+    return shared_discovery_cache.plan_scan(
+        cache,
+        inventory,
+        refresh_all,
+        refresh_failed,
+        refresh_older_than_days,
+        trust_cache_without_update_marker,
+    )
 
 
 def scan_one_parent(
@@ -1156,74 +715,33 @@ def scan_versions(
 
 
 def update_cache_with_scan_results(
-        cache: dict[str, Any],
-        results: list[tuple[VersionInfo, str, list[dict[str, str]], str | None]],
+    cache: dict[str, Any],
+    results: list[
+        tuple[
+            VersionInfo,
+            str,
+            list[dict[str, str]],
+            str | None,
+        ]
+    ],
 ) -> None:
-    entries = cache.setdefault("entries", {})
-
-    for version_info, reason, relations, error in results:
-        previous_entry = entries.get(version_info.version_href, {})
-
-        if error:
-            previous_relations = []
-
-            if isinstance(previous_entry, dict):
-                previous_relations = previous_entry.get("relations", [])
-                if not isinstance(previous_relations, list):
-                    previous_relations = []
-
-            entries[version_info.version_href] = {
-                "signature": version_info.signature(),
-                "project_name": version_info.project_name,
-                "version_name": version_info.version_name,
-                "version_href": version_info.version_href,
-                "project_href": version_info.project_href,
-                "phase": version_info.phase,
-                "updated": version_info.updated,
-                "created": version_info.created,
-                "status": "failed",
-                "reuse_reason": reason,
-                "scanned_at": now_iso(),
-                "error": error,
-                "relations": previous_relations,
-            }
-
-            print(
-                f"Warning: failed to scan {version_info.project_name} / "
-                f"{version_info.version_name}: {error}",
-                file=sys.stderr,
-            )
-            continue
-
-        entries[version_info.version_href] = {
-            "signature": version_info.signature(),
-            "project_name": version_info.project_name,
-            "version_name": version_info.version_name,
-            "version_href": version_info.version_href,
-            "project_href": version_info.project_href,
-            "phase": version_info.phase,
-            "updated": version_info.updated,
-            "created": version_info.created,
-            "status": "ok",
-            "reuse_reason": reason,
-            "scanned_at": now_iso(),
-            "error": "",
-            "relations": relations,
-        }
+    shared_discovery_cache.update_cache_with_scan_results(
+        cache,
+        results,
+    )
 
 
 def prune_cache_to_current_inventory(
-        cache: dict[str, Any],
-        inventory: list[VersionInfo],
+    cache: dict[str, Any],
+    inventory: list[VersionInfo],
 ) -> int:
-    entries = cache.setdefault("entries", {})
-    current_hrefs = {version_info.version_href for version_info in inventory}
-    stale_hrefs = [href for href in entries.keys() if href not in current_hrefs]
-
-    for href in stale_hrefs:
-        del entries[href]
-
-    return len(stale_hrefs)
+    return (
+        shared_discovery_cache
+        .prune_cache_to_current_inventory(
+            cache,
+            inventory,
+        )
+    )
 
 
 def write_csv(relations: list[dict[str, str]], output_path: str) -> None:

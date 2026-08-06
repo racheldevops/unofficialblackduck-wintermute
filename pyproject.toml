@@ -23,6 +23,7 @@ blackduck-jira-pipeline = "wintermute.jira.pipeline:main"
 blackduck-policy-vuln-find = "wintermute.datadog.policy_vuln_find:main"
 blackduck-policy-vuln-pull = "wintermute.datadog.policy_vuln_pull:main"
 blackduck-findings-to-datadog = "wintermute.datadog.findings_to_datadog:main"
+wintermute-blackduck-pull = "wintermute.blackduck.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
