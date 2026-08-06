@@ -1,0 +1,12 @@
+- op: replace
+  path: /spec/templates/1/script/image
+  value: registry.invalid/customer/blackduck-wintermute-source:replace-me
+- op: replace
+  path: /spec/templates/2/container/image
+  value: registry.invalid/customer/blackduck-wintermute-source:replace-me
+- op: replace
+  path: /spec/templates/3/container/image
+  value: registry.invalid/customer/blackduck-wintermute-jira:replace-me
+- op: replace
+  path: /spec/templates/4/container/image
+  value: registry.invalid/customer/blackduck-wintermute-datadog:replace-me

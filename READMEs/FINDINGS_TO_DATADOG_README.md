@@ -5,7 +5,7 @@ Publish normalized Black Duck high-risk vulnerability findings to Datadog Events
 ## Auth
 
 ```bash
-export DATADOG_API_KEY="..."
+export DATADOG_API_KEY=""
 ```
 
 ## Dry run

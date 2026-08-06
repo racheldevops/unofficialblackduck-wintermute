@@ -1,0 +1,207 @@
+name: Cohort Kubernetes deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Deployment operation
+        required: true
+        type: choice
+        options:
+          - render
+          - diff
+          - apply
+        default: render
+      image_tag:
+        description: Immutable image tag, normally a commit SHA
+        required: true
+        type: string
+      namespace:
+        description: Kubernetes namespace
+        required: true
+        type: string
+        default: blackduck-wintermute
+      jira_mode:
+        description: Jira consumer mode
+        required: true
+        type: choice
+        options:
+          - dry-run
+          - apply
+        default: dry-run
+      datadog_mode:
+        description: Datadog consumer mode
+        required: true
+        type: choice
+        options:
+          - dry-run
+          - apply
+        default: dry-run
+      confirm_apply:
+        description: Confirm destination apply mode
+        required: true
+        type: boolean
+        default: false
+      enable_schedule:
+        description: Enable the CronWorkflow schedule
+        required: true
+        type: boolean
+        default: false
+      schedule:
+        description: Cron schedule
+        required: true
+        type: string
+        default: "0 2 * * *"
+      timezone:
+        description: Cron timezone
+        required: true
+        type: string
+        default: Etc/UTC
+      retain_cohorts:
+        description: Number of immutable cohorts to retain
+        required: true
+        type: string
+        default: "10"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cohort-kubernetes-${{ inputs.namespace }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+
+      - name: Validate apply confirmation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ \
+            "${{ inputs.jira_mode }}" == "apply" || \
+            "${{ inputs.datadog_mode }}" == "apply" \
+          ]]; then
+            [[ "${{ inputs.confirm_apply }}" == "true" ]] || {
+              echo "Apply mode requires confirm_apply=true"
+              exit 1
+            }
+          fi
+
+      - name: Render immutable manifest
+        shell: bash
+        env:
+          REGISTRY_HOST: ${{ vars.REGISTRY_HOST }}
+          REGISTRY_REPOSITORY: ${{ vars.REGISTRY_REPOSITORY }}
+        run: |
+          set -euo pipefail
+
+          args=(
+            --registry-host "${REGISTRY_HOST}"
+            --registry-repository "${REGISTRY_REPOSITORY}"
+            --image-tag "${{ inputs.image_tag }}"
+            --namespace "${{ inputs.namespace }}"
+            --jira-mode "${{ inputs.jira_mode }}"
+            --datadog-mode "${{ inputs.datadog_mode }}"
+            --retain-cohorts "${{ inputs.retain_cohorts }}"
+            --schedule "${{ inputs.schedule }}"
+            --timezone "${{ inputs.timezone }}"
+            --output rendered-cohort-manifest.yaml
+          )
+
+          if [[ "${{ inputs.confirm_apply }}" == "true" ]]; then
+            args+=(--confirm-apply)
+          fi
+
+          if [[ "${{ inputs.enable_schedule }}" == "true" ]]; then
+            args+=(--enable-schedule)
+          fi
+
+          python scripts/render_cohort_manifest.py "${args[@]}"
+
+          sha256sum rendered-cohort-manifest.yaml \
+            > rendered-cohort-manifest.sha256
+
+      - name: Configure cluster access
+        if: ${{ inputs.operation != 'render' }}
+        shell: bash
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG_B64 }}
+        run: |
+          set -euo pipefail
+
+          [[ -n "${KUBE_CONFIG_B64}" ]] || {
+            echo "KUBE_CONFIG_B64 is required"
+            exit 1
+          }
+
+          kubeconfig="${RUNNER_TEMP}/kubeconfig"
+          printf '%s' "${KUBE_CONFIG_B64}" \
+            | base64 --decode > "${kubeconfig}"
+          chmod 600 "${kubeconfig}"
+          echo "KUBECONFIG=${kubeconfig}" >> "${GITHUB_ENV}"
+
+      - name: Validate Argo Workflows CRDs
+        if: ${{ inputs.operation != 'render' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl get crd workflowtemplates.argoproj.io
+          kubectl get crd cronworkflows.argoproj.io
+
+      - name: Validate cluster prerequisites
+        if: ${{ inputs.operation != 'render' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/validate_cohort_cluster.py             --manifest rendered-cohort-manifest.yaml             --namespace "${{ inputs.namespace }}"             --require-secrets             --report cohort-cluster-preflight.json
+
+      - name: Diff
+        if: ${{ inputs.operation == 'diff' || inputs.operation == 'apply' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          kubectl diff \
+            --filename rendered-cohort-manifest.yaml
+          diff_exit=$?
+          set -e
+
+          if (( diff_exit > 1 )); then
+            exit "${diff_exit}"
+          fi
+
+      - name: Apply
+        if: ${{ inputs.operation == 'apply' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl apply \
+            --server-side \
+            --field-manager blackduck-wintermute-cohort \
+            --filename rendered-cohort-manifest.yaml
+
+      - name: Upload rendered manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: cohort-kubernetes-${{ inputs.operation }}-${{ github.run_id }}
+          path: |
+            rendered-cohort-manifest.yaml
+            rendered-cohort-manifest.sha256
+            cohort-cluster-preflight.json
+          if-no-files-found: error

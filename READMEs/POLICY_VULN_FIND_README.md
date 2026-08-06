@@ -22,7 +22,7 @@ Use either environment variables or CLI flags.
 
 ```bash
 export BLACKDUCK_URL="https://blackduck.example.com"
-export BLACKDUCK_API_TOKEN="..."
+export BLACKDUCK_API_TOKEN=""
 ```
 
 Equivalent flags:

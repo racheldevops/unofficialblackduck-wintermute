@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: blackduck-wintermute-cohort
+  labels:
+    app.kubernetes.io/name: blackduck-wintermute
+    app.kubernetes.io/component: cohort
+spec:
+  schedule: "0 2 * * *"
+  timezone: Etc/UTC
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  workflowSpec:
+    workflowTemplateRef:
+      name: blackduck-wintermute-cohort
+    arguments:
+      parameters:
+        - name: jira-mode
+          value: dry-run
+        - name: datadog-mode
+          value: dry-run
+        - name: confirm-apply
+          value: "false"
+        - name: retain-cohorts
+          value: "10"

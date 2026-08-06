@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+root="$(git rev-parse --show-toplevel)"
+
+if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "${VIRTUAL_ENV}/bin/ggshield" ]; then
+  scanner="${VIRTUAL_ENV}/bin/ggshield"
+elif [ -x "${root}/.venv/bin/ggshield" ]; then
+  scanner="${root}/.venv/bin/ggshield"
+elif command -v ggshield >/dev/null 2>&1; then
+  scanner="$(command -v ggshield)"
+else
+  echo "ggshield is required before committing." >&2
+  exit 1
+fi
+
+exec "${scanner}" secret scan pre-commit

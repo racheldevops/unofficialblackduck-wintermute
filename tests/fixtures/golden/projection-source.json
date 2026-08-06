@@ -1,0 +1,64 @@
+{
+  "project_version": {
+    "instance_url": "https://bd.example",
+    "project": "Service",
+    "version": "1.0",
+    "project_href": "https://bd.example/api/projects/service",
+    "version_href": "https://bd.example/api/projects/service/versions/1",
+    "phase": "RELEASED",
+    "updated": "2026-08-01T00:00:00Z"
+  },
+  "lineage_contexts": [
+    {
+      "parent": {
+        "instance_url": "https://bd.example",
+        "project": "Product A",
+        "version": "2.0",
+        "project_href": "https://bd.example/api/projects/product-a",
+        "version_href": "https://bd.example/api/projects/product-a/versions/2"
+      },
+      "detection_method": "api-href",
+      "bom_component_name": "Service",
+      "bom_component_version": "1.0"
+    },
+    {
+      "parent": {
+        "instance_url": "https://bd.example",
+        "project": "Product B",
+        "version": "3.0",
+        "project_href": "https://bd.example/api/projects/product-b",
+        "version_href": "https://bd.example/api/projects/product-b/versions/3"
+      },
+      "detection_method": "bom-component-name-version",
+      "bom_component_name": "Service",
+      "bom_component_version": "1.0"
+    }
+  ],
+  "finding": {
+    "component": "openssl",
+    "component_version": "3.0.1",
+    "component_href": "https://bd.example/api/components/openssl/versions/3",
+    "vulnerability": "CVE-2026-0001",
+    "vulnerability_href": "https://bd.example/vulnerabilities/CVE-2026-0001",
+    "severity": "CRITICAL",
+    "score_field": "overallScore",
+    "score": 9.8,
+    "cvss_vector": "CVSS:3.1/AV:N",
+    "exploit_available": true,
+    "exploitable": "True",
+    "reachable": true,
+    "reachability": "reachable",
+    "reachability_source": "field",
+    "policy_name": "Security Policy",
+    "policy_rule_href": "https://bd.example/policies/rule",
+    "entity": "Team A",
+    "attributes": {
+      "component_version_href": "https://bd.example/api/components/openssl/versions/3",
+      "bom_component_url": "https://bd.example/bom/openssl",
+      "component_origin_id": "origin-a",
+      "candidate_key": "candidate-key",
+      "candidate_external_id": "candidate-id",
+      "policy_matched": true
+    }
+  }
+}

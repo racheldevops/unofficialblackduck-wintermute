@@ -126,7 +126,7 @@ Black Duck authentication can be supplied through environment variables or comma
 Recommended environment variables:
 
     export BLACKDUCK_URL="https://blackduck.example.com"
-    export BLACKDUCK_API_TOKEN="your-token"
+    export BLACKDUCK_API_TOKEN=""
 
 Equivalent flags:
 
@@ -171,7 +171,7 @@ Create a Python run configuration with:
 Add these environment variables:
 
     BLACKDUCK_URL=https://blackduck.example.com
-    BLACKDUCK_API_TOKEN=your-token
+    BLACKDUCK_API_TOKEN=""
 
 Example test parameters:
 
@@ -546,7 +546,7 @@ The main CSV or JSON output remains separate.
 ## Common production-style run
 
     export BLACKDUCK_URL="https://blackduck.example.com"
-    export BLACKDUCK_API_TOKEN="your-token"
+    export BLACKDUCK_API_TOKEN=""
 
     blackduck-find-parents \
       --refresh-older-than-days 7 \
@@ -592,7 +592,7 @@ A scheduled process can set a dedicated output root:
 
     export WINTERMUTE_OUTPUT_DIR="/opt/blackduck/wintermute-output"
     export BLACKDUCK_URL="https://blackduck.example.com"
-    export BLACKDUCK_API_TOKEN="your-token"
+    export BLACKDUCK_API_TOKEN=""
 
     blackduck-find-parents \
       --refresh-older-than-days 7 \

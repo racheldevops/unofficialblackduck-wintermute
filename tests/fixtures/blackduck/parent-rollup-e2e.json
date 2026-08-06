@@ -1,0 +1,129 @@
+{
+  "base_url": "https://bd.example",
+  "responses": {
+    "POST /api/tokens/authenticate": {
+      "bearerToken": "x"
+    },
+    "GET /api/projects": {
+      "items": [
+        {
+          "name": "Product",
+          "_meta": {
+            "href": "https://bd.example/api/projects/11111111-1111-1111-1111-111111111111",
+            "links": [
+              {
+                "rel": "versions",
+                "href": "https://bd.example/api/projects/11111111-1111-1111-1111-111111111111/versions"
+              }
+            ]
+          }
+        },
+        {
+          "name": "Service",
+          "_meta": {
+            "href": "https://bd.example/api/projects/33333333-3333-3333-3333-333333333333",
+            "links": [
+              {
+                "rel": "versions",
+                "href": "https://bd.example/api/projects/33333333-3333-3333-3333-333333333333/versions"
+              }
+            ]
+          }
+        }
+      ],
+      "totalCount": 2
+    },
+    "GET /api/projects/11111111-1111-1111-1111-111111111111/versions": {
+      "items": [
+        {
+          "versionName": "1.0",
+          "phase": "RELEASED",
+          "_meta": {
+            "href": "https://bd.example/api/projects/11111111-1111-1111-1111-111111111111/versions/22222222-2222-2222-2222-222222222222"
+          }
+        }
+      ],
+      "totalCount": 1
+    },
+    "GET /api/projects/33333333-3333-3333-3333-333333333333/versions": {
+      "items": [
+        {
+          "versionName": "2.0",
+          "phase": "RELEASED",
+          "_meta": {
+            "href": "https://bd.example/api/projects/33333333-3333-3333-3333-333333333333/versions/44444444-4444-4444-4444-444444444444"
+          }
+        }
+      ],
+      "totalCount": 1
+    },
+    "GET /api/projects/11111111-1111-1111-1111-111111111111/versions/22222222-2222-2222-2222-222222222222/components": {
+      "items": [
+        {
+          "componentName": "Service",
+          "componentVersionName": "2.0",
+          "_meta": {
+            "links": [
+              {
+                "rel": "project-version",
+                "href": "https://bd.example/api/projects/33333333-3333-3333-3333-333333333333/versions/44444444-4444-4444-4444-444444444444"
+              }
+            ]
+          }
+        }
+      ],
+      "totalCount": 1
+    },
+    "GET /api/projects/33333333-3333-3333-3333-333333333333/versions/44444444-4444-4444-4444-444444444444/components": {
+      "items": [],
+      "totalCount": 0
+    },
+    "GET /api/projects/33333333-3333-3333-3333-333333333333/versions/44444444-4444-4444-4444-444444444444/vulnerable-bom-components": {
+      "items": [
+        {
+          "componentName": "openssl",
+          "componentVersionName": "3.0.1",
+          "componentVersionHref": "https://bd.example/api/components/55555555-5555-5555-5555-555555555555/versions/66666666-6666-6666-6666-666666666666",
+          "componentOriginId": "origin-openssl",
+          "_meta": {
+            "href": "https://bd.example/api/bom-components/openssl",
+            "links": [
+              {
+                "rel": "vulnerabilities",
+                "href": "https://bd.example/api/bom-components/openssl/vulnerabilities"
+              }
+            ]
+          }
+        }
+      ],
+      "totalCount": 1
+    },
+    "GET /api/bom-components/openssl/vulnerabilities": {
+      "items": [
+        {
+          "vulnerabilityName": "CVE-2026-0001",
+          "overallScore": 9.8,
+          "severity": "CRITICAL",
+          "cvssVector": "CVSS:3.1/AV:N",
+          "exploitAvailable": true,
+          "reachabilityStatus": "reachable",
+          "_meta": {
+            "href": "https://bd.example/api/vulnerabilities/CVE-2026-0001"
+          }
+        }
+      ],
+      "totalCount": 1
+    }
+  },
+  "expected": {
+    "targets": 1,
+    "relationships": 1,
+    "findings": 1,
+    "jira_rows": 1,
+    "datadog_rows": 1,
+    "parent_project": "Product",
+    "affected_project": "Service",
+    "component": "openssl",
+    "vulnerability": "CVE-2026-0001"
+  }
+}

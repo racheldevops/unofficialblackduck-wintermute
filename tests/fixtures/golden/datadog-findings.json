@@ -1,0 +1,32 @@
+[
+  {
+    "blackduck_url": "https://bd.example/vulnerabilities/CVE-2026-0001",
+    "bom_component_url": "https://bd.example/bom/openssl",
+    "candidate_external_id": "candidate-id",
+    "candidate_key": "candidate-key",
+    "component": "openssl",
+    "component_origin_id": "origin-a",
+    "component_version": "3.0.1",
+    "exploit_available": "true",
+    "exploitable": "True",
+    "finding_external_id": "094f44746a53d7f9bf1b297b618b66fa2c5b5038a53b4a6f4d7544d75d469648",
+    "finding_key": "Service|1.0|openssl|3.0.1|CVE-2026-0001",
+    "first_seen_source": "blackduck-policy-vuln-pull",
+    "policy_matched": "true",
+    "policy_name": "Security Policy",
+    "policy_rule_href": "https://bd.example/policies/rule",
+    "project": "Service",
+    "project_group_external_id": "d677190e0a9990e7d5fa9e4c1bbde44271fb8959c4acb6d43e02ed991128b4bf",
+    "project_group_key": "Service",
+    "project_href": "https://bd.example/api/projects/service",
+    "project_version": "1.0",
+    "project_version_href": "https://bd.example/api/projects/service/versions/1",
+    "reachability": "reachable",
+    "reachability_source": "field",
+    "reachable": "true",
+    "score": "9.8",
+    "score_field": "overallScore",
+    "severity": "CRITICAL",
+    "vulnerability": "CVE-2026-0001"
+  }
+]

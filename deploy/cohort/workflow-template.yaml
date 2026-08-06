@@ -1,0 +1,295 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: blackduck-wintermute-cohort
+  labels:
+    app.kubernetes.io/name: blackduck-wintermute
+    app.kubernetes.io/component: cohort
+spec:
+  entrypoint: cohort
+  serviceAccountName: blackduck-wintermute-cohort
+  imagePullSecrets:
+    - name: blackduck-wintermute-registry
+  arguments:
+    parameters:
+      - name: jira-mode
+        value: dry-run
+        enum:
+          - dry-run
+          - apply
+      - name: datadog-mode
+        value: dry-run
+        enum:
+          - dry-run
+          - apply
+      - name: confirm-apply
+        value: "false"
+        enum:
+          - "false"
+          - "true"
+      - name: retain-cohorts
+        value: "10"
+  volumes:
+    - name: cohort-data
+      persistentVolumeClaim:
+        claimName: blackduck-wintermute-cohorts
+    - name: source-data
+      persistentVolumeClaim:
+        claimName: blackduck-wintermute-source-data
+    - name: jira-data
+      persistentVolumeClaim:
+        claimName: blackduck-wintermute-jira-data
+    - name: datadog-data
+      persistentVolumeClaim:
+        claimName: blackduck-wintermute-datadog-data
+    - name: jira-config
+      configMap:
+        name: blackduck-wintermute-cohort-jira-config
+    - name: tmp
+      emptyDir:
+        sizeLimit: 1Gi
+  templates:
+    - name: cohort
+      dag:
+        failFast: false
+        tasks:
+          - name: validate-modes
+            template: validate-modes
+            arguments:
+              parameters:
+                - name: jira-mode
+                  value: "{{workflow.parameters.jira-mode}}"
+                - name: datadog-mode
+                  value: "{{workflow.parameters.datadog-mode}}"
+                - name: confirm-apply
+                  value: "{{workflow.parameters.confirm-apply}}"
+          - name: source
+            depends: validate-modes.Succeeded
+            template: source
+          - name: jira
+            depends: source.Succeeded
+            template: jira
+            arguments:
+              parameters:
+                - name: cohort-id
+                  value: "{{tasks.source.outputs.parameters.cohort-id}}"
+          - name: datadog
+            depends: >-
+              source.Succeeded &&
+              (jira.Succeeded || jira.Failed || jira.Errored)
+            template: datadog
+            arguments:
+              parameters:
+                - name: cohort-id
+                  value: "{{tasks.source.outputs.parameters.cohort-id}}"
+
+    - name: validate-modes
+      inputs:
+        parameters:
+          - name: jira-mode
+          - name: datadog-mode
+          - name: confirm-apply
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      script:
+        image: blackduck-wintermute-source
+        imagePullPolicy: IfNotPresent
+        command:
+          - python
+        source: |
+          import sys
+
+          jira_mode = "{{inputs.parameters.jira-mode}}"
+          datadog_mode = "{{inputs.parameters.datadog-mode}}"
+          confirmed = "{{inputs.parameters.confirm-apply}}" == "true"
+
+          valid_modes = {"dry-run", "apply"}
+
+          if jira_mode not in valid_modes:
+              raise SystemExit(f"Invalid Jira mode: {jira_mode}")
+
+          if datadog_mode not in valid_modes:
+              raise SystemExit(f"Invalid Datadog mode: {datadog_mode}")
+
+          if "apply" in {jira_mode, datadog_mode} and not confirmed:
+              raise SystemExit(
+                  "Apply mode requires confirm-apply=true"
+              )
+
+          print("Cohort destination modes validated.")
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+
+    - name: source
+      outputs:
+        parameters:
+          - name: cohort-id
+            valueFrom:
+              path: /tmp/cohort-id
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      container:
+        image: blackduck-wintermute-source
+        imagePullPolicy: IfNotPresent
+        args:
+          - --scope
+          - parent-rollup
+          - --strict
+          - --resolve-bom-names
+          - --workers
+          - "8"
+          - --component-workers
+          - "2"
+          - --page-limit
+          - "500"
+          - --cohort-root
+          - /var/lib/blackduck-wintermute/cohorts
+          - --cohort-id-out
+          - /tmp/cohort-id
+          - --retain-cohorts
+          - "{{workflow.parameters.retain-cohorts}}"
+        envFrom:
+          - secretRef:
+              name: blackduck-wintermute-blackduck-credentials
+        env:
+          - name: WINTERMUTE_OUTPUT_DIR
+            value: /var/lib/blackduck-wintermute/source
+          - name: TMPDIR
+            value: /tmp
+        resources:
+          requests:
+            cpu: "1"
+            memory: 1Gi
+          limits:
+            cpu: "4"
+            memory: 4Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+        volumeMounts:
+          - name: cohort-data
+            mountPath: /var/lib/blackduck-wintermute/cohorts
+          - name: source-data
+            mountPath: /var/lib/blackduck-wintermute/source
+          - name: tmp
+            mountPath: /tmp
+
+    - name: jira
+      inputs:
+        parameters:
+          - name: cohort-id
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      container:
+        image: blackduck-wintermute-jira
+        imagePullPolicy: IfNotPresent
+        args:
+          - --cohort
+          - "/var/lib/blackduck-wintermute/cohorts/{{inputs.parameters.cohort-id}}"
+          - "--{{workflow.parameters.jira-mode}}"
+          - --strict
+          - --config
+          - /etc/blackduck-wintermute/jira-rollup-config.json
+        envFrom:
+          - secretRef:
+              name: blackduck-wintermute-jira-credentials
+        env:
+          - name: WINTERMUTE_OUTPUT_DIR
+            value: /var/lib/blackduck-wintermute
+          - name: TMPDIR
+            value: /tmp
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+        volumeMounts:
+          - name: cohort-data
+            mountPath: /var/lib/blackduck-wintermute/cohorts
+            readOnly: true
+          - name: jira-data
+            mountPath: /var/lib/blackduck-wintermute/destinations/jira
+          - name: jira-config
+            mountPath: /etc/blackduck-wintermute/jira-rollup-config.json
+            subPath: jira-rollup-config.json
+            readOnly: true
+          - name: tmp
+            mountPath: /tmp
+
+    - name: datadog
+      inputs:
+        parameters:
+          - name: cohort-id
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      container:
+        image: blackduck-wintermute-datadog
+        imagePullPolicy: IfNotPresent
+        args:
+          - --cohort
+          - "/var/lib/blackduck-wintermute/cohorts/{{inputs.parameters.cohort-id}}"
+          - "--{{workflow.parameters.datadog-mode}}"
+          - --strict
+        envFrom:
+          - secretRef:
+              name: blackduck-wintermute-datadog-credentials
+        env:
+          - name: WINTERMUTE_OUTPUT_DIR
+            value: /var/lib/blackduck-wintermute
+          - name: TMPDIR
+            value: /tmp
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+        volumeMounts:
+          - name: cohort-data
+            mountPath: /var/lib/blackduck-wintermute/cohorts
+            readOnly: true
+          - name: datadog-data
+            mountPath: /var/lib/blackduck-wintermute/destinations/datadog
+          - name: tmp
+            mountPath: /tmp

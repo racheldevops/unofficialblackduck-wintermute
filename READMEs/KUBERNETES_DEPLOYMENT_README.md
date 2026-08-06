@@ -349,10 +349,10 @@ Create a Jira and Black Duck credential secret:
       blackduck-wintermute-credentials \
       --namespace blackduck-wintermute \
       --from-literal BLACKDUCK_URL=https://blackduck.example.com \
-      --from-literal BLACKDUCK_API_TOKEN=REPLACE_ME \
+      --from-literal BLACKDUCK_API_TOKEN="" \
       --from-literal JIRA_URL=https://jira.example.com \
       --from-literal JIRA_USER=REPLACE_ME \
-      --from-literal JIRA_API_TOKEN=REPLACE_ME
+      --from-literal JIRA_API_TOKEN=""
 
 For Jira bearer authentication, use JIRA_PAT and configure auth_mode as bearer.
 

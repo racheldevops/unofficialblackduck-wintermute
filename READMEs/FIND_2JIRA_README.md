@@ -66,13 +66,13 @@ Use environment variables for Jira credentials.
 
 ```bash
 export JIRA_USER="user@example.com"
-export JIRA_API_TOKEN="..."
+export JIRA_API_TOKEN=""
 ```
 
 ### Bearer / PAT auth
 
 ```bash
-export JIRA_PAT="..."
+export JIRA_PAT=""
 ```
 
 Set this in the config file when using `JIRA_PAT`:

@@ -1,0 +1,17 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: blackduck-wintermute-cohort
+spec:
+  suspend: true
+  workflowSpec:
+    arguments:
+      parameters:
+        - name: jira-mode
+          value: apply
+        - name: datadog-mode
+          value: apply
+        - name: confirm-apply
+          value: "true"
+        - name: retain-cohorts
+          value: "10"
