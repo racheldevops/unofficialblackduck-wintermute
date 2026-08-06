@@ -52,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install -e . "pytest>=8,<9"
-          python -m compileall -q src/harness
+          python -m compileall -q src/wintermute
           python -m pytest -q
 
       - name: Set up Docker Buildx

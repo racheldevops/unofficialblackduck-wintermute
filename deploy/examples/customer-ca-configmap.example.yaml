@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: blackduck-harness-ca
+  name: blackduck-wintermute-ca
 data:
   customer-ca.pem: |
     REPLACE_WITH_CUSTOMER_CA_BUNDLE

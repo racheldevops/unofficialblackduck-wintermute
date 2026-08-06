@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from harness.jira import findings_to_jira as publisher
+from wintermute.jira import findings_to_jira as publisher
 
 
 def config_with_project() -> dict[str, Any]:

@@ -10,7 +10,7 @@ The planner does not call Jira and does not call Black Duck.
 
 The project is organized into two Python package areas:
 
-    src/harness/
+    src/wintermute/
     ├── jira/
     │   ├── config/
     │   │   └── jira-rollup-config.json
@@ -26,13 +26,13 @@ The project is organized into two Python package areas:
 
 Jira workflow outputs are written under:
 
-    .harness/jira/
+    .wintermute/jira/
 
 Datadog workflow outputs are written under:
 
-    .harness/datadog/
+    .wintermute/datadog/
 
-The output root can be changed with the HARNESS_OUTPUT_DIR environment variable.
+The output root can be changed with the WINTERMUTE_OUTPUT_DIR environment variable.
 
 ## Running the modules
 
@@ -46,7 +46,7 @@ Installed hierarchy planner command:
 
 Equivalent Python module command:
 
-    python -m harness.jira.findings_hierarchy_plan
+    python -m wintermute.jira.findings_hierarchy_plan
 
 Installed Jira publisher command:
 
@@ -54,17 +54,17 @@ Installed Jira publisher command:
 
 Equivalent Python module command:
 
-    python -m harness.jira.findings_to_jira
+    python -m wintermute.jira.findings_to_jira
 
 For IntelliJ, use Module name as the run target and select the project virtual environment.
 
 Hierarchy planner module name:
 
-    harness.jira.findings_hierarchy_plan
+    wintermute.jira.findings_hierarchy_plan
 
 Jira publisher module name:
 
-    harness.jira.findings_to_jira
+    wintermute.jira.findings_to_jira
 
 Working directory:
 
@@ -81,22 +81,22 @@ An editable install means normal Python source changes are immediately available
 
 The current Jira pipeline is:
 
-    .harness/jira/parent_projects.csv
+    .wintermute/jira/parent_projects.csv
         |
         v
-    harness.jira.subp_vuln_rollup
+    wintermute.jira.subp_vuln_rollup
         |
         v
-    .harness/jira/findings.csv
+    .wintermute/jira/findings.csv
         |
         v
-    harness.jira.findings_hierarchy_plan
+    wintermute.jira.findings_hierarchy_plan
         |
         v
-    .harness/jira/jira-hierarchy-plan.json
+    .wintermute/jira/jira-hierarchy-plan.json
         |
         v
-    harness.jira.findings_to_jira
+    wintermute.jira.findings_to_jira
         |
         v
     Jira Epics, Tasks, fields, and relationships
@@ -105,16 +105,16 @@ The current Jira pipeline is:
 
 | Purpose | Default path |
 |---|---|
-| Parent and child relationships | .harness/jira/parent_projects.csv |
-| Rollup findings | .harness/jira/findings.csv |
-| Hierarchy plan | .harness/jira/jira-hierarchy-plan.json |
-| Hierarchy summary | .harness/jira/jira-hierarchy-summary.csv |
-| Flattened hierarchy nodes | .harness/jira/jira-hierarchy-nodes.csv |
-| Jira publish plan | .harness/jira/jira-rollup-plan.json |
-| Jira publish results | .harness/jira/jira-rollup-results.csv |
-| Jira publisher state | .harness/jira/state/jira-rollup-state.json |
-| Parent relationship cache | .harness/jira/cache/parent_projects_cache.json |
-| Vulnerability rollup cache | .harness/jira/cache/subp_vuln_rollup_cache.json |
+| Parent and child relationships | .wintermute/jira/parent_projects.csv |
+| Rollup findings | .wintermute/jira/findings.csv |
+| Hierarchy plan | .wintermute/jira/jira-hierarchy-plan.json |
+| Hierarchy summary | .wintermute/jira/jira-hierarchy-summary.csv |
+| Flattened hierarchy nodes | .wintermute/jira/jira-hierarchy-nodes.csv |
+| Jira publish plan | .wintermute/jira/jira-rollup-plan.json |
+| Jira publish results | .wintermute/jira/jira-rollup-results.csv |
+| Jira publisher state | .wintermute/jira/state/jira-rollup-state.json |
+| Parent relationship cache | .wintermute/jira/cache/parent_projects_cache.json |
+| Vulnerability rollup cache | .wintermute/jira/cache/subp_vuln_rollup_cache.json |
 
 Old files in the repository root are no longer the default runtime inputs or outputs.
 
@@ -172,7 +172,7 @@ The parent project and parent version remain available for traceability, descrip
 
 The Jira publisher renders Task titles using the hierarchy story summary template in:
 
-    src/harness/jira/config/jira-rollup-config.json
+    src/wintermute/jira/config/jira-rollup-config.json
 
 The default template is:
 
@@ -312,14 +312,14 @@ Existing Jira issues are skipped by default.
 To synchronize configured managed fields such as Entity, Project Name, Project Version, CVSS Vector, and CVSS Score:
 
     blackduck-findings-to-jira \
-      --hierarchy-plan .harness/jira/jira-hierarchy-plan.json \
+      --hierarchy-plan .wintermute/jira/jira-hierarchy-plan.json \
       --sync-existing-fields \
       --dry-run
 
 To apply the updates:
 
     blackduck-findings-to-jira \
-      --hierarchy-plan .harness/jira/jira-hierarchy-plan.json \
+      --hierarchy-plan .wintermute/jira/jira-hierarchy-plan.json \
       --sync-existing-fields \
       --apply
 
@@ -518,23 +518,23 @@ The default command uses the default findings and output paths:
 
 Equivalent module command:
 
-    python -m harness.jira.findings_hierarchy_plan
+    python -m wintermute.jira.findings_hierarchy_plan
 
 Explicit command:
 
     blackduck-hierarchy-plan \
-      --findings .harness/jira/findings.csv \
+      --findings .wintermute/jira/findings.csv \
       --hierarchy-mode vulnerability-project \
-      --plan-out .harness/jira/jira-hierarchy-plan.json \
-      --summary-out .harness/jira/jira-hierarchy-summary.csv \
-      --nodes-out .harness/jira/jira-hierarchy-nodes.csv
+      --plan-out .wintermute/jira/jira-hierarchy-plan.json \
+      --summary-out .wintermute/jira/jira-hierarchy-summary.csv \
+      --nodes-out .wintermute/jira/jira-hierarchy-nodes.csv
 
 ## Focused hierarchy test
 
 Example focused run:
 
     blackduck-hierarchy-plan \
-      --findings .harness/jira/findings.csv \
+      --findings .wintermute/jira/findings.csv \
       --only-parent-project "cc-goat" \
       --only-parent-version "v2" \
       --only-subproject "juicy_cam.juiced" \
@@ -552,7 +552,7 @@ Expected shape:
       --limit 25 \
       --debug
 
-This writes the normal files under .harness/jira without contacting Jira or Black Duck.
+This writes the normal files under .wintermute/jira without contacting Jira or Black Duck.
 
 ## Targeting filters
 
@@ -574,9 +574,9 @@ The project-centered legacy model remains available:
 
     blackduck-hierarchy-plan \
       --hierarchy-mode project-subproject-vulnerability \
-      --plan-out .harness/jira/jira-hierarchy-plan-legacy.json \
-      --summary-out .harness/jira/jira-hierarchy-summary-legacy.csv \
-      --nodes-out .harness/jira/jira-hierarchy-nodes-legacy.csv
+      --plan-out .wintermute/jira/jira-hierarchy-plan-legacy.json \
+      --summary-out .wintermute/jira/jira-hierarchy-summary-legacy.csv \
+      --nodes-out .wintermute/jira/jira-hierarchy-nodes-legacy.csv
 
 Legacy shape:
 
@@ -591,15 +591,15 @@ Legacy deterministic IDs remain based on parent, child, and rollup identity.
 Run the publisher against the hierarchy plan:
 
     blackduck-findings-to-jira \
-      --hierarchy-plan .harness/jira/jira-hierarchy-plan.json \
-      --config src/harness/jira/config/jira-rollup-config.json \
+      --hierarchy-plan .wintermute/jira/jira-hierarchy-plan.json \
+      --config src/wintermute/jira/config/jira-rollup-config.json \
       --dry-run \
       --debug
 
 Equivalent module command:
 
-    python -m harness.jira.findings_to_jira \
-      --hierarchy-plan .harness/jira/jira-hierarchy-plan.json \
+    python -m wintermute.jira.findings_to_jira \
+      --hierarchy-plan .wintermute/jira/jira-hierarchy-plan.json \
       --dry-run \
       --debug
 
@@ -620,13 +620,13 @@ No Jira issues, field updates, or links are applied in dry-run mode.
 After validating the dry-run output:
 
     blackduck-findings-to-jira \
-      --hierarchy-plan .harness/jira/jira-hierarchy-plan.json \
+      --hierarchy-plan .wintermute/jira/jira-hierarchy-plan.json \
       --apply
 
 To update managed fields on existing Jira issues:
 
     blackduck-findings-to-jira \
-      --hierarchy-plan .harness/jira/jira-hierarchy-plan.json \
+      --hierarchy-plan .wintermute/jira/jira-hierarchy-plan.json \
       --sync-existing-fields \
       --apply
 

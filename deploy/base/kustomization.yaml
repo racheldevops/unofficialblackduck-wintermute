@@ -6,7 +6,7 @@ resources:
   - cronjob.yaml
 
 configMapGenerator:
-  - name: blackduck-harness-jira-config
+  - name: blackduck-wintermute-jira-config
     files:
       - jira-rollup-config.json
 

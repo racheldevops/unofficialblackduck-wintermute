@@ -17,7 +17,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from harness.paths import datadog_output_path
+from wintermute.paths import datadog_output_path
 
 
 STATE_SCHEMA_VERSION = 1

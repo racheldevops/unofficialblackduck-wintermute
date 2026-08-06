@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 from urllib.parse import urlparse, urlunparse
 
-from harness.paths import ensure_parent_dir, jira_output_path
+from wintermute.paths import ensure_parent_dir, jira_output_path
 
 
 SCHEMA_VERSION = 3

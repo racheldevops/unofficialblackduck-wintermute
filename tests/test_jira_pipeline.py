@@ -3,7 +3,7 @@ import argparse
 import json
 from pathlib import Path
 import pytest
-from harness.jira import pipeline
+from wintermute.jira import pipeline
 
 def test_pipeline_lock_blocks_concurrent_run(tmp_path: Path) -> None:
     lock_path = tmp_path / 'pipeline.lock'
@@ -22,7 +22,7 @@ def test_default_mode_is_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
     assert args.strict is True
 
 def test_pipeline_promotes_successful_outputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv('HARNESS_OUTPUT_DIR', str(tmp_path))
+    monkeypatch.setenv('WINTERMUTE_OUTPUT_DIR', str(tmp_path))
     monkeypatch.setenv('BLACKDUCK_URL', 'https://example.invalid')
     monkeypatch.setenv('BLACKDUCK_API_TOKEN', 'not-used')
     config_path = tmp_path / 'jira-config.json'

@@ -18,12 +18,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
-from harness.concurrency import (
+from wintermute.concurrency import (
     MAX_IO_WORKERS,
     bounded_worker_count,
     ordered_parallel_map,
 )
-from harness.paths import datadog_output_path, ensure_parent_dir
+from wintermute.paths import datadog_output_path, ensure_parent_dir
 
 
 SCHEMA_VERSION = 1

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from harness.datadog import findings_to_datadog as datadog
+from wintermute.datadog import findings_to_datadog as datadog
 
 
 def finding(**overrides: str) -> dict[str, str]:

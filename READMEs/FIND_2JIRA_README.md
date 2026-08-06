@@ -102,7 +102,7 @@ Apply targeting filters when generating `jira-hierarchy-plan.json`. Then publish
 ```bash
 blackduck-findings-to-jira \
   --hierarchy-plan jira-hierarchy-plan.json \
-  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
+  --config src/unofficialblackduck-wintermute/config/jira-rollup-config.json \
   --state jira-hierarchy-publish-test-state.json \
   --results-out jira-hierarchy-publish-test-results.csv \
   --plan-out jira-hierarchy-publish-test-plan.json \
@@ -113,9 +113,9 @@ blackduck-findings-to-jira \
 Direct script run:
 
 ```bash
-python src/unofficialblackduck-harness/findings_to_jira.py \
+python src/unofficialblackduck-wintermute/findings_to_jira.py \
   --hierarchy-plan jira-hierarchy-plan.json \
-  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
+  --config src/unofficialblackduck-wintermute/config/jira-rollup-config.json \
   --state jira-hierarchy-publish-test-state.json \
   --results-out jira-hierarchy-publish-test-results.csv \
   --plan-out jira-hierarchy-publish-test-plan.json \
@@ -134,7 +134,7 @@ Creates Jira issues and configured relationships.
 ```bash
 blackduck-findings-to-jira \
   --hierarchy-plan jira-hierarchy-plan.json \
-  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
+  --config src/unofficialblackduck-wintermute/config/jira-rollup-config.json \
   --state jira-rollup-state.json \
   --results-out jira-hierarchy-publish-results.csv \
   --plan-out jira-hierarchy-publish-plan.json \
@@ -171,7 +171,7 @@ Then run Jira dry run without repeating the filters:
 ```bash
 blackduck-findings-to-jira \
   --hierarchy-plan jira-hierarchy-plan.json \
-  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
+  --config src/unofficialblackduck-wintermute/config/jira-rollup-config.json \
   --state jira-hierarchy-publish-test-state.json \
   --results-out jira-hierarchy-publish-test-results.csv \
   --plan-out jira-hierarchy-publish-test-plan.json \
@@ -298,7 +298,7 @@ Flat mode creates one Jira issue per unique rollup finding from `findings.csv`. 
 ```bash
 blackduck-findings-to-jira \
   --findings findings.csv \
-  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
+  --config src/unofficialblackduck-wintermute/config/jira-rollup-config.json \
   --state jira-rollup-state.json \
   --results-out jira-rollup-results.csv \
   --plan-out jira-rollup-plan.json
@@ -309,7 +309,7 @@ blackduck-findings-to-jira \
 ```bash
 blackduck-findings-to-jira \
   --findings findings.csv \
-  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
+  --config src/unofficialblackduck-wintermute/config/jira-rollup-config.json \
   --state jira-rollup-state.json \
   --results-out jira-rollup-results.csv \
   --plan-out jira-rollup-plan.json \

@@ -131,7 +131,7 @@ def sample_cronjob() -> dict:
                                     "args": ["--apply"],
                                     "volumeMounts": [
                                         {
-                                            "name": "harness-data",
+                                            "name": "wintermute-data",
                                             "mountPath": "/data",
                                         }
                                     ],
@@ -139,7 +139,7 @@ def sample_cronjob() -> dict:
                             ],
                             "volumes": [
                                 {
-                                    "name": "harness-data",
+                                    "name": "wintermute-data",
                                     "persistentVolumeClaim": {
                                         "claimName": "production-data"
                                     },
@@ -161,7 +161,7 @@ def test_build_job_manifest_replaces_production_pvc_with_emptydir() -> None:
         namespace="benchmark",
         job_name="benchmark-job",
         container_name="jira-pipeline",
-        data_volume_name="harness-data",
+        data_volume_name="wintermute-data",
         storage_mode="emptydir",
         pvc_claim_name="",
         pipeline_arguments=["--dry-run", "--workers", "4"],
@@ -178,7 +178,7 @@ def test_build_job_manifest_replaces_production_pvc_with_emptydir() -> None:
     assert job_spec["backoffLimit"] == 0
     assert job_spec["activeDeadlineSeconds"] == 600
     assert container["args"] == ["--dry-run", "--workers", "4"]
-    assert volume["name"] == "harness-data"
+    assert volume["name"] == "wintermute-data"
     assert "emptyDir" in volume
     assert "persistentVolumeClaim" not in volume
     assert (
@@ -194,7 +194,7 @@ def test_build_job_manifest_uses_isolated_benchmark_pvc() -> None:
         namespace="benchmark",
         job_name="benchmark-job",
         container_name="jira-pipeline",
-        data_volume_name="harness-data",
+        data_volume_name="wintermute-data",
         storage_mode="pvc",
         pvc_claim_name="benchmark-data",
         pipeline_arguments=["--dry-run"],
@@ -204,7 +204,7 @@ def test_build_job_manifest_uses_isolated_benchmark_pvc() -> None:
     volume = manifest["spec"]["template"]["spec"]["volumes"][0]
 
     assert volume == {
-        "name": "harness-data",
+        "name": "wintermute-data",
         "persistentVolumeClaim": {
             "claimName": "benchmark-data"
         },

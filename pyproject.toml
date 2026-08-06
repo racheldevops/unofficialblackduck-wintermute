@@ -3,7 +3,7 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "unofficialblackduck-harness"
+name = "unofficialblackduck-wintermute"
 version = "0.2.0"
 description = "Utility scripts for Black Duck vulnerability rollups, Jira, and Datadog workflows."
 readme = "README.md"
@@ -15,18 +15,18 @@ authors = [
 dependencies = []
 
 [project.scripts]
-blackduck-find-parents = "harness.jira.find_parent_projects:main"
-blackduck-vuln-rollup = "harness.jira.subp_vuln_rollup:main"
-blackduck-hierarchy-plan = "harness.jira.findings_hierarchy_plan:main"
-blackduck-findings-to-jira = "harness.jira.findings_to_jira:main"
-blackduck-jira-pipeline = "harness.jira.pipeline:main"
-blackduck-policy-vuln-find = "harness.datadog.policy_vuln_find:main"
-blackduck-policy-vuln-pull = "harness.datadog.policy_vuln_pull:main"
-blackduck-findings-to-datadog = "harness.datadog.findings_to_datadog:main"
+blackduck-find-parents = "wintermute.jira.find_parent_projects:main"
+blackduck-vuln-rollup = "wintermute.jira.subp_vuln_rollup:main"
+blackduck-hierarchy-plan = "wintermute.jira.findings_hierarchy_plan:main"
+blackduck-findings-to-jira = "wintermute.jira.findings_to_jira:main"
+blackduck-jira-pipeline = "wintermute.jira.pipeline:main"
+blackduck-policy-vuln-find = "wintermute.datadog.policy_vuln_find:main"
+blackduck-policy-vuln-pull = "wintermute.datadog.policy_vuln_pull:main"
+blackduck-findings-to-datadog = "wintermute.datadog.findings_to_datadog:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["harness*"]
+include = ["wintermute*"]
 
 [tool.setuptools.package-data]
-"harness.jira" = ["config/*.json"]
+"wintermute.jira" = ["config/*.json"]

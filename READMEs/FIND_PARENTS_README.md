@@ -10,7 +10,7 @@ This module does not collect vulnerabilities and does not call Jira.
 
 Python module:
 
-    harness.jira.find_parent_projects
+    wintermute.jira.find_parent_projects
 
 Installed command:
 
@@ -18,19 +18,19 @@ Installed command:
 
 Equivalent module command:
 
-    python -m harness.jira.find_parent_projects
+    python -m wintermute.jira.find_parent_projects
 
 The installed command and Python module command execute the same source code.
 
 Source location:
 
-    src/harness/jira/find_parent_projects.py
+    src/wintermute/jira/find_parent_projects.py
 
 ## Package layout
 
-The parent discovery workflow belongs to the Jira side of the harness:
+The parent discovery workflow belongs to the Jira side of the wintermute:
 
-    src/harness/
+    src/wintermute/
     ├── jira/
     │   ├── find_parent_projects.py
     │   ├── subp_vuln_rollup.py
@@ -43,21 +43,21 @@ The parent discovery workflow belongs to the Jira side of the harness:
 
 Default Jira workflow outputs are stored under:
 
-    .harness/jira/
+    .wintermute/jira/
 
 Caches are stored under:
 
-    .harness/jira/cache/
+    .wintermute/jira/cache/
 
-The output root can be changed with the HARNESS_OUTPUT_DIR environment variable.
+The output root can be changed with the WINTERMUTE_OUTPUT_DIR environment variable.
 
 Example:
 
-    export HARNESS_OUTPUT_DIR="/opt/blackduck/harness-output"
+    export WINTERMUTE_OUTPUT_DIR="/opt/blackduck/wintermute-output"
 
 With that setting, the default parent relationship file becomes:
 
-    /opt/blackduck/harness-output/jira/parent_projects.csv
+    /opt/blackduck/wintermute-output/jira/parent_projects.csv
 
 ## Workflow position
 
@@ -66,25 +66,25 @@ The current Jira workflow is:
     Black Duck projects and versions
         |
         v
-    harness.jira.find_parent_projects
+    wintermute.jira.find_parent_projects
         |
         v
-    .harness/jira/parent_projects.csv
+    .wintermute/jira/parent_projects.csv
         |
         v
-    harness.jira.subp_vuln_rollup
+    wintermute.jira.subp_vuln_rollup
         |
         v
-    .harness/jira/findings.csv
+    .wintermute/jira/findings.csv
         |
         v
-    harness.jira.findings_hierarchy_plan
+    wintermute.jira.findings_hierarchy_plan
         |
         v
-    .harness/jira/jira-hierarchy-plan.json
+    .wintermute/jira/jira-hierarchy-plan.json
         |
         v
-    harness.jira.findings_to_jira
+    wintermute.jira.findings_to_jira
         |
         v
     Jira Epics and Tasks
@@ -162,7 +162,7 @@ Create a Python run configuration with:
 | Setting | Value |
 |---|---|
 | Run target | Module name |
-| Module name | harness.jira.find_parent_projects |
+| Module name | wintermute.jira.find_parent_projects |
 | Python interpreter | Project .venv interpreter |
 | Working directory | $PROJECT_DIR$ |
 | Add content roots to PYTHONPATH | Enabled |
@@ -185,13 +185,13 @@ The default installed command is:
 
 Equivalent module command:
 
-    python -m harness.jira.find_parent_projects
+    python -m wintermute.jira.find_parent_projects
 
 The default run writes:
 
-    .harness/jira/parent_projects.csv
-    .harness/jira/parent_project_changes.csv
-    .harness/jira/cache/parent_projects_cache.json
+    .wintermute/jira/parent_projects.csv
+    .wintermute/jira/parent_project_changes.csv
+    .wintermute/jira/cache/parent_projects_cache.json
 
 Default scan behavior includes:
 
@@ -204,9 +204,9 @@ Default scan behavior includes:
 ## Explicit default run
 
     blackduck-find-parents \
-      --out .harness/jira/parent_projects.csv \
-      --changes-out .harness/jira/parent_project_changes.csv \
-      --cache .harness/jira/cache/parent_projects_cache.json \
+      --out .wintermute/jira/parent_projects.csv \
+      --changes-out .wintermute/jira/parent_project_changes.csv \
+      --cache .wintermute/jira/cache/parent_projects_cache.json \
       --refresh-older-than-days 7 \
       --timeout 60 \
       --retries 2 \
@@ -214,10 +214,10 @@ Default scan behavior includes:
 
 Equivalent module command:
 
-    python -m harness.jira.find_parent_projects \
-      --out .harness/jira/parent_projects.csv \
-      --changes-out .harness/jira/parent_project_changes.csv \
-      --cache .harness/jira/cache/parent_projects_cache.json \
+    python -m wintermute.jira.find_parent_projects \
+      --out .wintermute/jira/parent_projects.csv \
+      --changes-out .wintermute/jira/parent_project_changes.csv \
+      --cache .wintermute/jira/cache/parent_projects_cache.json \
       --refresh-older-than-days 7 \
       --timeout 60 \
       --retries 2 \
@@ -302,16 +302,16 @@ Example:
       --max-projects 10 \
       --debug
 
-This still uses the normal output and cache paths under .harness/jira.
+This still uses the normal output and cache paths under .wintermute/jira.
 
 To isolate a test run from the normal files:
 
     blackduck-find-parents \
       --project-name-contains "goat" \
       --max-projects 10 \
-      --out .harness/jira/tests/parent_projects-test.csv \
-      --changes-out .harness/jira/tests/parent_project_changes-test.csv \
-      --cache .harness/jira/tests/parent_projects_cache-test.json \
+      --out .wintermute/jira/tests/parent_projects-test.csv \
+      --changes-out .wintermute/jira/tests/parent_project_changes-test.csv \
+      --cache .wintermute/jira/tests/parent_projects_cache-test.json \
       --debug
 
 Parent directories for configured outputs are created automatically.
@@ -320,9 +320,9 @@ Parent directories for configured outputs are created automatically.
 
 | Flag | Default | Description |
 |---|---|---|
-| --out | .harness/jira/parent_projects.csv | Main relationship output |
-| --changes-out | .harness/jira/parent_project_changes.csv | Added and removed relationship report |
-| --cache | .harness/jira/cache/parent_projects_cache.json | Incremental scan cache |
+| --out | .wintermute/jira/parent_projects.csv | Main relationship output |
+| --changes-out | .wintermute/jira/parent_project_changes.csv | Added and removed relationship report |
+| --cache | .wintermute/jira/cache/parent_projects_cache.json | Incremental scan cache |
 | --json | Off | Write the main relationship output as JSON |
 | --out - | Not default | Write the main relationship output to standard output |
 
@@ -334,7 +334,7 @@ Example:
 
     blackduck-find-parents \
       --json \
-      --out .harness/jira/parent_projects.json
+      --out .wintermute/jira/parent_projects.json
 
 ## Main relationship fields
 
@@ -400,7 +400,7 @@ Change types are:
 
 Example file:
 
-    .harness/jira/parent_project_changes.csv
+    .wintermute/jira/parent_project_changes.csv
 
 A relationship is added when it exists in the current scan but was not in the previous cached result.
 
@@ -414,7 +414,7 @@ Caching is enabled by default.
 
 Default cache:
 
-    .harness/jira/cache/parent_projects_cache.json
+    .wintermute/jira/cache/parent_projects_cache.json
 
 The cache stores results per parent project version.
 
@@ -557,9 +557,9 @@ The main CSV or JSON output remains separate.
 
 Outputs:
 
-    .harness/jira/parent_projects.csv
-    .harness/jira/parent_project_changes.csv
-    .harness/jira/cache/parent_projects_cache.json
+    .wintermute/jira/parent_projects.csv
+    .wintermute/jira/parent_project_changes.csv
+    .wintermute/jira/cache/parent_projects_cache.json
 
 ## Full rescan example
 
@@ -574,8 +574,8 @@ Outputs:
       --project-name-contains "VUMA" \
       --max-projects 5 \
       --no-cache \
-      --out .harness/jira/tests/vuma-parent-projects.csv \
-      --changes-out .harness/jira/tests/vuma-parent-changes.csv \
+      --out .wintermute/jira/tests/vuma-parent-projects.csv \
+      --changes-out .wintermute/jira/tests/vuma-parent-changes.csv \
       --debug
 
 ## BOM-name fallback example
@@ -590,7 +590,7 @@ Outputs:
 
 A scheduled process can set a dedicated output root:
 
-    export HARNESS_OUTPUT_DIR="/opt/blackduck/harness-output"
+    export WINTERMUTE_OUTPUT_DIR="/opt/blackduck/wintermute-output"
     export BLACKDUCK_URL="https://blackduck.example.com"
     export BLACKDUCK_API_TOKEN="your-token"
 
@@ -602,7 +602,7 @@ A scheduled process can set a dedicated output root:
 
 The resulting files are written under:
 
-    /opt/blackduck/harness-output/jira/
+    /opt/blackduck/wintermute-output/jira/
 
 ## Handoff to vulnerability rollup
 
@@ -615,12 +615,12 @@ Run parent discovery:
 Then run vulnerability rollup:
 
     blackduck-vuln-rollup \
-      --parents-csv .harness/jira/parent_projects.csv
+      --parents-csv .wintermute/jira/parent_projects.csv
 
 Equivalent module command:
 
-    python -m harness.jira.subp_vuln_rollup \
-      --parents-csv .harness/jira/parent_projects.csv
+    python -m wintermute.jira.subp_vuln_rollup \
+      --parents-csv .wintermute/jira/parent_projects.csv
 
 The vulnerability rollup:
 
@@ -629,7 +629,7 @@ The vulnerability rollup:
 - Reads matching vulnerabilities.
 - Retrieves CVSS data.
 - Attempts to retrieve the foo Entity project custom field.
-- Writes .harness/jira/findings.csv.
+- Writes .wintermute/jira/findings.csv.
 
 Parent discovery itself does not retrieve foo Entity. Entity belongs to the later vulnerability rollup stage because the affected child project is known there.
 
@@ -664,6 +664,6 @@ Use the legacy project-subproject-vulnerability hierarchy mode if the Jira hiera
 - It only discovers parent and child Black Duck project-version relationships.
 - API URL detection is preferred over BOM-name fallback.
 - Incremental cache reuse is enabled by default.
-- Generated output belongs under .harness/jira rather than the repository root.
+- Generated output belongs under .wintermute/jira rather than the repository root.
 - Installed commands and module execution use the same Python source.
 - Review BOM-name fallback relationships before relying on them in production.

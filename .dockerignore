@@ -1,6 +1,7 @@
 .venv
 .idea
 .harness
+.wintermute
 .codesight
 .git
 .github

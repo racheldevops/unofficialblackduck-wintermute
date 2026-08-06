@@ -21,4 +21,4 @@ spec:
                 - --rollup-workers
                 - "8"
                 - --config
-                - /etc/blackduck-harness/jira-rollup-config.json
+                - /etc/blackduck-wintermute/jira-rollup-config.json

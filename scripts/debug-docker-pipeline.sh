@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-config_path="$PWD/src/harness/jira/config/jira-rollup-config.json"
-volume_name="blackduck-harness-data"
-image_name="blackduck-harness:local"
+config_path="$PWD/src/wintermute/jira/config/jira-rollup-config.json"
+volume_name="blackduck-wintermute-data"
+image_name="blackduck-wintermute:local"
 
 required_variables=(
     BLACKDUCK_URL
@@ -180,7 +180,7 @@ docker run \
     --env JIRA_URL \
     --env JIRA_USER \
     --env JIRA_API_TOKEN \
-    --mount "type=bind,source=$config_path,target=/etc/blackduck-harness/jira-rollup-config.json,readonly" \
+    --mount "type=bind,source=$config_path,target=/etc/blackduck-wintermute/jira-rollup-config.json,readonly" \
     --entrypoint python \
     "$image_name" \
     -c '
@@ -228,7 +228,7 @@ for name in names:
             f"port={parsed.port!r}"
         )
 
-config_path = "/etc/blackduck-harness/jira-rollup-config.json"
+config_path = "/etc/blackduck-wintermute/jira-rollup-config.json"
 
 with open(config_path, encoding="utf-8") as input_file:
     config = json.load(input_file)
@@ -274,8 +274,8 @@ docker run \
     --env JIRA_URL \
     --env JIRA_USER \
     --env JIRA_API_TOKEN \
-    --mount "type=volume,source=$volume_name,target=/var/lib/blackduck-harness" \
-    --mount "type=bind,source=$config_path,target=/etc/blackduck-harness/jira-rollup-config.json,readonly" \
+    --mount "type=volume,source=$volume_name,target=/var/lib/blackduck-wintermute" \
+    --mount "type=bind,source=$config_path,target=/etc/blackduck-wintermute/jira-rollup-config.json,readonly" \
     "$image_name" \
     --dry-run \
     --strict \
@@ -291,7 +291,7 @@ docker run \
     --hierarchy-limit 50 \
     --refresh-existing-jira \
     --insecure \
-    --config /etc/blackduck-harness/jira-rollup-config.json \
+    --config /etc/blackduck-wintermute/jira-rollup-config.json \
     --debug
 
 pipeline_rc=$?

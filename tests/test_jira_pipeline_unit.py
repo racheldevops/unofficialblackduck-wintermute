@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from harness.jira import pipeline
+from wintermute.jira import pipeline
 
 
 def valid_pipeline_args(**overrides: Any) -> argparse.Namespace:

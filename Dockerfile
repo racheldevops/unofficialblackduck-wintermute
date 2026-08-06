@@ -18,30 +18,30 @@ FROM python:3.12.10-slim-bookworm AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    HARNESS_OUTPUT_DIR=/var/lib/blackduck-harness \
+    WINTERMUTE_OUTPUT_DIR=/var/lib/blackduck-wintermute \
     TMPDIR=/tmp
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid 10001 harness \
+    && groupadd --gid 10001 wintermute \
     && useradd \
         --uid 10001 \
         --gid 10001 \
         --no-create-home \
         --shell /usr/sbin/nologin \
-        harness \
+        wintermute \
     && install \
         --directory \
-        --owner harness \
-        --group harness \
+        --owner wintermute \
+        --group wintermute \
         --mode 0770 \
-        /var/lib/blackduck-harness \
+        /var/lib/blackduck-wintermute \
     && install \
         --directory \
-        --owner harness \
-        --group harness \
+        --owner wintermute \
+        --group wintermute \
         --mode 0755 \
         /app
 

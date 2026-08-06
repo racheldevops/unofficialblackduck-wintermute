@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from harness.jira import subp_vuln_rollup as rollup
+from wintermute.jira import subp_vuln_rollup as rollup
 
 
 PROJECT_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

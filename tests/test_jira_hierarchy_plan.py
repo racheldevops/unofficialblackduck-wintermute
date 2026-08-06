@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from harness.jira import findings_hierarchy_plan as hierarchy
+from wintermute.jira import findings_hierarchy_plan as hierarchy
 
 
 def write_findings(

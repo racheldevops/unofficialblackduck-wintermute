@@ -20,12 +20,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
-from harness.concurrency import (
+from wintermute.concurrency import (
     MAX_COMPONENT_WORKERS as SHARED_MAX_COMPONENT_WORKERS,
     MAX_IO_WORKERS,
     bounded_worker_count,
 )
-from harness.paths import datadog_output_path, ensure_parent_dir
+from wintermute.paths import datadog_output_path, ensure_parent_dir
 
 
 FIELDNAMES = [
@@ -2164,7 +2164,7 @@ def run_sharded(args: argparse.Namespace) -> int:
         command = [
             sys.executable,
             "-m",
-                "harness.datadog.policy_vuln_pull",
+                "wintermute.datadog.policy_vuln_pull",
             "--shard-worker",
             "--candidates",
             shard_candidate_paths[shard_index],

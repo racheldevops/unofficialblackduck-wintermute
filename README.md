@@ -1,6 +1,11 @@
-# unofficialblackduck-harness 
+# unofficialblackduck-wintermute (formerly 'harness')
 
 This repository contains an unofficial enhancement to Black Duck SCA parent/child project finding alert workflows. It can roll up vulnerabilities from affected Black Duck project versions, plan Jira remediation hierarchies, publish those hierarchies to Jira, and optionally send high-risk vulnerability events to Datadog for on-call incident response.
+```
+The Wintermute speed increase is approx. 65%
+Original:    1,050.5s
+Wintermute:    357.2s
+```
 
 ## setup
 
@@ -171,7 +176,7 @@ blackduck-hierarchy-plan \
 Edit:
 
 ```text
-src/unofficialblackduck-harness/config/jira-rollup-config.json
+src/unofficialblackduck-wintermute/config/jira-rollup-config.json
 ```
 
 Set at least the Jira URL/project details required for your environment.
@@ -245,7 +250,7 @@ Apply targeting filters at plan time when possible. The Jira dry run should norm
 ```bash
 blackduck-findings-to-jira \
   --hierarchy-plan jira-hierarchy-plan.json \
-  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
+  --config src/unofficialblackduck-wintermute/config/jira-rollup-config.json \
   --state jira-hierarchy-publish-test-state.json \
   --results-out jira-hierarchy-publish-test-results.csv \
   --plan-out jira-hierarchy-publish-test-plan.json \
@@ -269,7 +274,7 @@ This creates Jira issues/links.
 ```bash
 blackduck-findings-to-jira \
   --hierarchy-plan jira-hierarchy-plan.json \
-  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
+  --config src/unofficialblackduck-wintermute/config/jira-rollup-config.json \
   --state jira-rollup-state.json \
   --results-out jira-hierarchy-publish-results.csv \
   --plan-out jira-hierarchy-publish-plan.json \
@@ -285,7 +290,7 @@ Dry run:
 ```bash
 blackduck-findings-to-jira \
   --findings findings.csv \
-  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
+  --config src/unofficialblackduck-wintermute/config/jira-rollup-config.json \
   --state jira-rollup-state.json \
   --results-out jira-rollup-results.csv \
   --plan-out jira-rollup-plan.json
@@ -296,7 +301,7 @@ Apply:
 ```bash
 blackduck-findings-to-jira \
   --findings findings.csv \
-  --config src/unofficialblackduck-harness/config/jira-rollup-config.json \
+  --config src/unofficialblackduck-wintermute/config/jira-rollup-config.json \
   --state jira-rollup-state.json \
   --results-out jira-rollup-results.csv \
   --plan-out jira-rollup-plan.json \

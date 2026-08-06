@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from harness.jira import find_parent_projects as parents
+from wintermute.jira import find_parent_projects as parents
 
 
 PROJECT_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

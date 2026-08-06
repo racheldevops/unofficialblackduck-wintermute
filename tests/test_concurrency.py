@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from harness.concurrency import (
+from wintermute.concurrency import (
     SingleFlight,
     bounded_worker_count,
     ordered_parallel_map,

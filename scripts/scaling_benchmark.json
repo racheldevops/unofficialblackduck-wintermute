@@ -11,7 +11,7 @@
     "--strict",
     "--insecure"
   ],
-  "jira_config": "src/harness/jira/config/jira-rollup-config.json",
+  "jira_config": "src/wintermute/jira/config/jira-rollup-config.json",
   "environment_names": [
     "BLACKDUCK_URL",
     "BLACKDUCK_API_TOKEN",
@@ -26,13 +26,13 @@
     "command": [
       ".venv/bin/python",
       "-m",
-      "harness.jira.pipeline"
+      "wintermute.jira.pipeline"
     ]
   },
   "docker": {
     "enabled": false,
     "command": "docker",
-    "image": "blackduck-harness:local",
+    "image": "blackduck-wintermute:local",
     "read_only": true,
     "cpus": 2,
     "memory": "2g",
@@ -42,11 +42,11 @@
   "kubernetes": {
     "enabled": false,
     "kubectl": "kubectl",
-    "namespace": "blackduck-harness",
+    "namespace": "blackduck-wintermute",
     "cronjob": "blackduck-jira-pipeline",
     "container_name": "jira-pipeline",
-    "data_volume_name": "harness-data",
-    "config_path": "/etc/blackduck-harness/jira-rollup-config.json",
+    "data_volume_name": "wintermute-data",
+    "config_path": "/etc/blackduck-wintermute/jira-rollup-config.json",
     "storage_modes": [
       "emptydir",
       "pvc"

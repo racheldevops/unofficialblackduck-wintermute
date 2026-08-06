@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from harness.datadog import policy_vuln_pull as puller
+from wintermute.datadog import policy_vuln_pull as puller
 
 
 VERSION_HREF = (

@@ -90,8 +90,8 @@ jobs:
           fi
 
           if [[ -z "${KUBE_NAMESPACE}" ]]; then
-            echo "KUBE_NAMESPACE is empty; using blackduck-harness"
-            echo "KUBE_NAMESPACE=blackduck-harness" >> "${GITHUB_ENV}"
+            echo "KUBE_NAMESPACE is empty; using blackduck-wintermute"
+            echo "KUBE_NAMESPACE=blackduck-wintermute" >> "${GITHUB_ENV}"
           fi
 
           if [[ -z "${CRON_SCHEDULE}" ]]; then
@@ -121,7 +121,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          work="${RUNNER_TEMP}/blackduck-harness-deploy"
+          work="${RUNNER_TEMP}/blackduck-wintermute-deploy"
           rm -rf "${work}"
           cp -R deploy "${work}"
 
@@ -311,7 +311,7 @@ jobs:
           grep -q "concurrencyPolicy: Forbid" \
             "${GITHUB_WORKSPACE}/rendered-manifest.yaml"
 
-          grep -q "claimName: blackduck-harness-data" \
+          grep -q "claimName: blackduck-wintermute-data" \
             "${GITHUB_WORKSPACE}/rendered-manifest.yaml"
 
           echo "Rendered image:"
@@ -321,7 +321,7 @@ jobs:
       - name: Upload rendered manifest
         uses: actions/upload-artifact@v4
         with:
-          name: blackduck-harness-${{ inputs.environment }}-${{ inputs.image_tag }}
+          name: blackduck-wintermute-${{ inputs.environment }}-${{ inputs.image_tag }}
           path: rendered-manifest.yaml
           if-no-files-found: error
           retention-days: 30
@@ -357,11 +357,11 @@ jobs:
           kubectl get namespace "${KUBE_NAMESPACE}"
 
           kubectl get secret \
-            blackduck-harness-registry \
+            blackduck-wintermute-registry \
             --namespace "${KUBE_NAMESPACE}"
 
           kubectl get secret \
-            blackduck-harness-credentials \
+            blackduck-wintermute-credentials \
             --namespace "${KUBE_NAMESPACE}"
 
       - name: Show Kubernetes diff
@@ -395,7 +395,7 @@ jobs:
 
           kubectl apply \
             --server-side \
-            --field-manager blackduck-harness \
+            --field-manager blackduck-wintermute \
             --filename "${GITHUB_WORKSPACE}/rendered-manifest.yaml"
 
           kubectl get cronjob \
@@ -404,7 +404,7 @@ jobs:
             --output wide
 
           kubectl get pvc \
-            blackduck-harness-data \
+            blackduck-wintermute-data \
             --namespace "${KUBE_NAMESPACE}" \
             --output wide
 

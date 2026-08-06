@@ -1,6 +1,6 @@
 # Kubernetes deployment
 
-Deploy the Black Duck Harness Jira pipeline as a finite Kubernetes CronJob.
+Deploy the Black Duck Wintermute Jira pipeline as a finite Kubernetes CronJob.
 
 The container runs the Jira pipeline once and exits. Kubernetes controls the schedule, retries, concurrency, and Pod lifecycle.
 
@@ -47,7 +47,7 @@ The container entry point runs:
 
 The orchestration module is:
 
-    harness.jira.pipeline
+    wintermute.jira.pipeline
 
 Installed command:
 
@@ -60,7 +60,7 @@ Dry run is the default.
 Build locally:
 
     docker build \
-      --tag blackduck-harness:local \
+      --tag blackduck-wintermute:local \
       --file Dockerfile \
       .
 
@@ -68,7 +68,7 @@ Show pipeline help:
 
     docker run \
       --rm \
-      blackduck-harness:local \
+      blackduck-wintermute:local \
       --help
 
 The image:
@@ -88,15 +88,15 @@ Kubernetes CronJob Pods do not preserve their own writable filesystem after comp
 
 The deployment creates a PersistentVolumeClaim named:
 
-    blackduck-harness-data
+    blackduck-wintermute-data
 
 It is mounted at:
 
-    /var/lib/blackduck-harness
+    /var/lib/blackduck-wintermute
 
 The container sets:
 
-    HARNESS_OUTPUT_DIR=/var/lib/blackduck-harness
+    WINTERMUTE_OUTPUT_DIR=/var/lib/blackduck-wintermute
 
 The PVC preserves:
 
@@ -169,17 +169,17 @@ The second run should therefore be faster and should not create duplicate Jira i
 
 Each pipeline execution creates a run-specific directory:
 
-    /var/lib/blackduck-harness/jira/runs/RUN_ID/
+    /var/lib/blackduck-wintermute/jira/runs/RUN_ID/
 
 Run directories contain staged outputs and diagnostics.
 
 Only after required stages succeed are selected files promoted into:
 
-    /var/lib/blackduck-harness/jira/
+    /var/lib/blackduck-wintermute/jira/
 
 The active pipeline summary is:
 
-    /var/lib/blackduck-harness/jira/pipeline-run-summary.json
+    /var/lib/blackduck-wintermute/jira/pipeline-run-summary.json
 
 The default run retention is ten run directories.
 
@@ -218,7 +218,7 @@ This prevents overlapping scheduled Jobs.
 
 The pipeline also uses a lock file:
 
-    /var/lib/blackduck-harness/jira/pipeline.lock
+    /var/lib/blackduck-wintermute/jira/pipeline.lock
 
 The lock contains:
 
@@ -278,7 +278,7 @@ Before deployment, update:
 
 Replace:
 
-    registry.invalid/customer/blackduck-harness
+    registry.invalid/customer/blackduck-wintermute
 
 with the private registry and repository.
 
@@ -328,13 +328,13 @@ Production deployments should use an immutable commit SHA or image digest.
 
 Create the namespace first:
 
-    kubectl create namespace blackduck-harness
+    kubectl create namespace blackduck-wintermute
 
 Create the image pull secret:
 
     kubectl create secret docker-registry \
-      blackduck-harness-registry \
-      --namespace blackduck-harness \
+      blackduck-wintermute-registry \
+      --namespace blackduck-wintermute \
       --docker-server PRIVATE_REGISTRY_HOST \
       --docker-username REGISTRY_USERNAME \
       --docker-password REGISTRY_PASSWORD
@@ -346,8 +346,8 @@ Do not store the real registry password in repository files.
 Create a Jira and Black Duck credential secret:
 
     kubectl create secret generic \
-      blackduck-harness-credentials \
-      --namespace blackduck-harness \
+      blackduck-wintermute-credentials \
+      --namespace blackduck-wintermute \
       --from-literal BLACKDUCK_URL=https://blackduck.example.com \
       --from-literal BLACKDUCK_API_TOKEN=REPLACE_ME \
       --from-literal JIRA_URL=https://jira.example.com \
@@ -367,22 +367,22 @@ Ask the customer for the issuing root and intermediate CA bundle.
 Create the CA ConfigMap:
 
     kubectl create configmap \
-      blackduck-harness-ca \
-      --namespace blackduck-harness \
+      blackduck-wintermute-ca \
+      --namespace blackduck-wintermute \
       --from-file customer-ca.pem=/path/to/customer-ca.pem
 
 The CronJob mounts it at:
 
-    /etc/blackduck-harness/ca/customer-ca.pem
+    /etc/blackduck-wintermute/ca/customer-ca.pem
 
 Enable the CA pipeline argument:
 
     --ca-bundle
-    /etc/blackduck-harness/ca/customer-ca.pem
+    /etc/blackduck-wintermute/ca/customer-ca.pem
 
 Set:
 
-    SSL_CERT_FILE=/etc/blackduck-harness/ca/customer-ca.pem
+    SSL_CERT_FILE=/etc/blackduck-wintermute/ca/customer-ca.pem
 
 An example patch is provided under the customer overlay and examples directories.
 
@@ -491,7 +491,7 @@ After replacing all placeholders:
 
     kubectl apply \
       --server-side \
-      --field-manager blackduck-harness \
+      --field-manager blackduck-wintermute \
       --kustomize deploy/overlays/customer
 
 The first deployment should remain suspended and dry-run only.
@@ -503,25 +503,25 @@ Create a one-time Job from the CronJob:
     run_id=$(date -u +%Y%m%d%H%M%S)
 
     kubectl create job \
-      --namespace blackduck-harness \
+      --namespace blackduck-wintermute \
       --from=cronjob/blackduck-jira-pipeline \
       blackduck-jira-manual-${run_id}
 
 Watch the Job:
 
     kubectl get jobs \
-      --namespace blackduck-harness \
+      --namespace blackduck-wintermute \
       --watch
 
 View Pods:
 
     kubectl get pods \
-      --namespace blackduck-harness
+      --namespace blackduck-wintermute
 
 View logs:
 
     kubectl logs \
-      --namespace blackduck-harness \
+      --namespace blackduck-wintermute \
       job/blackduck-jira-manual-RUN_ID \
       --follow
 
@@ -531,12 +531,12 @@ Create a temporary inspection Pod or use an approved storage inspection process.
 
 Important paths:
 
-    /var/lib/blackduck-harness/jira/pipeline-run-summary.json
-    /var/lib/blackduck-harness/jira/jira-rollup-plan.json
-    /var/lib/blackduck-harness/jira/jira-rollup-results.csv
-    /var/lib/blackduck-harness/jira/cache/
-    /var/lib/blackduck-harness/jira/state/
-    /var/lib/blackduck-harness/jira/runs/
+    /var/lib/blackduck-wintermute/jira/pipeline-run-summary.json
+    /var/lib/blackduck-wintermute/jira/jira-rollup-plan.json
+    /var/lib/blackduck-wintermute/jira/jira-rollup-results.csv
+    /var/lib/blackduck-wintermute/jira/cache/
+    /var/lib/blackduck-wintermute/jira/state/
+    /var/lib/blackduck-wintermute/jira/runs/
 
 Do not edit state files while a Job is running.
 
@@ -581,19 +581,19 @@ Only after acceptance:
 Inspect Job status:
 
     kubectl describe job \
-      --namespace blackduck-harness \
+      --namespace blackduck-wintermute \
       JOB_NAME
 
 Inspect Pod events:
 
     kubectl describe pod \
-      --namespace blackduck-harness \
+      --namespace blackduck-wintermute \
       POD_NAME
 
 Inspect logs:
 
     kubectl logs \
-      --namespace blackduck-harness \
+      --namespace blackduck-wintermute \
       POD_NAME
 
 Inspect the active run summary on the PVC:

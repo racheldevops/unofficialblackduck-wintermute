@@ -3,7 +3,7 @@ kind: CronJob
 metadata:
   name: blackduck-jira-pipeline
   labels:
-    app.kubernetes.io/name: blackduck-harness
+    app.kubernetes.io/name: blackduck-wintermute
     app.kubernetes.io/component: jira-pipeline
 spec:
   schedule: "0 2 * * *"
@@ -20,13 +20,13 @@ spec:
       template:
         metadata:
           labels:
-            app.kubernetes.io/name: blackduck-harness
+            app.kubernetes.io/name: blackduck-wintermute
             app.kubernetes.io/component: jira-pipeline
         spec:
           restartPolicy: Never
           automountServiceAccountToken: false
           imagePullSecrets:
-            - name: blackduck-harness-registry
+            - name: blackduck-wintermute-registry
           securityContext:
             runAsNonRoot: true
             runAsUser: 10001
@@ -37,7 +37,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: jira-pipeline
-              image: blackduck-harness:local
+              image: blackduck-wintermute:local
               imagePullPolicy: IfNotPresent
               args:
                 - --dry-run
@@ -50,13 +50,13 @@ spec:
                 - --rollup-workers
                 - "8"
                 - --config
-                - /etc/blackduck-harness/jira-rollup-config.json
+                - /etc/blackduck-wintermute/jira-rollup-config.json
               envFrom:
                 - secretRef:
-                    name: blackduck-harness-credentials
+                    name: blackduck-wintermute-credentials
               env:
-                - name: HARNESS_OUTPUT_DIR
-                  value: /var/lib/blackduck-harness
+                - name: WINTERMUTE_OUTPUT_DIR
+                  value: /var/lib/blackduck-wintermute
                 - name: TMPDIR
                   value: /tmp
                 - name: POD_NAME
@@ -77,28 +77,28 @@ spec:
                   drop:
                     - ALL
               volumeMounts:
-                - name: harness-data
-                  mountPath: /var/lib/blackduck-harness
+                - name: wintermute-data
+                  mountPath: /var/lib/blackduck-wintermute
                 - name: tmp
                   mountPath: /tmp
                 - name: jira-config
-                  mountPath: /etc/blackduck-harness/jira-rollup-config.json
+                  mountPath: /etc/blackduck-wintermute/jira-rollup-config.json
                   subPath: jira-rollup-config.json
                   readOnly: true
                 - name: customer-ca
-                  mountPath: /etc/blackduck-harness/ca
+                  mountPath: /etc/blackduck-wintermute/ca
                   readOnly: true
           volumes:
-            - name: harness-data
+            - name: wintermute-data
               persistentVolumeClaim:
-                claimName: blackduck-harness-data
+                claimName: blackduck-wintermute-data
             - name: tmp
               emptyDir:
                 sizeLimit: 1Gi
             - name: jira-config
               configMap:
-                name: blackduck-harness-jira-config
+                name: blackduck-wintermute-jira-config
             - name: customer-ca
               configMap:
-                name: blackduck-harness-ca
+                name: blackduck-wintermute-ca
                 optional: true

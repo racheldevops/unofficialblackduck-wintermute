@@ -6,7 +6,7 @@ from typing import Any
 
 
 def output_root() -> Path:
-    return Path(os.getenv("HARNESS_OUTPUT_DIR", ".harness")).expanduser()
+    return Path(os.getenv("WINTERMUTE_OUTPUT_DIR", ".wintermute")).expanduser()
 
 
 def jira_output_path(*parts: str) -> str:

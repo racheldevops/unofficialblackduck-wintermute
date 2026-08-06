@@ -18,12 +18,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
-from harness.concurrency import (
+from wintermute.concurrency import (
     MAX_IO_WORKERS,
     bounded_worker_count,
     ordered_parallel_map,
 )
-from harness.paths import ensure_parent_dir, jira_output_path
+from wintermute.paths import ensure_parent_dir, jira_output_path
 
 
 PROJECT_VERSION_RE = re.compile(

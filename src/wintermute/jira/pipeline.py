@@ -14,9 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any
-from harness.concurrency import MAX_IO_WORKERS, bounded_worker_count
-from harness.jira import find_parent_projects, findings_hierarchy_plan, findings_to_jira, subp_vuln_rollup
-from harness.paths import ensure_parent_dir, output_root, package_path
+from wintermute.concurrency import MAX_IO_WORKERS, bounded_worker_count
+from wintermute.jira import find_parent_projects, findings_hierarchy_plan, findings_to_jira, subp_vuln_rollup
+from wintermute.paths import ensure_parent_dir, output_root, package_path
 EXIT_SUCCESS = 0
 EXIT_PARTIAL = 1
 EXIT_ARGUMENT_ERROR = 2

@@ -376,7 +376,7 @@ def build_docker_command(
             "--tmpfs",
             str(docker_config.get("tmpfs") or "/tmp:rw,size=1g"),
             "--env",
-            "HARNESS_OUTPUT_DIR=/benchmark-output",
+            "WINTERMUTE_OUTPUT_DIR=/benchmark-output",
             "--env",
             "TMPDIR=/tmp",
             "--volume",
@@ -384,7 +384,7 @@ def build_docker_command(
             "--volume",
             (
                 f"{host_config_path}:"
-                "/etc/blackduck-harness/benchmark-config.json:ro"
+                "/etc/blackduck-wintermute/benchmark-config.json:ro"
             ),
         ]
     )
@@ -487,7 +487,7 @@ def build_job_manifest(
             "name": job_name,
             "namespace": namespace,
             "labels": {
-                "app.kubernetes.io/name": "blackduck-harness",
+                "app.kubernetes.io/name": "blackduck-wintermute",
                 "app.kubernetes.io/component": "scaling-benchmark",
             },
         },
@@ -687,7 +687,7 @@ def run_kubernetes_job(
             kubernetes_config.get("container_name") or "jira-pipeline"
         ),
         data_volume_name=str(
-            kubernetes_config.get("data_volume_name") or "harness-data"
+            kubernetes_config.get("data_volume_name") or "wintermute-data"
         ),
         storage_mode=storage_mode,
         pvc_claim_name=pvc_claim_name,
@@ -1061,13 +1061,13 @@ def main() -> int:
                                     [
                                         ".venv/bin/python",
                                         "-m",
-                                        "harness.jira.pipeline",
+                                        "wintermute.jira.pipeline",
                                     ],
                                 )
                             ]
                             command.extend(pipeline_arguments)
                             environment = dict(os.environ)
-                            environment["HARNESS_OUTPUT_DIR"] = str(
+                            environment["WINTERMUTE_OUTPUT_DIR"] = str(
                                 output_root
                             )
                             temporary_dir = output_root / "tmp"
@@ -1094,7 +1094,7 @@ def main() -> int:
                                 {},
                             )
                             container_config_path = (
-                                "/etc/blackduck-harness/"
+                                "/etc/blackduck-wintermute/"
                                 "benchmark-config.json"
                             )
                             pipeline_arguments = normalized_pipeline_args(
@@ -1141,7 +1141,7 @@ def main() -> int:
                             kubernetes_config_path = str(
                                 kubernetes_config.get("config_path")
                                 or (
-                                    "/etc/blackduck-harness/"
+                                    "/etc/blackduck-wintermute/"
                                     "jira-rollup-config.json"
                                 )
                             )

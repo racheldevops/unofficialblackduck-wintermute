@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from harness.datadog import policy_vuln_find as finder
+from wintermute.datadog import policy_vuln_find as finder
 
 
 PROJECT_HREF = "https://bd.example/api/projects/project-a"
