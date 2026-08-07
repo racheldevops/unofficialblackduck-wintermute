@@ -190,86 +190,17 @@ apply_local_secrets() {
   [[ -n "${BLACKDUCK_API_TOKEN:-}" ]] ||
     fail "BLACKDUCK_API_TOKEN is empty"
 
+  python_bin="${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin/python}"
+  [[ -x "${python_bin}" ]] ||
+    python_bin="$(command -v python3 || command -v python)"
+
   NAMESPACE="${namespace}" \
   BLACKDUCK_URL="${BLACKDUCK_URL}" \
   BLACKDUCK_API_TOKEN="${BLACKDUCK_API_TOKEN}" \
-    python - <<'PY' |
-import base64
-import json
-import os
-
-namespace = os.environ["NAMESPACE"]
-
-def encoded(value):
-    return base64.b64encode(
-        value.encode("utf-8")
-    ).decode("ascii")
-
-items = [
-    {
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {
-            "name": "blackduck-wintermute-blackduck-credentials",
-            "namespace": namespace,
-        },
-        "type": "Opaque",
-        "data": {
-            "BLACKDUCK_URL": encoded(
-                os.environ["BLACKDUCK_URL"]
-            ),
-            "BLACKDUCK_API_TOKEN": encoded(
-                os.environ["BLACKDUCK_API_TOKEN"]
-            ),
-        },
-    },
-    {
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {
-            "name": "blackduck-wintermute-jira-credentials",
-            "namespace": namespace,
-        },
-        "type": "Opaque",
-        "data": {},
-    },
-    {
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {
-            "name": "blackduck-wintermute-datadog-credentials",
-            "namespace": namespace,
-        },
-        "type": "Opaque",
-        "data": {},
-    },
-    {
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {
-            "name": "blackduck-wintermute-registry",
-            "namespace": namespace,
-        },
-        "type": "kubernetes.io/dockerconfigjson",
-        "data": {
-            ".dockerconfigjson": encoded(
-                '{"auths":{}}'
-            ),
-        },
-    },
-]
-
-print(
-    json.dumps(
-        {
-            "apiVersion": "v1",
-            "kind": "List",
-            "items": items,
-        }
-    )
-)
-PY
-  kubectl apply -f -
+    "${python_bin}" \
+      "${root}/scripts/local_cohort_k8s_helper.py" \
+      apply-secrets \
+      --namespace "${namespace}"
 }
 
 deploy() {
@@ -460,8 +391,12 @@ watch_workflow() {
 submit() {
   check_context
   wait_for_completion="false"
+  confirm_apply="false"
   jira_mode="${LOCAL_JIRA_MODE:-dry-run}"
   datadog_mode="${LOCAL_DATADOG_MODE:-dry-run}"
+  jira_only_vulnerability=""
+  jira_max_create="${LOCAL_JIRA_MAX_CREATE:-5000}"
+  datadog_max_send="${LOCAL_DATADOG_MAX_SEND:-100}"
 
   while (( $# > 0 )); do
     case "$1" in
@@ -469,16 +404,28 @@ submit() {
         wait_for_completion="true"
         shift
         ;;
+      --confirm-apply)
+        confirm_apply="true"
+        shift
+        ;;
       --jira-mode)
-        (( $# >= 2 )) ||
-          fail "--jira-mode requires a value"
         jira_mode="$2"
         shift 2
         ;;
       --datadog-mode)
-        (( $# >= 2 )) ||
-          fail "--datadog-mode requires a value"
         datadog_mode="$2"
+        shift 2
+        ;;
+      --jira-only-vulnerability)
+        jira_only_vulnerability="$2"
+        shift 2
+        ;;
+      --jira-max-create)
+        jira_max_create="$2"
+        shift 2
+        ;;
+      --datadog-max-send)
+        datadog_max_send="$2"
         shift 2
         ;;
       *)
@@ -487,59 +434,50 @@ submit() {
     esac
   done
 
-  for mode in "${jira_mode}" "${datadog_mode}"; do
-    case "${mode}" in
-      disabled|dry-run)
-        ;;
-      *)
-        fail "Local submit mode must be disabled or dry-run"
-        ;;
-    esac
-  done
-
-  kubectl get workflowtemplate     blackduck-wintermute-cohort     --namespace "${namespace}" >/dev/null ||
+  kubectl get workflowtemplate \
+    blackduck-wintermute-cohort \
+    --namespace "${namespace}" >/dev/null ||
     fail "Deploy the local cohort resources first"
 
+  python_bin="${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin/python}"
+  [[ -x "${python_bin}" ]] ||
+    python_bin="$(command -v python3 || command -v python)"
+
+  helper_args=(
+    submit
+    --namespace "${namespace}"
+    --source-image "${source_image}"
+    --jira-image "${jira_image}"
+    --datadog-image "${datadog_image}"
+    --jira-mode "${jira_mode}"
+    --datadog-mode "${datadog_mode}"
+    --jira-only-vulnerability "${jira_only_vulnerability}"
+    --jira-max-create "${jira_max_create}"
+    --datadog-max-send "${datadog_max_send}"
+    --retain-cohorts 3
+  )
+
+  if [[ "${confirm_apply}" == "true" ]]; then
+    helper_args+=(--confirm-apply)
+  fi
+
   workflow_resource="$(
-    cat <<YAML |
-apiVersion: argoproj.io/v1alpha1
-kind: Workflow
-metadata:
-  generateName: blackduck-wintermute-local-
-  namespace: ${namespace}
-  labels:
-    app.kubernetes.io/name: blackduck-wintermute
-    app.kubernetes.io/component: local-cohort-smoke
-spec:
-  workflowTemplateRef:
-    name: blackduck-wintermute-cohort
-  arguments:
-    parameters:
-      - name: source-image
-        value: ${source_image}
-      - name: jira-image
-        value: ${jira_image}
-      - name: datadog-image
-        value: ${datadog_image}
-      - name: jira-mode
-        value: ${jira_mode}
-      - name: datadog-mode
-        value: ${datadog_mode}
-      - name: confirm-apply
-        value: "false"
-      - name: retain-cohorts
-        value: "3"
-YAML
-    kubectl create       --filename -       --output name
+    "${python_bin}" \
+      "${root}/scripts/local_cohort_k8s_helper.py" \
+      "${helper_args[@]}"
   )"
 
   workflow="${workflow_resource#*/}"
-  printf '%s
-' "${workflow}"     > "${latest_workflow_file}"
+  printf '%s\n' "${workflow}" \
+    > "${latest_workflow_file}"
 
   print "Submitted ${workflow}"
   print "Jira mode: ${jira_mode}"
   print "Datadog mode: ${datadog_mode}"
+
+  if [[ -n "${jira_only_vulnerability}" ]]; then
+    print "Jira vulnerability: ${jira_only_vulnerability}"
+  fi
 
   if [[ "${wait_for_completion}" == "true" ]]; then
     watch_workflow "${workflow}"

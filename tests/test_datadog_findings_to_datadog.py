@@ -574,3 +574,112 @@ def test_validate_args_rejects_invalid_values(
 
     with pytest.raises(RuntimeError, match=message):
         datadog.validate_args(args)
+
+
+def test_datadog_eu_browser_site_maps_to_api() -> None:
+    assert datadog.normalize_datadog_base_url(
+        "app.datadoghq.eu"
+    ) == "https://api.datadoghq.eu"
+    assert datadog.normalize_datadog_base_url(
+        "https://app.datadoghq.eu"
+    ) == "https://api.datadoghq.eu"
+    assert datadog.normalize_datadog_base_url(
+        "datadoghq.eu"
+    ) == "https://api.datadoghq.eu"
+
+
+def test_datadog_environment_tls_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "DATADOG_INSECURE",
+        "true",
+    )
+
+    assert datadog.environment_bool(
+        "DATADOG_INSECURE"
+    ) is True
+
+
+def test_send_event_rejects_non_json_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status = 202
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self) -> bytes:
+            return b"<html>proxy response</html>"
+
+    monkeypatch.setattr(
+        datadog,
+        "urlopen",
+        lambda *args, **kwargs: Response(),
+    )
+    client = datadog.DatadogClient(
+        site="app.datadoghq.eu",
+        api_key="x",
+        timeout=1,
+        retries=0,
+        retry_delay=0,
+        debug=False,
+        insecure=True,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="non-JSON",
+    ):
+        client.send_event(
+            {
+                "title": "test",
+                "text": "test",
+            }
+        )
+
+
+def test_send_event_requires_event_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status = 202
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self) -> bytes:
+            return b'{"status":"ok"}'
+
+    monkeypatch.setattr(
+        datadog,
+        "urlopen",
+        lambda *args, **kwargs: Response(),
+    )
+    client = datadog.DatadogClient(
+        site="app.datadoghq.eu",
+        api_key="x",
+        timeout=1,
+        retries=0,
+        retry_delay=0,
+        debug=False,
+        insecure=True,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="event ID",
+    ):
+        client.send_event(
+            {
+                "title": "test",
+                "text": "test",
+            }
+        )

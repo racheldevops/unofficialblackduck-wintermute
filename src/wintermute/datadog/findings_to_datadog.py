@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from wintermute.paths import datadog_output_path
@@ -874,6 +875,88 @@ def vulnerability_event(
         "tags": sorted(set(tags)),
     }
 
+def environment_bool(
+    name: str,
+    default: bool = False,
+) -> bool:
+    value = os.getenv(name)
+
+    if value is None:
+        return default
+
+    return value.strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def normalize_datadog_base_url(
+    site: str,
+) -> str:
+    raw = str(site or "").strip().rstrip("/")
+
+    if not raw:
+        raise ValueError(
+            "Datadog site must not be empty"
+        )
+
+    explicit_scheme = raw.startswith(
+        ("http://", "https://")
+    )
+    parsed = urlsplit(
+        raw
+        if explicit_scheme
+        else f"https://{raw}"
+    )
+    host = parsed.netloc.strip().lower()
+    path = parsed.path.rstrip("/")
+
+    if not host:
+        raise ValueError(
+            f"Invalid Datadog site: {site!r}"
+        )
+
+    if path.endswith("/api/v1/events"):
+        path = path[: -len("/api/v1/events")]
+
+    datadog_host = (
+        host == "datadoghq.com"
+        or host.endswith(".datadoghq.com")
+        or host == "datadoghq.eu"
+        or host.endswith(".datadoghq.eu")
+        or host == "ddog-gov.com"
+        or host.endswith(".ddog-gov.com")
+    )
+
+    if datadog_host:
+        if host.startswith("app."):
+            host = host[4:]
+
+        if not host.startswith("api."):
+            host = f"api.{host}"
+
+        return urlunsplit(
+            ("https", host, "", "", "")
+        )
+
+    if explicit_scheme:
+        return urlunsplit(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                path,
+                "",
+                "",
+            )
+        )
+
+    return urlunsplit(
+        ("https", f"api.{host}", path, "", "")
+    )
+
+
 class DatadogClient:
     def __init__(
         self,
@@ -885,23 +968,24 @@ class DatadogClient:
         debug: bool,
         insecure: bool = False,
     ):
-        site = site.strip().rstrip("/")
-
-        if site.startswith(("http://", "https://")):
-            if site.endswith("/api/v1/events"):
-                site = site[: -len("/api/v1/events")]
-            self.base_url = site.rstrip("/")
-        else:
-            self.base_url = f"https://api.{site}"
-
+        self.base_url = normalize_datadog_base_url(
+            site
+        )
         self.api_key = api_key
         self.timeout = timeout
         self.retries = retries
         self.retry_delay = retry_delay
         self.debug = debug
-        self.ssl_context = ssl._create_unverified_context() if insecure else None
+        self.ssl_context = (
+            ssl._create_unverified_context()
+            if insecure
+            else None
+        )
 
-    def send_event(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def send_event(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
         url = f"{self.base_url}/api/v1/events"
         data = json.dumps(payload).encode("utf-8")
         headers = {
@@ -911,7 +995,12 @@ class DatadogClient:
         }
 
         for attempt in range(self.retries + 1):
-            request = Request(url, data=data, headers=headers, method="POST")
+            request = Request(
+                url,
+                data=data,
+                headers=headers,
+                method="POST",
+            )
 
             try:
                 with urlopen(
@@ -919,50 +1008,149 @@ class DatadogClient:
                     timeout=self.timeout,
                     context=self.ssl_context,
                 ) as response:
-                    body = response.read().decode("utf-8", errors="replace")
+                    body = response.read().decode(
+                        "utf-8",
+                        errors="replace",
+                    )
+                    status_code = response.status
 
-                    if response.status not in {200, 202}:
-                        raise RuntimeError(f"HTTP {response.status}: {body[:1000]}")
+                if status_code not in {200, 202}:
+                    raise RuntimeError(
+                        f"HTTP {status_code}: "
+                        f"{body[:1000]}"
+                    )
 
-                    if not body:
-                        return {}
+                if not body:
+                    raise RuntimeError(
+                        "Datadog returned an empty "
+                        "success response"
+                    )
 
-                    try:
-                        return json.loads(body)
-                    except json.JSONDecodeError:
-                        return {"raw_response": body}
+                try:
+                    response_payload = json.loads(body)
+                except json.JSONDecodeError as error:
+                    raise RuntimeError(
+                        "Datadog returned a non-JSON "
+                        f"success response: {body[:500]}"
+                    ) from error
 
-            except (HTTPError, URLError, TimeoutError, OSError, RuntimeError) as error:
-                retry_after_seconds: float | None = None
+                if not isinstance(
+                    response_payload,
+                    dict,
+                ):
+                    raise RuntimeError(
+                        "Datadog success response "
+                        "was not a JSON object"
+                    )
+
+                event = response_payload.get("event")
+                event_id = ""
+
+                if isinstance(event, dict):
+                    event_id = str(
+                        event.get("id") or ""
+                    )
+
+                if not event_id:
+                    event_id = str(
+                        response_payload.get("id")
+                        or ""
+                    )
+
+                response_status = str(
+                    response_payload.get("status")
+                    or ""
+                ).strip().lower()
+
+                if (
+                    response_status
+                    and response_status != "ok"
+                ):
+                    raise RuntimeError(
+                        "Datadog returned unexpected "
+                        f"status {response_status!r}"
+                    )
+
+                if not event_id:
+                    raise RuntimeError(
+                        "Datadog accepted the request "
+                        "without returning an event ID"
+                    )
+
+                return response_payload
+
+            except (
+                HTTPError,
+                URLError,
+                TimeoutError,
+                OSError,
+                RuntimeError,
+            ) as error:
+                retry_after_seconds: (
+                    float | None
+                ) = None
 
                 if isinstance(error, HTTPError):
-                    body = error.read().decode("utf-8", errors="replace")
-                    retryable = error.code in {408, 409, 425, 429, 500, 502, 503, 504}
-                    retry_after_seconds = parse_retry_after(error.headers.get("Retry-After"))
-                    message = f"HTTP {error.code} {error.reason}: {body[:1000]}"
+                    body = error.read().decode(
+                        "utf-8",
+                        errors="replace",
+                    )
+                    retryable = error.code in {
+                        408,
+                        409,
+                        425,
+                        429,
+                        500,
+                        502,
+                        503,
+                        504,
+                    }
+                    retry_after_seconds = (
+                        parse_retry_after(
+                            error.headers.get(
+                                "Retry-After"
+                            )
+                        )
+                    )
+                    message = (
+                        f"HTTP {error.code} "
+                        f"{error.reason}: "
+                        f"{body[:1000]}"
+                    )
                 else:
                     retryable = True
                     message = str(error)
 
-                if not retryable or attempt >= self.retries:
-                    raise RuntimeError(f"POST {url} failed: {message}") from error
+                if (
+                    not retryable
+                    or attempt >= self.retries
+                ):
+                    raise RuntimeError(
+                        f"POST {url} failed: {message}"
+                    ) from error
 
                 sleep_seconds = (
                     retry_after_seconds
                     if retry_after_seconds is not None
-                    else self.retry_delay * (attempt + 1)
+                    else self.retry_delay
+                    * (attempt + 1)
                 )
 
                 if self.debug:
                     print(
-                        f"Retrying Datadog event send after error: {message}; "
-                        f"attempt {attempt + 1}/{self.retries}, sleeping {sleep_seconds}s",
+                        "Retrying Datadog event send "
+                        f"after error: {message}; "
+                        f"attempt {attempt + 1}/"
+                        f"{self.retries}, sleeping "
+                        f"{sleep_seconds}s",
                         file=sys.stderr,
                     )
 
                 time.sleep(sleep_seconds)
 
-        raise RuntimeError("Datadog event send failed unexpectedly")
+        raise RuntimeError(
+            "Datadog event send failed unexpectedly"
+        )
 
 
 def update_group_state(
@@ -1517,14 +1705,28 @@ def parse_args() -> argparse.Namespace:
             "both sends project plus finding events."
         ),
     )
-    parser.add_argument("--site", default="datadoghq.com")
     parser.add_argument(
-        "--insecure",
-        action="store_true",
-        help=(
-            "Disable TLS certificate verification for Datadog HTTPS calls. "
-            "Useful behind corporate TLS inspection proxies. Default: verify TLS."
+        "--site",
+        default=os.getenv(
+            "DATADOG_SITE",
+            "datadoghq.com",
         ),
+    )
+    tls = parser.add_mutually_exclusive_group()
+    tls.add_argument(
+        "--insecure",
+        dest="insecure",
+        action="store_true",
+    )
+    tls.add_argument(
+        "--verify-tls",
+        dest="insecure",
+        action="store_false",
+    )
+    parser.set_defaults(
+        insecure=environment_bool(
+            "DATADOG_INSECURE"
+        )
     )
     parser.add_argument("--api-key-env", default="DATADOG_API_KEY")
     parser.add_argument("--service", default="blackduck")

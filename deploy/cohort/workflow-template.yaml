@@ -37,6 +37,12 @@ spec:
           - "true"
       - name: retain-cohorts
         value: "10"
+      - name: jira-only-vulnerability
+        value: ""
+      - name: jira-max-create
+        value: "5000"
+      - name: datadog-max-send
+        value: "100"
   volumes:
     - name: cohort-data
       persistentVolumeClaim:
@@ -242,6 +248,10 @@ spec:
           - "/var/lib/blackduck-wintermute/cohorts/{{inputs.parameters.cohort-id}}"
           - "--{{workflow.parameters.jira-mode}}"
           - --strict
+          - --only-vulnerability
+          - "{{workflow.parameters.jira-only-vulnerability}}"
+          - --max-create
+          - "{{workflow.parameters.jira-max-create}}"
           - --config
           - /etc/blackduck-wintermute/jira-rollup-config.json
         envFrom:
@@ -299,6 +309,8 @@ spec:
           - "/var/lib/blackduck-wintermute/cohorts/{{inputs.parameters.cohort-id}}"
           - "--{{workflow.parameters.datadog-mode}}"
           - --strict
+          - --max-send
+          - "{{workflow.parameters.datadog-max-send}}"
         envFrom:
           - secretRef:
               name: blackduck-wintermute-datadog-credentials

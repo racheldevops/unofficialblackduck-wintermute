@@ -107,6 +107,21 @@ def run(args: argparse.Namespace) -> int:
             require_entity=args.require_entity,
         ),
     )
+
+    if args.only_vulnerability:
+        findings = [
+            finding
+            for finding in findings
+            if finding.vulnerability
+            == args.only_vulnerability
+        ]
+
+        if not findings:
+            raise RuntimeError(
+                "No cohort findings matched "
+                f"--only-vulnerability "
+                f"{args.only_vulnerability!r}"
+            )
     rows = jira_parent_rollup_rows(findings)
 
     if findings and not rows:
@@ -271,6 +286,9 @@ def parse_args(
     parser.add_argument(
         "--require-entity",
         action="store_true",
+    )
+    parser.add_argument(
+        "--only-vulnerability",
     )
     parser.add_argument(
         "--hash-length",

@@ -41,16 +41,23 @@ def test_local_script_refuses_wrong_context() -> None:
 
 
 def test_local_script_never_places_secrets_in_command_arguments() -> None:
-    text = SCRIPT.read_text(encoding="utf-8")
+    script = SCRIPT.read_text(encoding="utf-8")
+    helper = (
+        ROOT
+        / "scripts"
+        / "local_cohort_k8s_helper.py"
+    ).read_text(encoding="utf-8")
 
-    assert "--from-literal" not in text
+    assert "--from-literal" not in script
+    assert "--from-literal" not in helper
     assert (
         "BLACKDUCK_API_TOKEN"
-        in text
+        in helper
     )
     assert (
-        'data": {'
-        in text
+        '["apply", "--filename", "-"]'
+        in helper.replace("\n", " ")
+        or '"apply",' in helper
     )
 
 

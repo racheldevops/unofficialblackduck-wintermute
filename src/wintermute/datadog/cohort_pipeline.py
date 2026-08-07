@@ -255,7 +255,10 @@ def parse_args(
     )
     parser.add_argument(
         "--site",
-        default="datadoghq.com",
+        default=os.getenv(
+            "DATADOG_SITE",
+            "datadoghq.com",
+        ),
     )
     parser.add_argument(
         "--api-key-env",
@@ -339,9 +342,23 @@ def parse_args(
         "--fail-fast",
         action="store_true",
     )
-    parser.add_argument(
+    tls = parser.add_mutually_exclusive_group()
+    tls.add_argument(
         "--insecure",
+        dest="insecure",
         action="store_true",
+    )
+    tls.add_argument(
+        "--verify-tls",
+        dest="insecure",
+        action="store_false",
+    )
+    parser.set_defaults(
+        insecure=(
+            publisher.environment_bool(
+                "DATADOG_INSECURE"
+            )
+        )
     )
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--retries", type=int, default=2)
