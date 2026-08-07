@@ -21,13 +21,13 @@ def test_workflow_can_skip_each_destination() -> None:
 
     assert text.count("          - disabled") == 2
     assert (
-        'when: "{{workflow.parameters.jira-mode}} '
-        '!= disabled"'
+        "when: \"{{=workflow.parameters['jira-mode'] "
+        "!= 'disabled'}}\""
         in text
     )
     assert (
-        'when: "{{workflow.parameters.datadog-mode}} '
-        '!= disabled"'
+        "when: \"{{=workflow.parameters['datadog-mode'] "
+        "!= 'disabled'}}\""
         in text
     )
     assert "jira.Skipped || jira.Omitted" in text
@@ -71,12 +71,14 @@ def test_finalizer_records_disabled_destinations(
             retain_cohorts=3,
             jira_mode="dry-run",
             datadog_mode="disabled",
+            jira_status="Succeeded",
+            datadog_status="Skipped",
         )
     )
 
     assert result == 0
     assert captured["destination_statuses"] == {
-        "jira": "terminal",
+        "jira": "succeeded",
         "datadog": "disabled",
     }
 

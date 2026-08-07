@@ -19,12 +19,36 @@ DESTINATION_MODES = {
     "apply",
 }
 
+TERMINAL_TASK_STATUSES = {
+    "succeeded",
+    "failed",
+    "error",
+    "errored",
+}
 
-def destination_status(mode: str) -> str:
+
+def destination_status(
+    mode: str,
+    task_status: str,
+) -> str:
+    if mode == "disabled":
+        return "disabled"
+
+    normalized = str(
+        task_status or ""
+    ).strip().lower()
+
+    if normalized not in TERMINAL_TASK_STATUSES:
+        raise RuntimeError(
+            f"Enabled destination in mode {mode!r} "
+            f"did not reach a terminal state: "
+            f"{task_status!r}"
+        )
+
     return (
-        "disabled"
-        if mode == "disabled"
-        else "terminal"
+        "error"
+        if normalized == "errored"
+        else normalized
     )
 
 
@@ -33,16 +57,20 @@ def run(args: argparse.Namespace) -> int:
     cohort_directory = root / args.cohort_id
     cohort = load_cohort(cohort_directory)
 
+    statuses = {
+        "jira": destination_status(
+            args.jira_mode,
+            args.jira_status,
+        ),
+        "datadog": destination_status(
+            args.datadog_mode,
+            args.datadog_status,
+        ),
+    }
+
     mark_cohort_complete(
         cohort.directory,
-        destination_statuses={
-            "jira": destination_status(
-                args.jira_mode
-            ),
-            "datadog": destination_status(
-                args.datadog_mode
-            ),
-        },
+        destination_statuses=statuses,
     )
     removed = prune_cohorts(
         root,
@@ -56,14 +84,7 @@ def run(args: argparse.Namespace) -> int:
             {
                 "cohort_id": cohort.cohort_id,
                 "status": "complete",
-                "destination_statuses": {
-                    "jira": destination_status(
-                        args.jira_mode
-                    ),
-                    "datadog": destination_status(
-                        args.datadog_mode
-                    ),
-                },
+                "destination_statuses": statuses,
                 "pruned_cohorts": list(removed),
             },
             indent=2,
@@ -105,6 +126,15 @@ def parse_args(
         choices=sorted(DESTINATION_MODES),
         default="dry-run",
     )
+    parser.add_argument(
+        "--jira-status",
+        required=True,
+    )
+    parser.add_argument(
+        "--datadog-status",
+        required=True,
+    )
+
     return parser.parse_args(argv)
 
 

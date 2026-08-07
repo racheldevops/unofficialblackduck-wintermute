@@ -67,28 +67,22 @@ def test_cohort_dag_orders_consumers_and_supports_disabled_modes() -> None:
         "jira.Succeeded || jira.Failed || jira.Errored ||"
         in text
     )
-    assert (
-        "jira.Skipped || jira.Omitted"
-        in text
-    )
+    assert "jira.Skipped || jira.Omitted" in text
     assert (
         "datadog.Succeeded || datadog.Failed || "
         "datadog.Errored ||"
         in text
     )
-    assert (
-        "datadog.Skipped || datadog.Omitted"
-        in text
-    )
+    assert "datadog.Skipped || datadog.Omitted" in text
 
     assert (
-        'when: "{{workflow.parameters.jira-mode}} '
-        '!= disabled"'
+        "when: \"{{=workflow.parameters['jira-mode'] "
+        "!= 'disabled'}}\""
         in text
     )
     assert (
-        'when: "{{workflow.parameters.datadog-mode}} '
-        '!= disabled"'
+        "when: \"{{=workflow.parameters['datadog-mode'] "
+        "!= 'disabled'}}\""
         in text
     )
 

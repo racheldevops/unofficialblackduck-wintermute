@@ -116,3 +116,31 @@ def test_complete_marker_is_written_after_consumers(
         "jira": "terminal",
         "datadog": "terminal",
     }
+
+
+def test_enabled_destination_cannot_be_finalized_when_omitted() -> None:
+    import pytest
+
+    from wintermute.blackduck.cohort_finalize import (
+        destination_status,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="did not reach a terminal state",
+    ):
+        destination_status(
+            "dry-run",
+            "Omitted",
+        )
+
+
+def test_disabled_destination_accepts_omitted_task() -> None:
+    from wintermute.blackduck.cohort_finalize import (
+        destination_status,
+    )
+
+    assert destination_status(
+        "disabled",
+        "Omitted",
+    ) == "disabled"

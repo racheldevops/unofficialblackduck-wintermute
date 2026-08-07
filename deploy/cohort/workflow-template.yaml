@@ -76,7 +76,7 @@ spec:
             template: source
           - name: jira
             depends: source.Succeeded
-            when: "{{workflow.parameters.jira-mode}} != disabled"
+            when: "{{=workflow.parameters['jira-mode'] != 'disabled'}}"
             template: jira
             arguments:
               parameters:
@@ -87,7 +87,7 @@ spec:
               source.Succeeded &&
               (jira.Succeeded || jira.Failed || jira.Errored ||
               jira.Skipped || jira.Omitted)
-            when: "{{workflow.parameters.datadog-mode}} != disabled"
+            when: "{{=workflow.parameters['datadog-mode'] != 'disabled'}}"
             template: datadog
             arguments:
               parameters:
@@ -103,6 +103,10 @@ spec:
               parameters:
                 - name: cohort-id
                   value: "{{tasks.source.outputs.parameters.cohort-id}}"
+                - name: jira-status
+                  value: "{{tasks.jira.status}}"
+                - name: datadog-status
+                  value: "{{tasks.datadog.status}}"
 
     - name: validate-modes
       inputs:
@@ -329,6 +333,8 @@ spec:
       inputs:
         parameters:
           - name: cohort-id
+          - name: jira-status
+          - name: datadog-status
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -354,6 +360,10 @@ spec:
           - "{{workflow.parameters.jira-mode}}"
           - --datadog-mode
           - "{{workflow.parameters.datadog-mode}}"
+          - --jira-status
+          - "{{inputs.parameters.jira-status}}"
+          - --datadog-status
+          - "{{inputs.parameters.datadog-status}}"
         resources:
           requests:
             cpu: 100m
