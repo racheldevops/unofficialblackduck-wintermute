@@ -683,3 +683,32 @@ def test_send_event_requires_event_id(
                 "text": "test",
             }
         )
+
+
+def test_datadog_state_binds_to_site() -> None:
+    state = datadog.fresh_state()
+
+    datadog.bind_state_destination(
+        state,
+        "app.datadoghq.eu",
+    )
+
+    assert state["datadog_base_url"] == (
+        "https://api.datadoghq.eu"
+    )
+
+
+def test_datadog_state_rejects_site_change() -> None:
+    state = datadog.fresh_state()
+    state["datadog_base_url"] = (
+        "https://api.datadoghq.eu"
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="state belongs to",
+    ):
+        datadog.bind_state_destination(
+            state,
+            "datadoghq.com",
+        )

@@ -20,6 +20,17 @@ read -r "jira_project_key?Jira project key: "
 read -r "jira_user?Jira user: "
 read -r -s "jira_token?Jira API token: "
 print
+
+read -r "jira_verify_tls_answer?Disable Jira TLS verification? [y/N]: "
+
+case "${jira_verify_tls_answer:l}" in
+  y|yes)
+    jira_verify_tls="false"
+    ;;
+  *)
+    jira_verify_tls="true"
+    ;;
+esac
 read -r -s "datadog_key?Datadog API key: "
 print
 
@@ -55,6 +66,7 @@ CONFIG_SOURCE="${config_source}" \
 CONFIG_OUTPUT="${config_output}" \
 JIRA_URL="${jira_url%/}" \
 JIRA_PROJECT_KEY="${jira_project_key}" \
+JIRA_VERIFY_TLS="${jira_verify_tls}" \
   python - <<'PY'
 import json
 import os
@@ -71,7 +83,12 @@ jira["project_key"] = os.environ[
     "JIRA_PROJECT_KEY"
 ]
 jira["auth_mode"] = "basic"
-jira["verify_tls"] = True
+jira["verify_tls"] = (
+    os.environ["JIRA_VERIFY_TLS"]
+    .strip()
+    .lower()
+    == "true"
+)
 
 output.write_text(
     json.dumps(payload, indent=2) + "\n",

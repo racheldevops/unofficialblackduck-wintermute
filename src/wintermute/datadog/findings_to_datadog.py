@@ -21,7 +21,7 @@ from urllib.request import Request, urlopen
 from wintermute.paths import datadog_output_path
 
 
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
 
 REQUIRED_FIELDS = [
     "project",
@@ -290,9 +290,41 @@ def load_findings(path: str) -> list[dict[str, str]]:
     return deduped
 
 
+
+def bind_state_destination(
+    state: dict[str, Any],
+    site: str,
+) -> dict[str, Any]:
+    destination = normalize_datadog_base_url(
+        site
+    )
+    configured = str(
+        state.get("datadog_base_url") or ""
+    ).strip()
+
+    if configured:
+        configured = normalize_datadog_base_url(
+            configured
+        )
+
+        if configured != destination:
+            raise RuntimeError(
+                "Datadog state belongs to "
+                f"{configured}, but the current site "
+                f"resolves to {destination}. Archive "
+                "the state or restore the original site."
+            )
+
+    state["schema_version"] = (
+        STATE_SCHEMA_VERSION
+    )
+    state["datadog_base_url"] = destination
+    return state
+
 def fresh_state() -> dict[str, Any]:
     return {
         "schema_version": STATE_SCHEMA_VERSION,
+        "datadog_base_url": "",
         "created_at": now_iso(),
         "updated_at": now_iso(),
         "groups_by_external_id": {},
@@ -316,6 +348,7 @@ def load_state(path: str) -> dict[str, Any]:
         raise RuntimeError(f"State file {path} must contain a JSON object")
 
     state.setdefault("schema_version", STATE_SCHEMA_VERSION)
+    state.setdefault("datadog_base_url", "")
     state.setdefault("created_at", now_iso())
     state.setdefault("updated_at", now_iso())
     state.setdefault("groups_by_external_id", {})
@@ -1494,7 +1527,10 @@ def process(args: argparse.Namespace) -> int:
         raise RuntimeError("Only --destination events is currently implemented")
 
     findings = load_findings(args.findings)
-    state = load_state(args.state)
+    state = bind_state_destination(
+        load_state(args.state),
+        args.site,
+    )
     grouped = group_findings(findings)
     vulnerability_grouped = group_vulnerability_findings(findings)
     dry_run = args.dry_run or not args.apply
