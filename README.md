@@ -15,7 +15,7 @@ Wintermute turns Black Duck SCA data into one normalized, checksum-protected coh
 
 It is built for enterprise engineering teams: concurrent collection, deterministic identities, persistent caching, destination-scoped credentials, dry-run-first publishing, non-root containers, and Kubernetes cohort orchestration using Argo. Jira produces vulnerability-remediation hierarchies, while Datadog produces concise high-risk vulnerability events from the same underlying findings.
 
-Chewed & published representative large-instance cold run in about 6 minutes (down from 17 minutes) while preserving the same relationships, findings, and Jira hierarchy. The cohort model also separates Black Duck collection from destination delivery, so integrations can evolve independently without duplicating source logic.
+Cut a representative large-instance workflow from 17 minutes to 3 minutes with the same findings, relationships, and hierarchy. Collect once, deliver anywhere.
 
 ## Quick start
 
