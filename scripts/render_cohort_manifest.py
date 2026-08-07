@@ -18,6 +18,7 @@ IMAGE_TARGETS = (
     "datadog",
 )
 VALID_MODES = {
+    "disabled",
     "dry-run",
     "apply",
 }

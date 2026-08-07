@@ -21,11 +21,13 @@ spec:
       - name: jira-mode
         value: dry-run
         enum:
+          - disabled
           - dry-run
           - apply
       - name: datadog-mode
         value: dry-run
         enum:
+          - disabled
           - dry-run
           - apply
       - name: confirm-apply
@@ -74,6 +76,7 @@ spec:
             template: source
           - name: jira
             depends: source.Succeeded
+            when: "{{workflow.parameters.jira-mode}} != disabled"
             template: jira
             arguments:
               parameters:
@@ -82,7 +85,9 @@ spec:
           - name: datadog
             depends: >-
               source.Succeeded &&
-              (jira.Succeeded || jira.Failed || jira.Errored)
+              (jira.Succeeded || jira.Failed || jira.Errored ||
+              jira.Skipped || jira.Omitted)
+            when: "{{workflow.parameters.datadog-mode}} != disabled"
             template: datadog
             arguments:
               parameters:
@@ -91,7 +96,8 @@ spec:
           - name: finalize
             depends: >-
               source.Succeeded &&
-              (datadog.Succeeded || datadog.Failed || datadog.Errored)
+              (datadog.Succeeded || datadog.Failed || datadog.Errored ||
+              datadog.Skipped || datadog.Omitted)
             template: finalize
             arguments:
               parameters:
@@ -122,7 +128,7 @@ spec:
           datadog_mode = "{{inputs.parameters.datadog-mode}}"
           confirmed = "{{inputs.parameters.confirm-apply}}" == "true"
 
-          valid_modes = {"dry-run", "apply"}
+          valid_modes = {"disabled", "dry-run", "apply"}
 
           if jira_mode not in valid_modes:
               raise SystemExit(f"Invalid Jira mode: {jira_mode}")
@@ -344,6 +350,10 @@ spec:
           - "{{inputs.parameters.cohort-id}}"
           - --retain-cohorts
           - "{{workflow.parameters.retain-cohorts}}"
+          - --jira-mode
+          - "{{workflow.parameters.jira-mode}}"
+          - --datadog-mode
+          - "{{workflow.parameters.datadog-mode}}"
         resources:
           requests:
             cpu: 100m

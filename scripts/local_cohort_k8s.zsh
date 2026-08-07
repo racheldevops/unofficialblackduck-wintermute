@@ -459,10 +459,45 @@ watch_workflow() {
 
 submit() {
   check_context
+  wait_for_completion="false"
+  jira_mode="${LOCAL_JIRA_MODE:-dry-run}"
+  datadog_mode="${LOCAL_DATADOG_MODE:-dry-run}"
 
-  kubectl get workflowtemplate \
-    blackduck-wintermute-cohort \
-    --namespace "${namespace}" >/dev/null ||
+  while (( $# > 0 )); do
+    case "$1" in
+      --wait)
+        wait_for_completion="true"
+        shift
+        ;;
+      --jira-mode)
+        (( $# >= 2 )) ||
+          fail "--jira-mode requires a value"
+        jira_mode="$2"
+        shift 2
+        ;;
+      --datadog-mode)
+        (( $# >= 2 )) ||
+          fail "--datadog-mode requires a value"
+        datadog_mode="$2"
+        shift 2
+        ;;
+      *)
+        fail "Unknown submit option: $1"
+        ;;
+    esac
+  done
+
+  for mode in "${jira_mode}" "${datadog_mode}"; do
+    case "${mode}" in
+      disabled|dry-run)
+        ;;
+      *)
+        fail "Local submit mode must be disabled or dry-run"
+        ;;
+    esac
+  done
+
+  kubectl get workflowtemplate     blackduck-wintermute-cohort     --namespace "${namespace}" >/dev/null ||
     fail "Deploy the local cohort resources first"
 
   workflow_resource="$(
@@ -487,26 +522,26 @@ spec:
       - name: datadog-image
         value: ${datadog_image}
       - name: jira-mode
-        value: dry-run
+        value: ${jira_mode}
       - name: datadog-mode
-        value: dry-run
+        value: ${datadog_mode}
       - name: confirm-apply
         value: "false"
       - name: retain-cohorts
         value: "3"
 YAML
-    kubectl create \
-      --filename - \
-      --output name
+    kubectl create       --filename -       --output name
   )"
 
   workflow="${workflow_resource#*/}"
-  printf '%s\n' "${workflow}" \
-    > "${latest_workflow_file}"
+  printf '%s
+' "${workflow}"     > "${latest_workflow_file}"
 
   print "Submitted ${workflow}"
+  print "Jira mode: ${jira_mode}"
+  print "Datadog mode: ${datadog_mode}"
 
-  if [[ "${1:-}" == "--wait" ]]; then
+  if [[ "${wait_for_completion}" == "true" ]]; then
     watch_workflow "${workflow}"
   fi
 }
@@ -600,6 +635,8 @@ Commands:
   deploy         Create scoped Secrets and apply suspended resources
   submit         Submit one manual dry-run workflow
   submit --wait  Submit and wait with logs
+  submit --wait --datadog-mode disabled
+                 Submit a Jira-only dry run
   wait           Wait for the latest submitted workflow
   status         Show the latest workflow and Pods
   logs           Show logs for the latest workflow

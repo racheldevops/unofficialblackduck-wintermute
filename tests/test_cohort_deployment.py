@@ -48,7 +48,7 @@ def test_dockerfile_has_three_cohort_targets() -> None:
     )
 
 
-def test_cohort_dag_orders_consumers_and_tolerates_jira_failure() -> None:
+def test_cohort_dag_orders_consumers_and_supports_disabled_modes() -> None:
     text = (
         ROOT
         / "deploy"
@@ -60,12 +60,38 @@ def test_cohort_dag_orders_consumers_and_tolerates_jira_failure() -> None:
     assert "name: source" in text
     assert "name: jira" in text
     assert "name: datadog" in text
+    assert "name: finalize" in text
     assert "depends: source.Succeeded" in text
+
     assert (
-        "source.Succeeded &&\n"
-        "              (jira.Succeeded || jira.Failed || jira.Errored)"
+        "jira.Succeeded || jira.Failed || jira.Errored ||"
         in text
     )
+    assert (
+        "jira.Skipped || jira.Omitted"
+        in text
+    )
+    assert (
+        "datadog.Succeeded || datadog.Failed || "
+        "datadog.Errored ||"
+        in text
+    )
+    assert (
+        "datadog.Skipped || datadog.Omitted"
+        in text
+    )
+
+    assert (
+        'when: "{{workflow.parameters.jira-mode}} '
+        '!= disabled"'
+        in text
+    )
+    assert (
+        'when: "{{workflow.parameters.datadog-mode}} '
+        '!= disabled"'
+        in text
+    )
+
     assert "blackduck-wintermute-cohorts" in text
     assert "blackduck-wintermute-source-data" in text
     assert "blackduck-wintermute-jira-data" in text

@@ -163,6 +163,80 @@ def validate_rendered_manifest(
     return errors
 
 
+
+def cron_workflow_document(
+    manifest: str,
+) -> str:
+    for document in re.split(
+        r"(?m)^---\s*$",
+        manifest,
+    ):
+        if re.search(
+            r"(?m)^kind:\s*CronWorkflow\s*$",
+            document,
+        ):
+            return document
+
+    return ""
+
+
+def workflow_parameter_value(
+    manifest: str,
+    name: str,
+    default: str,
+) -> str:
+    document = cron_workflow_document(
+        manifest
+    )
+    pattern = re.compile(
+        rf"(?m)^\s*-\s+name:\s*"
+        rf"{re.escape(name)}\s*$"
+        rf"\n\s+value:\s*[\"']?"
+        rf"([^\"'\s]+)"
+    )
+    match = pattern.search(document)
+
+    return (
+        match.group(1)
+        if match
+        else default
+    )
+
+
+def required_secrets_for_manifest(
+    manifest: str,
+) -> tuple[str, ...]:
+    required = [
+        "blackduck-wintermute-registry",
+        (
+            "blackduck-wintermute-"
+            "blackduck-credentials"
+        ),
+    ]
+    jira_mode = workflow_parameter_value(
+        manifest,
+        "jira-mode",
+        "dry-run",
+    )
+    datadog_mode = workflow_parameter_value(
+        manifest,
+        "datadog-mode",
+        "dry-run",
+    )
+
+    if jira_mode != "disabled":
+        required.append(
+            "blackduck-wintermute-jira-credentials"
+        )
+
+    if datadog_mode != "disabled":
+        required.append(
+            "blackduck-wintermute-datadog-credentials"
+        )
+
+    return tuple(required)
+
+
 def validate_cluster(
     manifest_path: Path,
     namespace: str,
@@ -247,7 +321,9 @@ def validate_cluster(
     )
 
     if require_secrets and namespace_exists:
-        for secret in REQUIRED_SECRETS:
+        for secret in required_secrets_for_manifest(
+            manifest
+        ):
             return_code, output = run_kubectl(
                 kubectl,
                 [

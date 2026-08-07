@@ -160,3 +160,19 @@ Deployment workflow:
     .github/workflows/cohort-kubernetes-deploy.yml
 
 Deployment operations are render, diff and apply. Production environments should require approval.
+
+## Optional destinations
+
+Jira and Datadog can each be set to disabled, dry-run, or apply.
+
+For Jira only:
+
+    --jira-mode dry-run
+    --datadog-mode disabled
+
+For Datadog only:
+
+    --jira-mode disabled
+    --datadog-mode dry-run
+
+When a destination is disabled, its Pod is skipped, its API credentials are not required, and its state is not modified. The finalizer records the destination as disabled and still completes the cohort lifecycle.
