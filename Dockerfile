@@ -58,7 +58,7 @@ USER 10001:10001
 FROM runtime-base AS source
 
 ENTRYPOINT ["blackduck-wintermute-cohort-source"]
-CMD ["--scope", "parent-rollup", "--strict", "--resolve-bom-names", "--workers", "8", "--component-workers", "2", "--page-limit", "500", "--minimum-score", "7", "--skip-policy-rule-details"]
+CMD ["--scope", "parent-rollup", "--strict", "--resolve-bom-names", "--workers", "8", "--component-workers", "2", "--page-limit", "500", "--minimum-score", "7", "--skip-policy-rule-details", "--lineage-cache-max-age-days", "7", "--trust-lineage-cache-without-update-marker"]
 
 FROM runtime-base AS jira
 

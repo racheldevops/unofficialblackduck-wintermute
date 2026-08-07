@@ -107,6 +107,8 @@ docker run \
   --page-limit 500 \
   --minimum-score 7 \
   --skip-policy-rule-details \
+  --lineage-cache-max-age-days 7 \
+  --trust-lineage-cache-without-update-marker \
   --cohort-root "${output_root}/cohorts" \
   --cohort-id "${cohort_id}" \
   --summary-out "${output_root}/smoke/${cohort_id}/source-summary.json" \

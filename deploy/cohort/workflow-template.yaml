@@ -175,6 +175,9 @@ spec:
           - --minimum-score
           - "7"
           - --skip-policy-rule-details
+          - --lineage-cache-max-age-days
+          - "7"
+          - --trust-lineage-cache-without-update-marker
           - --cohort-root
           - /var/lib/blackduck-wintermute/cohorts
           - --cohort-id-out

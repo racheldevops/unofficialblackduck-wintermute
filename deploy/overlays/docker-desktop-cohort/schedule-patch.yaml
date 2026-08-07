@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: blackduck-wintermute-cohort
+spec:
+  schedule: "0 2 * * *"
+  timezone: Etc/UTC
+  suspend: true
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    arguments:
+      parameters:
+        - name: source-image
+          value: blackduck-wintermute-source:local
+        - name: jira-image
+          value: blackduck-wintermute-jira:local
+        - name: datadog-image
+          value: blackduck-wintermute-datadog:local
+        - name: jira-mode
+          value: dry-run
+        - name: datadog-mode
+          value: dry-run
+        - name: confirm-apply
+          value: "false"
+        - name: retain-cohorts
+          value: "3"

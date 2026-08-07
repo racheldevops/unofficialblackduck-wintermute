@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: blackduck-wintermute-local
+  labels:
+    app.kubernetes.io/name: blackduck-wintermute
+    app.kubernetes.io/component: local-cohort
