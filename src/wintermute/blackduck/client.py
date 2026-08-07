@@ -125,6 +125,21 @@ class BlackDuckClient:
         )
         worker.ssl_context = self.ssl_context
         worker._token_state = self._token_state
+        worker.cache_raw_gets = self.cache_raw_gets
+        worker.cache_paged_results = (
+            self.cache_paged_results
+        )
+        return worker
+
+    def clone_for_uncached_reads(
+        self,
+    ) -> BlackDuckClient:
+        worker = self.clone_for_worker()
+        worker.api_cache = None
+        worker.cache_raw_gets = False
+        worker.cache_paged_results = False
+        worker.raw_get_cache.clear()
+        worker.paged_result_cache.clear()
         return worker
 
     def authenticate(self) -> None:

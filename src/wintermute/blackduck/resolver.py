@@ -40,6 +40,7 @@ class ScopeResolutionResult:
     @property
     def target_count(self) -> int:
         return len(self.targets)
+    scope_metrics: dict[str, Any] | None = None
 
 
 def inventory_failure(
@@ -62,6 +63,11 @@ def resolve_collection_scope(
     workers: int = 4,
     resolve_bom_names: bool = False,
     debug: bool = False,
+    lineage_cache_path: str = "",
+    refresh_lineage_cache: bool = False,
+    refresh_failed_lineage: bool = True,
+    lineage_cache_max_age_days: float = 7.0,
+    trust_lineage_cache_without_update_marker: bool = False,
 ) -> ScopeResolutionResult:
     normalized_scope = normalize_scope(scope)
     source_rows = [
@@ -83,14 +89,41 @@ def resolve_collection_scope(
                 targets=tuple(targets),
                 failures=(),
                 source_row_count=len(source_rows),
+                scope_metrics={
+                    "relationship_rows": len(source_rows),
+                    "lineage_cache_reused": 0,
+                    "lineage_cache_scanned": 0,
+                    "lineage_cache_pruned": 0,
+                },
             )
 
-        discovery = discover_parent_relationships(
+        discovery_client_factory = getattr(
             client,
+            "clone_for_uncached_reads",
+            None,
+        )
+        discovery_client = (
+            discovery_client_factory()
+            if callable(discovery_client_factory)
+            else client
+        )
+        discovery = discover_parent_relationships(
+            discovery_client,
             inventory_filter=inventory_filter,
             workers=workers,
             resolve_bom_names=resolve_bom_names,
             debug=debug,
+            cache_path=(
+                lineage_cache_path or None
+            ),
+            refresh_all=refresh_lineage_cache,
+            refresh_failed=refresh_failed_lineage,
+            refresh_older_than_days=(
+                lineage_cache_max_age_days
+            ),
+            trust_cache_without_update_marker=(
+                trust_lineage_cache_without_update_marker
+            ),
         )
         targets = targets_from_parent_relationships(
             discovery.relationship_rows,
@@ -121,6 +154,29 @@ def resolve_collection_scope(
             source_row_count=(
                 discovery.relationship_count
             ),
+            scope_metrics={
+                "relationship_rows": (
+                    discovery.relationship_count
+                ),
+                "parent_project_versions": (
+                    discovery.parent_project_version_count
+                ),
+                "inventory_project_versions": (
+                    discovery.inventory.project_version_count
+                ),
+                "lineage_cache_reused": (
+                    discovery.reused_count
+                ),
+                "lineage_cache_scanned": (
+                    discovery.scanned_count
+                ),
+                "lineage_cache_pruned": (
+                    discovery.pruned_count
+                ),
+                "lineage_cache_path": (
+                    discovery.cache_path
+                ),
+            },
         )
 
     if normalized_scope in {
@@ -139,6 +195,7 @@ def resolve_collection_scope(
             targets=tuple(targets),
             failures=(),
             source_row_count=len(source_rows),
+            scope_metrics={},
         )
 
     inventory = build_project_version_inventory(
@@ -164,4 +221,9 @@ def resolve_collection_scope(
         source_row_count=(
             inventory.selected_project_count
         ),
+        scope_metrics={
+            "inventory_project_versions": (
+                inventory.project_version_count
+            ),
+        },
     )

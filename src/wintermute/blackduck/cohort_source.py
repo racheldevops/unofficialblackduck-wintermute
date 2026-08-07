@@ -45,6 +45,14 @@ def default_cache_path() -> str:
     )
 
 
+def default_lineage_cache_path() -> str:
+    return str(
+        output_root()
+        / "blackduck"
+        / "cache"
+        / "parent-lineage-cache.json"
+    )
+
 def default_summary_path() -> str:
     return str(
         output_root()
@@ -118,6 +126,11 @@ def validate_args(args: argparse.Namespace) -> None:
             f"--scope {args.scope.value}"
         )
 
+    if args.lineage_cache_max_age_days < -1:
+        raise RuntimeError(
+            "--lineage-cache-max-age-days must be -1 or greater"
+        )
+
 
 def run(args: argparse.Namespace) -> int:
     validate_args(args)
@@ -147,6 +160,8 @@ def run(args: argparse.Namespace) -> int:
         debug=args.debug,
         api_cache=api_cache,
     )
+    client.cache_raw_gets = False
+    client.cache_paged_results = False
     entity_resolver = (
         ProjectCustomFieldResolver(
             args.entity_custom_field
@@ -179,6 +194,21 @@ def run(args: argparse.Namespace) -> int:
                 resolve_bom_names=(
                     args.resolve_bom_names
                 ),
+                lineage_cache_path=(
+                    "" if args.no_lineage_cache else args.lineage_cache
+                ),
+                refresh_lineage_cache=(
+                    args.refresh_lineage_cache
+                ),
+                refresh_failed_lineage=(
+                    not args.no_refresh_failed_lineage
+                ),
+                lineage_cache_max_age_days=(
+                    args.lineage_cache_max_age_days
+                ),
+                trust_lineage_cache_without_update_marker=(
+                    args.trust_lineage_cache_without_update_marker
+                ),
             ),
             rows=rows,
             inventory_filter=InventoryFilter(
@@ -208,6 +238,9 @@ def run(args: argparse.Namespace) -> int:
         "cohort_directory": "",
         "status": "failed",
     }
+    summary["scope_metrics"] = dict(
+        execution.scope_metrics or {}
+    )
 
     if execution.failure_count and args.strict:
         summary["status"] = "rejected"
@@ -391,6 +424,31 @@ def parse_args(
         action="store_true",
     )
     tls.add_argument("--ca-bundle")
+    parser.add_argument(
+        "--lineage-cache",
+        default=default_lineage_cache_path(),
+    )
+    parser.add_argument(
+        "--no-lineage-cache",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--refresh-lineage-cache",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--no-refresh-failed-lineage",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--lineage-cache-max-age-days",
+        type=float,
+        default=7.0,
+    )
+    parser.add_argument(
+        "--trust-lineage-cache-without-update-marker",
+        action="store_true",
+    )
     parser.add_argument(
         "--api-cache",
         default=default_cache_path(),

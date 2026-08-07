@@ -145,3 +145,63 @@ def test_resolves_all_project_versions_from_inventory() -> None:
         result.targets[0].project_version.project
         == "Service"
     )
+
+
+def test_automatic_parent_discovery_uses_uncached_clone(
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+    from wintermute.blackduck import resolver
+
+    uncached_client = object()
+    captured = {}
+
+    class CacheAwareClient:
+        base_url = "https://bd.example"
+
+        def clone_for_uncached_reads(self):
+            return uncached_client
+
+    def fake_discovery(client, **kwargs):
+        captured["client"] = client
+        captured["kwargs"] = kwargs
+
+        return SimpleNamespace(
+            relationship_rows=(),
+            relationship_count=0,
+            parent_project_version_count=0,
+            failures=(),
+            inventory=SimpleNamespace(
+                project_version_count=0,
+            ),
+            reused_count=0,
+            scanned_count=0,
+            pruned_count=0,
+            cache_path="",
+        )
+
+    monkeypatch.setattr(
+        resolver,
+        "discover_parent_relationships",
+        fake_discovery,
+    )
+
+    result = resolver.resolve_collection_scope(
+        CacheAwareClient(),
+        CollectionScope.PARENT_ROLLUP,
+        rows=[],
+        workers=4,
+    )
+
+    assert result.target_count == 0
+    assert captured["client"] is uncached_client
+    assert captured["kwargs"]["workers"] == 4
+    assert result.scope_metrics == {
+        "relationship_rows": 0,
+        "parent_project_versions": 0,
+        "inventory_project_versions": 0,
+        "lineage_cache_reused": 0,
+        "lineage_cache_scanned": 0,
+        "lineage_cache_pruned": 0,
+        "lineage_cache_path": "",
+    }

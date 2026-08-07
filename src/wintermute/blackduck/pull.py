@@ -48,6 +48,11 @@ class PullRequest:
             raise ValueError(
                 "component_workers must be greater than zero"
             )
+    lineage_cache_path: str = ""
+    refresh_lineage_cache: bool = False
+    refresh_failed_lineage: bool = True
+    lineage_cache_max_age_days: float = 7.0
+    trust_lineage_cache_without_update_marker: bool = False
 
 
 @dataclass(frozen=True)
@@ -74,6 +79,7 @@ class PullExecution:
             len(self.collection.failures)
             + len(self.scope_failures)
         )
+    scope_metrics: dict[str, Any] | None = None
 
 
 def pull_scope(
@@ -96,6 +102,21 @@ def pull_scope(
             request.resolve_bom_names
         ),
         debug=debug,
+        lineage_cache_path=(
+            request.lineage_cache_path
+        ),
+        refresh_lineage_cache=(
+            request.refresh_lineage_cache
+        ),
+        refresh_failed_lineage=(
+            request.refresh_failed_lineage
+        ),
+        lineage_cache_max_age_days=(
+            request.lineage_cache_max_age_days
+        ),
+        trust_lineage_cache_without_update_marker=(
+            request.trust_lineage_cache_without_update_marker
+        ),
     )
     manifest = CollectionManifest(
         scope=resolution.scope,
@@ -120,6 +141,7 @@ def pull_scope(
         manifest=manifest,
         collection=collection,
         scope_failures=resolution.failures,
+        scope_metrics=dict(resolution.scope_metrics or {}),
     )
 
 

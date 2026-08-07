@@ -86,3 +86,28 @@ def test_cohort_schedule_is_safe_by_default() -> None:
 
     assert "suspend: true" in text
     assert "concurrencyPolicy: Forbid" in text
+
+
+def test_cohort_containers_have_explicit_commands_for_argo() -> None:
+    text = (
+        ROOT
+        / "deploy"
+        / "cohort"
+        / "workflow-template.yaml"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        "command:\n"
+        "          - blackduck-wintermute-cohort-source"
+        in text
+    )
+    assert (
+        "command:\n"
+        "          - blackduck-wintermute-jira-cohort"
+        in text
+    )
+    assert (
+        "command:\n"
+        "          - blackduck-wintermute-datadog-cohort"
+        in text
+    )

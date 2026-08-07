@@ -244,3 +244,40 @@ def test_paged_cache_can_be_disabled(
     assert calls == 2
     assert client.raw_get_cache == {}
     assert client.paged_result_cache == {}
+
+
+def test_uncached_clone_disables_all_response_caches() -> None:
+    cache = ApiResponseCache(
+        path="",
+        base_url="https://bd.example",
+        max_age_hours=-1,
+        max_entries=10,
+    )
+    client = BlackDuckClient(
+        "https://bd.example",
+        "token",
+        api_cache=cache,
+        bearer_token="bearer",
+    )
+    clone = client.clone_for_uncached_reads()
+
+    assert clone.api_cache is None
+    assert clone.cache_raw_gets is False
+    assert clone.cache_paged_results is False
+    assert clone.bearer_token == "bearer"
+
+    clone.bearer_token = "updated"
+    assert client.bearer_token == "updated"
+
+
+def test_worker_clone_preserves_cache_policy() -> None:
+    client = BlackDuckClient(
+        "https://bd.example",
+        "token",
+    )
+    client.cache_raw_gets = False
+    client.cache_paged_results = False
+    clone = client.clone_for_worker()
+
+    assert clone.cache_raw_gets is False
+    assert clone.cache_paged_results is False

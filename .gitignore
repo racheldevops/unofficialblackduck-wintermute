@@ -24,3 +24,4 @@ kubeconfig*
 k8s_handnotes2.md
 k8s_handnotes*.md
 /.cache_ggshield
+.local-k8s/

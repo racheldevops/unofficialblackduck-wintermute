@@ -159,6 +159,8 @@ spec:
       container:
         image: "{{workflow.parameters.source-image}}"
         imagePullPolicy: IfNotPresent
+        command:
+          - blackduck-wintermute-cohort-source
         args:
           - --scope
           - parent-rollup
@@ -220,6 +222,8 @@ spec:
       container:
         image: "{{workflow.parameters.jira-image}}"
         imagePullPolicy: IfNotPresent
+        command:
+          - blackduck-wintermute-jira-cohort
         args:
           - --cohort
           - "/var/lib/blackduck-wintermute/cohorts/{{inputs.parameters.cohort-id}}"
@@ -275,6 +279,8 @@ spec:
       container:
         image: "{{workflow.parameters.datadog-image}}"
         imagePullPolicy: IfNotPresent
+        command:
+          - blackduck-wintermute-datadog-cohort
         args:
           - --cohort
           - "/var/lib/blackduck-wintermute/cohorts/{{inputs.parameters.cohort-id}}"
