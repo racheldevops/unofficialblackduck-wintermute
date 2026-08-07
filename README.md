@@ -1,8 +1,8 @@
+# Project Wintermute
 <p align="center">
   <img src="docs/assets/wintermute-logo.png" alt="Wintermute" width="760">
 </p>
 
-# Project Wintermute
 
 <p align="center">
   <strong>Black Duck in. Coordinated security workflows out.</strong>
