@@ -4,8 +4,13 @@
 
 # Project Wintermute
 
-**Black Duck in. Coordinated security workflows out. Take your BlackDuck Adoption from zero to Hero automatically.**
+<p align="center">
+  <strong>Black Duck in. Coordinated security workflows out.</strong>
+  <br><br>
+  <em>Designed to accelerate Black Duck adoption - from initial visibility to repeatable, automated remediation workflows.</em>
+</p>
 
+---
 Wintermute turns Black Duck SCA data into one normalized, checksum-protected cohort that can drive Jira, Datadog, and future integrations. It discovers parent and child project lineage, collects each affected project version once, preserves product context, and gives every destination a consistent security snapshot without repeatedly loading Black Duck.
 
 It is built for enterprise engineering teams: concurrent collection, deterministic identities, persistent caching, destination-scoped credentials, dry-run-first publishing, non-root containers, and Kubernetes cohort orchestration using Argo. Jira produces vulnerability-remediation hierarchies, while Datadog produces concise high-risk vulnerability events from the same underlying findings.
