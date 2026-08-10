@@ -1,0 +1,95 @@
+{
+  "data": {
+    "organization": {
+      "repositories": {
+        "totalCount": 3,
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        },
+        "nodes": [
+          {
+            "id": "R_archived",
+            "nameWithOwner": "acme/archived-service",
+            "url": "https://github.example/acme/archived-service",
+            "visibility": "PRIVATE",
+            "pushedAt": null,
+            "isArchived": true,
+            "isFork": false,
+            "isTemplate": false,
+            "diskUsage": 8,
+            "defaultBranchRef": {
+              "name": "main"
+            },
+            "languages": {
+              "totalSize": 100,
+              "pageInfo": {
+                "hasNextPage": false
+              },
+              "edges": [
+                {
+                  "size": 100,
+                  "node": {
+                    "name": "Python"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "id": "R_docs",
+            "nameWithOwner": "acme/docs",
+            "url": "https://github.example/acme/docs",
+            "visibility": "INTERNAL",
+            "pushedAt": "2025-01-15T12:00:00Z",
+            "isArchived": false,
+            "isFork": true,
+            "isTemplate": false,
+            "diskUsage": 4,
+            "defaultBranchRef": null,
+            "languages": {
+              "totalSize": 0,
+              "pageInfo": {
+                "hasNextPage": false
+              },
+              "edges": []
+            }
+          },
+          {
+            "id": "R_service_api",
+            "nameWithOwner": "acme/service-api",
+            "url": "https://github.example/acme/service-api",
+            "visibility": "PRIVATE",
+            "pushedAt": "2026-07-01T09:30:00Z",
+            "isArchived": false,
+            "isFork": false,
+            "isTemplate": false,
+            "diskUsage": 128,
+            "defaultBranchRef": {
+              "name": "main"
+            },
+            "languages": {
+              "totalSize": 100,
+              "pageInfo": {
+                "hasNextPage": false
+              },
+              "edges": [
+                {
+                  "size": 100,
+                  "node": {
+                    "name": "Python"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "rateLimit": {
+      "cost": 1,
+      "remaining": 4999,
+      "resetAt": "2099-01-01T00:00:00Z"
+    }
+  }
+}
