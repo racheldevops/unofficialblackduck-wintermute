@@ -148,7 +148,7 @@ def run(
             args.scan_evidence
         ),
         collect_direct_scan_evidence=(
-            not args.skip_direct_scan_evidence
+            args.collect_direct_scan_evidence
         ),
         scan_evidence_workers=(
             args.scan_evidence_workers
@@ -268,12 +268,11 @@ def parse_args(
         ),
     )
     parser.add_argument(
-        "--skip-direct-scan-evidence",
+        "--collect-direct-scan-evidence",
         action="store_true",
         help=(
-            "Do not query code-location and scan-summary "
-            "evidence. Scan state remains unknown unless "
-            "--scan-evidence is supplied."
+            "Query detailed Black Duck code-location and "
+            "scan-summary evidence. Disabled by default."
         ),
     )
     parser.add_argument(

@@ -87,7 +87,16 @@ def coverage_metrics(
         for row in rows
         if row.eligible
     ]
-    denominator = len(eligible)
+    eligible_count = len(eligible)
+    scan_known = [
+        row
+        for row in eligible
+        if (
+            row.scan_evidence_complete
+            or row.successful_scan
+        )
+    ]
+    freshness_known = list(scan_known)
 
     return CoverageMetrics(
         onboarding=CoverageMetric(
@@ -95,31 +104,32 @@ def coverage_metrics(
                 row.onboarded is True
                 for row in eligible
             ),
-            denominator=denominator,
+            denominator=eligible_count,
         ),
         mapping=CoverageMetric(
             numerator=sum(
                 row.mapping.authoritative
                 for row in eligible
             ),
-            denominator=denominator,
+            denominator=eligible_count,
         ),
         scan=CoverageMetric(
             numerator=sum(
                 row.successful_scan
-                for row in eligible
+                for row in scan_known
             ),
-            denominator=denominator,
+            denominator=len(scan_known),
         ),
         fresh_scan=CoverageMetric(
             numerator=sum(
                 row.fresh_scan
-                for row in eligible
+                for row in freshness_known
             ),
-            denominator=denominator,
+            denominator=len(
+                freshness_known
+            ),
         ),
     )
-
 
 def primary_language(
     row: RepositoryCoverage,

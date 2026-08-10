@@ -130,6 +130,7 @@ def row(
             if not eligible
             else ""
         ),
+        scan_evidence_complete=True,
         successful_scan=scanned,
         fresh_scan=fresh and scanned,
     )
@@ -273,4 +274,33 @@ def test_report_payload_is_deterministic() -> None:
     ] == {
         "onboarded-not-mapped": 1,
         "scanned-current": 1,
+    }
+
+
+
+def test_scan_metrics_are_unknown_without_evidence() -> None:
+    value = row(
+        "metadata-only",
+        scanned=False,
+        fresh=False,
+    )
+    value = __import__(
+        "dataclasses"
+    ).replace(
+        value,
+        scan_evidence_complete=False,
+    )
+    metrics = coverage_metrics(
+        [value]
+    )
+
+    assert metrics.scan.as_dict() == {
+        "numerator": 0,
+        "denominator": 0,
+        "percentage": None,
+    }
+    assert metrics.fresh_scan.as_dict() == {
+        "numerator": 0,
+        "denominator": 0,
+        "percentage": None,
     }

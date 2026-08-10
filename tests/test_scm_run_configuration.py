@@ -197,3 +197,18 @@ def test_runner_requires_credentials(
                 ]
             )
         )
+
+
+def test_runner_uses_integer_timeout() -> None:
+    runner = load_runner()
+    args = runner.parse_args([])
+
+    assert type(args.timeout) is int
+    assert args.timeout == 30
+
+
+def test_runner_defaults_to_metadata_overview() -> None:
+    runner = load_runner()
+    args = runner.parse_args([])
+
+    assert args.collect_direct_scan_evidence is False

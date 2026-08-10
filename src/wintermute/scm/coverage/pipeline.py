@@ -146,7 +146,7 @@ def execute_coverage(
     scan_evidence_path: (
         str | Path | None
     ) = None,
-    collect_direct_scan_evidence: bool = True,
+    collect_direct_scan_evidence: bool = False,
     scan_evidence_workers: int | None = None,
     freshness_sla_days: int = 30,
     now: datetime | None = None,
