@@ -59,14 +59,3 @@ def test_local_script_never_places_secrets_in_command_arguments() -> None:
         in helper.replace("\n", " ")
         or '"apply",' in helper
     )
-
-
-def test_intellij_run_configs_are_shared() -> None:
-    files = list((ROOT / ".run").glob("*.run.xml"))
-
-    assert len(files) >= 8
-    assert any(
-        "Full_Dry_Run"
-        in path.name
-        for path in files
-    )

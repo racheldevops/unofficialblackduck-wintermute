@@ -85,3 +85,33 @@ The production cohort commands are:
     blackduck-wintermute-cohort-source
     blackduck-wintermute-jira-cohort
     blackduck-wintermute-datadog-cohort
+
+## SCM intelligence and coverage
+
+SCM inventory is an independent read-only source workflow:
+
+    GitHub and future SCM providers
+        |
+        v
+    Provider-specific collection
+        |
+        v
+    Normalized repository and evidence models
+        |
+        v
+    Immutable SCM inventory snapshot
+        |
+        v
+    Black Duck mapping and coverage reconciliation
+
+Stable repository identity uses provider, provider instance and provider-native immutable repository ID. Repository names and URLs remain descriptive attributes and may change without changing identity.
+
+Provider response shapes do not enter coverage logic.
+
+Coverage keeps onboarding, authoritative mapping, Black Duck registration, successful scan evidence and freshness as separate states.
+
+Name-based Black Duck mappings are recommendations. They are never silently accepted.
+
+SCM coverage snapshots are independent from vulnerability cohorts. GitHub or SCM evidence failure must not block Jira or Datadog vulnerability delivery.
+
+The current SCM release is read-only. Future onboarding execution and Harvester scanning remain separate controlled workflows.
