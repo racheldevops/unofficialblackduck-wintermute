@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "image",
+    "credentials",
+    "jira",
+    "cronJob",
+    "pipeline",
+    "persistence"
+  ],
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": ["repository", "pullPolicy"],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^(|sha256:[a-f0-9]{64})$"
+        },
+        "pullPolicy": {
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "tag": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            }
+          }
+        }
+      ]
+    },
+    "credentials": {
+      "type": "object",
+      "required": ["existingSecret"],
+      "properties": {
+        "existingSecret": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "jira": {
+      "type": "object",
+      "required": ["url", "projectKey"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "^https://.+"
+        },
+        "projectKey": {
+          "type": "string",
+          "minLength": 1
+        },
+        "verifyTls": {
+          "type": "boolean"
+        }
+      }
+    },
+    "cronJob": {
+      "type": "object",
+      "required": ["schedule", "timeZone", "suspend"],
+      "properties": {
+        "schedule": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timeZone": {
+          "type": "string",
+          "minLength": 1
+        },
+        "suspend": {
+          "type": "boolean"
+        }
+      }
+    },
+    "pipeline": {
+      "type": "object",
+      "required": [
+        "mode",
+        "confirmApply",
+        "maxCreate",
+        "workers",
+        "parentWorkers",
+        "rollupWorkers"
+      ],
+      "properties": {
+        "mode": {
+          "enum": ["dry-run", "apply"]
+        },
+        "confirmApply": {
+          "type": "boolean"
+        },
+        "maxCreate": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "workers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "parentWorkers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "rollupWorkers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "pageLimit": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "required": ["enabled", "size"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "existingClaim": {
+          "type": "string"
+        },
+        "storageClass": {
+          "type": "string"
+        },
+        "size": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "pipeline": {
+            "properties": {
+              "mode": {
+                "const": "apply"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "pipeline": {
+            "properties": {
+              "confirmApply": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

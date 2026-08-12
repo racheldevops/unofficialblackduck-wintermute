@@ -1,0 +1,145 @@
+{{- $mode := required "pipeline.mode is required" .Values.pipeline.mode -}}
+{{- if not (has $mode (list "dry-run" "apply")) -}}
+{{- fail "pipeline.mode must be dry-run or apply" -}}
+{{- end -}}
+{{- if and (eq $mode "apply") (not .Values.pipeline.confirmApply) -}}
+{{- fail "pipeline.confirmApply must be true when pipeline.mode=apply" -}}
+{{- end -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "blackduck-wintermute-jira.fullname" . }}
+  labels:
+    {{- include "blackduck-wintermute-jira.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cronJob.schedule | quote }}
+  timeZone: {{ .Values.cronJob.timeZone | quote }}
+  suspend: {{ .Values.cronJob.suspend }}
+  concurrencyPolicy: {{ .Values.cronJob.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.cronJob.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.cronJob.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.cronJob.backoffLimit }}
+      activeDeadlineSeconds: {{ .Values.cronJob.activeDeadlineSeconds }}
+      ttlSecondsAfterFinished: {{ .Values.cronJob.ttlSecondsAfterFinished }}
+      template:
+        metadata:
+          labels:
+            {{- include "blackduck-wintermute-jira.selectorLabels" . | nindent 12 }}
+            {{- with .Values.podLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "blackduck-wintermute-jira.serviceAccountName" . }}
+          automountServiceAccountToken: false
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: jira-pipeline
+              image: {{ include "blackduck-wintermute-jira.image" . | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - blackduck-jira-pipeline
+              args:
+                - {{ printf "--%s" $mode | quote }}
+                {{- if .Values.pipeline.strict }}
+                - --strict
+                {{- end }}
+                {{- if .Values.pipeline.resolveBomNames }}
+                - --resolve-bom-names
+                {{- end }}
+                - --workers
+                - {{ .Values.pipeline.workers | quote }}
+                - --parent-workers
+                - {{ .Values.pipeline.parentWorkers | quote }}
+                - --rollup-workers
+                - {{ .Values.pipeline.rollupWorkers | quote }}
+                - --page-limit
+                - {{ .Values.pipeline.pageLimit | quote }}
+                - --config
+                - /etc/blackduck-wintermute/jira-rollup-config.json
+                {{- if eq $mode "apply" }}
+                - --max-create
+                - {{ .Values.pipeline.maxCreate | quote }}
+                {{- end }}
+                {{- if .Values.caBundle.existingConfigMap }}
+                - --ca-bundle
+                - {{ .Values.caBundle.mountPath | quote }}
+                {{- else if .Values.blackDuck.insecure }}
+                - --insecure
+                {{- end }}
+                {{- range .Values.pipeline.extraArgs }}
+                - {{ . | quote }}
+                {{- end }}
+              env:
+                - name: WINTERMUTE_OUTPUT_DIR
+                  value: /var/lib/blackduck-wintermute
+                - name: TMPDIR
+                  value: /tmp
+                {{- if .Values.caBundle.existingConfigMap }}
+                - name: SSL_CERT_FILE
+                  value: {{ .Values.caBundle.mountPath | quote }}
+                {{- end }}
+              envFrom:
+                - secretRef:
+                    name: {{ required "credentials.existingSecret is required" .Values.credentials.existingSecret }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+              volumeMounts:
+                - name: config
+                  mountPath: /etc/blackduck-wintermute/jira-rollup-config.json
+                  subPath: jira-rollup-config.json
+                  readOnly: true
+                - name: data
+                  mountPath: /var/lib/blackduck-wintermute
+                - name: tmp
+                  mountPath: /tmp
+                {{- if .Values.caBundle.existingConfigMap }}
+                - name: customer-ca
+                  mountPath: {{ .Values.caBundle.mountPath | quote }}
+                  subPath: {{ .Values.caBundle.key | quote }}
+                  readOnly: true
+                {{- end }}
+          volumes:
+            - name: config
+              configMap:
+                name: {{ include "blackduck-wintermute-jira.fullname" . }}-config
+            - name: data
+              {{- if .Values.persistence.enabled }}
+              persistentVolumeClaim:
+                claimName: {{ include "blackduck-wintermute-jira.claimName" . }}
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+            - name: tmp
+              emptyDir:
+                sizeLimit: 1Gi
+            {{- if .Values.caBundle.existingConfigMap }}
+            - name: customer-ca
+              configMap:
+                name: {{ .Values.caBundle.existingConfigMap }}
+            {{- end }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}

@@ -1,0 +1,149 @@
+variables:
+  HELM_WINTERMUTE_CHART: deploy/charts/blackduck-wintermute-jira
+  HELM_WINTERMUTE_NAME: wintermute-jira
+  HELM_WINTERMUTE_TIMEOUT: 10m
+
+  WINTERMUTE_CRONJOB_NAME: blackduck-jira-pipeline
+  WINTERMUTE_IMAGE_PULL_POLICY: Always
+  WINTERMUTE_IMAGE_PULL_SECRET: wintermute-registry-credentials
+  WINTERMUTE_RUNTIME_SECRET: blackduck-wintermute-credentials
+
+  WINTERMUTE_CREATE_NAMESPACE: "false"
+  WINTERMUTE_PVC_SIZE: 10Gi
+  WINTERMUTE_STORAGE_CLASS: ""
+  WINTERMUTE_CRON_SCHEDULE: "0 2 * * *"
+  WINTERMUTE_TIME_ZONE: Europe/Berlin
+
+  WINTERMUTE_CRON_SUSPEND: "true"
+  WINTERMUTE_PIPELINE_MODE: dry-run
+  WINTERMUTE_CONFIRM_APPLY: "false"
+  WINTERMUTE_MAX_CREATE: "10"
+
+  WINTERMUTE_WORKERS: "2"
+  WINTERMUTE_PARENT_WORKERS: "2"
+  WINTERMUTE_ROLLUP_WORKERS: "2"
+  WINTERMUTE_PAGE_LIMIT: "500"
+
+  WINTERMUTE_JIRA_VERIFY_TLS: "true"
+  WINTERMUTE_BLACKDUCK_INSECURE: "false"
+  WINTERMUTE_CA_BUNDLE_CONFIGMAP: blackduck-wintermute-ca-bundle
+
+helm:deploy:wintermute-jira:
+  stage: deploy
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+  image: $DEPLOY_TOOLS_IMAGE
+  script:
+    - |
+      set -eu
+      set +x
+
+      for command in helm kubectl python3; do
+        command -v "${command}" >/dev/null 2>&1 || {
+          echo "Required command is missing: ${command}" >&2
+          exit 1
+        }
+      done
+
+      : "${KUBE_NAMESPACE:?KUBE_NAMESPACE is required}"
+      : "${ARTIFACTORY_REGISTRY:?ARTIFACTORY_REGISTRY is required}"
+      : "${ARTIFACTORY_USERNAME:?ARTIFACTORY_USERNAME is required}"
+      : "${ARTIFACTORY_PASSWORD:?ARTIFACTORY_PASSWORD is required}"
+      : "${IMAGE_REPOSITORY:?IMAGE_REPOSITORY is required}"
+      : "${BLACKDUCK_URL:?BLACKDUCK_URL is required}"
+      : "${BLACKDUCK_API_TOKEN:?BLACKDUCK_API_TOKEN is required}"
+      : "${JIRA_URL:?JIRA_URL is required}"
+      : "${JIRA_USER:?JIRA_USER is required}"
+      : "${JIRA_API_TOKEN:?JIRA_API_TOKEN is required}"
+      : "${JIRA_PROJECT_KEY:?JIRA_PROJECT_KEY is required}"
+
+      if [ -z "${IMAGE_TAG:-}" ]; then
+        image_name="${IMAGE_REPOSITORY##*/}"
+
+        case "${image_name}" in
+          *:*)
+            IMAGE_TAG="${image_name##*:}"
+            IMAGE_REPOSITORY="${IMAGE_REPOSITORY%:*}"
+            export IMAGE_TAG IMAGE_REPOSITORY
+            ;;
+          *)
+            echo "IMAGE_TAG is required unless IMAGE_REPOSITORY includes :tag" >&2
+            exit 1
+            ;;
+        esac
+      fi
+
+      case "${WINTERMUTE_IMAGE_PULL_POLICY}" in
+        Always|IfNotPresent|Never)
+          ;;
+        *)
+          echo "Invalid WINTERMUTE_IMAGE_PULL_POLICY" >&2
+          exit 1
+          ;;
+      esac
+
+      if [ -n "${CA_BUNDLE_FILE:-}" ] &&
+         [ "${WINTERMUTE_BLACKDUCK_INSECURE}" = "true" ]; then
+        echo "CA_BUNDLE_FILE cannot be combined with insecure mode" >&2
+        exit 1
+      fi
+
+      if [ "${WINTERMUTE_CREATE_NAMESPACE}" = "true" ]; then
+        kubectl create namespace "${KUBE_NAMESPACE}" \
+          --dry-run=client \
+          --output=yaml |
+        kubectl apply --filename=-
+      else
+        kubectl get namespace "${KUBE_NAMESPACE}" >/dev/null
+      fi
+
+      if [ -n "${CA_BUNDLE_FILE:-}" ]; then
+        CA_BUNDLE_CONFIGMAP="${WINTERMUTE_CA_BUNDLE_CONFIGMAP}"
+      else
+        CA_BUNDLE_CONFIGMAP=""
+      fi
+
+      export KUBE_NAMESPACE
+      export ARTIFACTORY_REGISTRY
+      export ARTIFACTORY_USERNAME
+      export ARTIFACTORY_PASSWORD
+      export WINTERMUTE_IMAGE_PULL_SECRET
+      export WINTERMUTE_RUNTIME_SECRET
+      export WINTERMUTE_CA_BUNDLE_CONFIGMAP
+
+      python3 \
+        "${HELM_WINTERMUTE_CHART}/ci/apply-secrets.py" |
+      kubectl apply --filename=-
+
+      helm upgrade \
+        --install \
+        --atomic \
+        --timeout "${HELM_WINTERMUTE_TIMEOUT}" \
+        --namespace "${KUBE_NAMESPACE}" \
+        --set-string "fullnameOverride=${WINTERMUTE_CRONJOB_NAME}" \
+        --set-string "image.repository=${IMAGE_REPOSITORY}" \
+        --set-string "image.tag=${IMAGE_TAG}" \
+        --set-string "image.pullPolicy=${WINTERMUTE_IMAGE_PULL_POLICY}" \
+        --set-string "imagePullSecrets[0].name=${WINTERMUTE_IMAGE_PULL_SECRET}" \
+        --set-string "credentials.existingSecret=${WINTERMUTE_RUNTIME_SECRET}" \
+        --set-string "jira.url=${JIRA_URL}" \
+        --set-string "jira.projectKey=${JIRA_PROJECT_KEY}" \
+        --set "jira.verifyTls=${WINTERMUTE_JIRA_VERIFY_TLS}" \
+        --set-string "persistence.storageClass=${WINTERMUTE_STORAGE_CLASS}" \
+        --set-string "persistence.size=${WINTERMUTE_PVC_SIZE}" \
+        --set-string "cronJob.schedule=${WINTERMUTE_CRON_SCHEDULE}" \
+        --set-string "cronJob.timeZone=${WINTERMUTE_TIME_ZONE}" \
+        --set "cronJob.suspend=${WINTERMUTE_CRON_SUSPEND}" \
+        --set-string "pipeline.mode=${WINTERMUTE_PIPELINE_MODE}" \
+        --set "pipeline.confirmApply=${WINTERMUTE_CONFIRM_APPLY}" \
+        --set "pipeline.maxCreate=${WINTERMUTE_MAX_CREATE}" \
+        --set "pipeline.workers=${WINTERMUTE_WORKERS}" \
+        --set "pipeline.parentWorkers=${WINTERMUTE_PARENT_WORKERS}" \
+        --set "pipeline.rollupWorkers=${WINTERMUTE_ROLLUP_WORKERS}" \
+        --set "pipeline.pageLimit=${WINTERMUTE_PAGE_LIMIT}" \
+        --set "blackDuck.insecure=${WINTERMUTE_BLACKDUCK_INSECURE}" \
+        --set-string "caBundle.existingConfigMap=${CA_BUNDLE_CONFIGMAP}" \
+        "${HELM_WINTERMUTE_NAME}" \
+        "${HELM_WINTERMUTE_CHART}"
+  environment:
+    name: $KUBE_NAMESPACE
