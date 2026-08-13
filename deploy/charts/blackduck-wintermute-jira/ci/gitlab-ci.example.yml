@@ -8,7 +8,6 @@ variables:
   WINTERMUTE_IMAGE_PULL_SECRET: wintermute-registry-credentials
   WINTERMUTE_RUNTIME_SECRET: blackduck-wintermute-credentials
 
-  WINTERMUTE_CREATE_NAMESPACE: "false"
   WINTERMUTE_PVC_SIZE: 10Gi
   WINTERMUTE_STORAGE_CLASS: ""
   WINTERMUTE_CRON_SCHEDULE: "0 2 * * *"
@@ -26,7 +25,8 @@ variables:
 
   WINTERMUTE_JIRA_VERIFY_TLS: "true"
   WINTERMUTE_BLACKDUCK_INSECURE: "false"
-  WINTERMUTE_CA_BUNDLE_CONFIGMAP: blackduck-wintermute-ca-bundle
+
+  WINTERMUTE_CA_BUNDLE_CONFIGMAP: ""
 
 helm:deploy:wintermute-jira:
   stage: deploy
@@ -38,26 +38,19 @@ helm:deploy:wintermute-jira:
       set -eu
       set +x
 
-      for command in helm kubectl python3; do
-        command -v "${command}" >/dev/null 2>&1 || {
-          echo "Required command is missing: ${command}" >&2
-          exit 1
-        }
-      done
+      command -v helm >/dev/null 2>&1 || {
+        echo "Required command is missing: helm" >&2
+        exit 1
+      }
 
       : "${KUBE_NAMESPACE:?KUBE_NAMESPACE is required}"
-      : "${ARTIFACTORY_REGISTRY:?ARTIFACTORY_REGISTRY is required}"
-      : "${ARTIFACTORY_USERNAME:?ARTIFACTORY_USERNAME is required}"
-      : "${ARTIFACTORY_PASSWORD:?ARTIFACTORY_PASSWORD is required}"
       : "${IMAGE_REPOSITORY:?IMAGE_REPOSITORY is required}"
-      : "${BLACKDUCK_URL:?BLACKDUCK_URL is required}"
-      : "${BLACKDUCK_API_TOKEN:?BLACKDUCK_API_TOKEN is required}"
       : "${JIRA_URL:?JIRA_URL is required}"
-      : "${JIRA_USER:?JIRA_USER is required}"
-      : "${JIRA_API_TOKEN:?JIRA_API_TOKEN is required}"
       : "${JIRA_PROJECT_KEY:?JIRA_PROJECT_KEY is required}"
+      : "${WINTERMUTE_IMAGE_PULL_SECRET:?WINTERMUTE_IMAGE_PULL_SECRET is required}"
+      : "${WINTERMUTE_RUNTIME_SECRET:?WINTERMUTE_RUNTIME_SECRET is required}"
 
-      if [ -z "${IMAGE_TAG:-}" ]; then
+      if test -z "${IMAGE_TAG:-}"; then
         image_name="${IMAGE_REPOSITORY##*/}"
 
         case "${image_name}" in
@@ -81,39 +74,6 @@ helm:deploy:wintermute-jira:
           exit 1
           ;;
       esac
-
-      if [ -n "${CA_BUNDLE_FILE:-}" ] &&
-         [ "${WINTERMUTE_BLACKDUCK_INSECURE}" = "true" ]; then
-        echo "CA_BUNDLE_FILE cannot be combined with insecure mode" >&2
-        exit 1
-      fi
-
-      if [ "${WINTERMUTE_CREATE_NAMESPACE}" = "true" ]; then
-        kubectl create namespace "${KUBE_NAMESPACE}" \
-          --dry-run=client \
-          --output=yaml |
-        kubectl apply --filename=-
-      else
-        kubectl get namespace "${KUBE_NAMESPACE}" >/dev/null
-      fi
-
-      if [ -n "${CA_BUNDLE_FILE:-}" ]; then
-        CA_BUNDLE_CONFIGMAP="${WINTERMUTE_CA_BUNDLE_CONFIGMAP}"
-      else
-        CA_BUNDLE_CONFIGMAP=""
-      fi
-
-      export KUBE_NAMESPACE
-      export ARTIFACTORY_REGISTRY
-      export ARTIFACTORY_USERNAME
-      export ARTIFACTORY_PASSWORD
-      export WINTERMUTE_IMAGE_PULL_SECRET
-      export WINTERMUTE_RUNTIME_SECRET
-      export WINTERMUTE_CA_BUNDLE_CONFIGMAP
-
-      python3 \
-        "${HELM_WINTERMUTE_CHART}/ci/apply-secrets.py" |
-      kubectl apply --filename=-
 
       helm upgrade \
         --install \
@@ -142,7 +102,7 @@ helm:deploy:wintermute-jira:
         --set "pipeline.rollupWorkers=${WINTERMUTE_ROLLUP_WORKERS}" \
         --set "pipeline.pageLimit=${WINTERMUTE_PAGE_LIMIT}" \
         --set "blackDuck.insecure=${WINTERMUTE_BLACKDUCK_INSECURE}" \
-        --set-string "caBundle.existingConfigMap=${CA_BUNDLE_CONFIGMAP}" \
+        --set-string "caBundle.existingConfigMap=${WINTERMUTE_CA_BUNDLE_CONFIGMAP}" \
         "${HELM_WINTERMUTE_NAME}" \
         "${HELM_WINTERMUTE_CHART}"
   environment:

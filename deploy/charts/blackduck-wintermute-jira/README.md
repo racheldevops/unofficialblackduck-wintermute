@@ -2,8 +2,9 @@
 
 This chart deploys Wintermute as a Kubernetes CronJob without Argo.
 
-The GitLab job refreshes the registry Secret, runtime Secret, optional CA
-ConfigMap, and Helm release. It does not build the container image.
+The GitLab job manages only the Helm release. The namespace and application
+Secrets must already exist in Rancher. It does not build the application image,
+create a namespace, or create credentials.
 
 ## GitLab integration
 
@@ -14,74 +15,115 @@ Add this to the root GitLab configuration:
 
 The parent pipeline must define a deploy stage.
 
+## Deployment tools image
+
+DEPLOY_TOOLS_IMAGE must contain:
+
+    Helm 3
+    POSIX shell
+    CA certificates
+
+It does not need kubectl or Python.
+
+Helm connects directly to the Kubernetes API using KUBECONFIG.
+
 ## Required GitLab variables
 
-These names match the original deployment contract.
-
-### Cluster
+### Kubernetes
 
     KUBECONFIG
     KUBE_NAMESPACE
     DEPLOY_TOOLS_IMAGE
 
-KUBECONFIG should be a protected GitLab File variable unless the runner
-already provides cluster access.
+The namespace identified by KUBE_NAMESPACE must already exist. The deployment
+does not use the Helm create-namespace option.
 
-DEPLOY_TOOLS_IMAGE must contain helm, kubectl, python3, and POSIX sh.
+### Container image
 
-### Private registry
-
-    ARTIFACTORY_REGISTRY
-    ARTIFACTORY_USERNAME
-    ARTIFACTORY_PASSWORD
     IMAGE_REPOSITORY
 
-ARTIFACTORY_REGISTRY is the registry hostname and optional port only.
-
-IMAGE_REPOSITORY may use either of these forms:
+IMAGE_REPOSITORY may be either:
 
     registry.example.invalid/team/wintermute
     registry.example.invalid/team/wintermute:existing-tag
 
-When IMAGE_REPOSITORY has no tag, also configure:
+When IMAGE_REPOSITORY does not include a tag, also set:
 
     IMAGE_TAG
 
-ARTIFACTORY_PASSWORD must be masked, hidden, protected, and scoped to the
-deployment environment.
+### Jira chart configuration
 
-### Black Duck
+    JIRA_URL
+    JIRA_PROJECT_KEY
+
+JIRA_URL must match the value stored in the manually managed runtime Secret.
+
+## Resources to create in Rancher
+
+Create the following resources in the namespace identified by KUBE_NAMESPACE.
+
+### Registry credentials
+
+Create a Rancher Registry Credentials Secret:
+
+    Name: wintermute-registry-credentials
+    Type: kubernetes.io/dockerconfigjson
+
+Supply:
+
+    Registry server
+    Registry username
+    Registry password
+
+The registry server must be the hostname and optional port only. Do not include
+https:// or the image repository path.
+
+The corresponding GitLab variable is:
+
+    WINTERMUTE_IMAGE_PULL_SECRET=wintermute-registry-credentials
+
+### Runtime credentials
+
+Create a regular Opaque Secret:
+
+    Name: blackduck-wintermute-credentials
+    Type: Opaque
+
+Add these exact, case-sensitive keys:
 
     BLACKDUCK_URL
     BLACKDUCK_API_TOKEN
-
-### Jira
-
     JIRA_URL
     JIRA_USER
     JIRA_API_TOKEN
-    JIRA_PROJECT_KEY
 
-BLACKDUCK_API_TOKEN and JIRA_API_TOKEN must be masked, hidden, protected, and
-scoped to the deployment environment.
+Enter raw values through the Rancher form. Rancher handles Kubernetes encoding.
 
-Do not enable CI_DEBUG_TRACE.
+The corresponding GitLab variable is:
 
-If protected variables are used, the develop branch must also be protected.
+    WINTERMUTE_RUNTIME_SECRET=blackduck-wintermute-credentials
 
-## Optional CA bundle
+## Optional private CA
 
-When Black Duck or Jira requires a corporate CA, configure:
+No additional resource is required when Black Duck and Jira use publicly
+trusted certificates.
 
-    CA_BUNDLE_FILE
+If a private or corporate CA is required, create a ConfigMap in the same
+namespace:
 
-Create it as a protected GitLab File variable containing the complete PEM CA
-bundle.
+    Name: blackduck-wintermute-ca-bundle
+    Key: ca.crt
 
-The pipeline creates or refreshes the CA ConfigMap automatically.
+The ca.crt value must contain the required PEM CA bundle.
+
+Then configure:
+
+    WINTERMUTE_CA_BUNDLE_CONFIGMAP=blackduck-wintermute-ca-bundle
+
+Leave WINTERMUTE_CA_BUNDLE_CONFIGMAP empty when no private CA is required.
 
 Registry certificate trust is separate. Kubernetes nodes and their container
-runtime must already trust the private registry CA.
+runtime must already trust any private CA used by the image registry.
 
 ## Safe defaults
 
@@ -90,8 +132,8 @@ The included CI job defaults to:
     WINTERMUTE_IMAGE_PULL_POLICY=Always
     WINTERMUTE_IMAGE_PULL_SECRET=wintermute-registry-credentials
     WINTERMUTE_RUNTIME_SECRET=blackduck-wintermute-credentials
+    WINTERMUTE_CA_BUNDLE_CONFIGMAP=
 
-    WINTERMUTE_CREATE_NAMESPACE=false
     WINTERMUTE_PVC_SIZE=10Gi
     WINTERMUTE_STORAGE_CLASS=
     WINTERMUTE_CRON_SCHEDULE=0 2 * * *
@@ -110,27 +152,18 @@ The included CI job defaults to:
     WINTERMUTE_JIRA_VERIFY_TLS=true
     WINTERMUTE_BLACKDUCK_INSECURE=false
 
-Set WINTERMUTE_CREATE_NAMESPACE=true only if the deployment identity may
-create namespaces.
+## Helm permissions
 
-## Kubernetes resources managed by CI
+The deployment identity needs permission in the existing namespace to manage:
 
-The pipeline creates or refreshes:
+    CronJobs
+    ConfigMaps
+    PersistentVolumeClaims
+    ServiceAccounts
+    Helm release Secrets
 
-    wintermute-registry-credentials
-    blackduck-wintermute-credentials
-    blackduck-wintermute-ca-bundle
-
-The runtime Secret contains:
-
-    BLACKDUCK_URL
-    BLACKDUCK_API_TOKEN
-    JIRA_URL
-    JIRA_USER
-    JIRA_API_TOKEN
-
-Credential values are sent to Kubernetes over stdin and are not passed to
-Helm.
+It does not need permission to create namespaces or manage the application
+credential Secrets.
 
 ## Initial deployment
 
@@ -140,12 +173,12 @@ Keep:
     WINTERMUTE_PIPELINE_MODE=dry-run
     WINTERMUTE_CONFIRM_APPLY=false
 
-Run the GitLab deployment job, then use Rancher Run Now and review the Pod
-logs. No Jira issue should be created in dry-run mode.
+Run the GitLab deployment job, start the CronJob manually through Rancher, and
+review the Pod logs. Dry-run mode must not create Jira issues.
 
 ## First bounded apply
 
-After approving the dry run:
+After accepting the dry run:
 
     WINTERMUTE_CRON_SUSPEND=true
     WINTERMUTE_PIPELINE_MODE=apply
@@ -154,18 +187,13 @@ After approving the dry run:
 
 ## Enable scheduling
 
-Only after the bounded apply is accepted:
+Only after accepting the bounded apply:
 
     WINTERMUTE_CRON_SUSPEND=false
     WINTERMUTE_PIPELINE_MODE=apply
     WINTERMUTE_CONFIRM_APPLY=true
 
-## Persistent storage
+## Credential rotation
 
-The chart creates a 10Gi ReadWriteOnce PVC by default. It is retained during
-Helm uninstall but is deleted if its namespace is deleted.
-
-## Public repository privacy
-
-Do not commit real customer registry hostnames, image paths, namespaces,
-usernames, Jira URLs, Black Duck URLs, cluster names, or organization names.
+Rotate the registry and runtime Secrets through Rancher. The GitLab deployment
+job does not create or update them.
