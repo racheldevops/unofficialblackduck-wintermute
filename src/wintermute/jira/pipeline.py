@@ -259,7 +259,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--project-name-contains', help='Optional parent discovery project-name filter.')
     parser.add_argument('--threshold', type=float, default=7.0)
     parser.add_argument('--score-field', default='overallScore')
-    parser.add_argument('--entity-custom-field', default='foo Entity')
+    parser.add_argument('--entity-custom-field', default='')
     parser.add_argument('--require-entity', action='store_true')
     parser.add_argument('--timeout', type=int, default=60)
     parser.add_argument('--retries', type=int, default=2)
