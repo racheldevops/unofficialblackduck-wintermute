@@ -44,6 +44,7 @@ pipeline:
   parentWorkers: 2
   rollupWorkers: 2
   pageLimit: 500
+  lockStaleSeconds: 10800
   extraArgs: []
 
 persistence:

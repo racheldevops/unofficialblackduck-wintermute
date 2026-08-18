@@ -1,0 +1,81 @@
+{{- if .Values.persistence.enabled }}
+{{- $name := printf "%s-lock-maintenance" (include "blackduck-wintermute-jira.fullname" .) | trunc 63 | trimSuffix "-" -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "blackduck-wintermute-jira.labels" . | nindent 4 }}
+    wintermute.io/maintenance: pipeline-lock
+spec:
+  schedule: "0 0 1 1 *"
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 300
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            {{- include "blackduck-wintermute-jira.selectorLabels" . | nindent 12 }}
+            wintermute.io/maintenance: pipeline-lock
+        spec:
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 30
+          serviceAccountName: {{ include "blackduck-wintermute-jira.serviceAccountName" . }}
+          automountServiceAccountToken: false
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: lock-maintenance
+              image: {{ include "blackduck-wintermute-jira.image" . | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - python
+              args:
+                - -m
+                - wintermute.jira.pipeline_lock
+                - inspect
+              env:
+                - name: WINTERMUTE_OUTPUT_DIR
+                  value: /var/lib/blackduck-wintermute
+                - name: TMPDIR
+                  value: /tmp
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
+              volumeMounts:
+                - name: data
+                  mountPath: /var/lib/blackduck-wintermute
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: {{ include "blackduck-wintermute-jira.claimName" . }}
+            - name: tmp
+              emptyDir:
+                sizeLimit: 64Mi
+{{- end }}

@@ -100,7 +100,8 @@
         "maxCreate",
         "workers",
         "parentWorkers",
-        "rollupWorkers"
+        "rollupWorkers",
+        "lockStaleSeconds"
       ],
       "properties": {
         "mode": {
@@ -131,6 +132,11 @@
         "pageLimit": {
           "type": "integer",
           "minimum": 1
+        },
+        "lockStaleSeconds": {
+          "type": "integer",
+          "minimum": 300,
+          "maximum": 86400
         }
       }
     },

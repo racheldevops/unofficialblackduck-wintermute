@@ -36,6 +36,7 @@ spec:
           {{- end }}
         spec:
           restartPolicy: Never
+          terminationGracePeriodSeconds: 30
           serviceAccountName: {{ include "blackduck-wintermute-jira.serviceAccountName" . }}
           automountServiceAccountToken: false
           securityContext:
@@ -66,6 +67,8 @@ spec:
                 - {{ .Values.pipeline.rollupWorkers | quote }}
                 - --page-limit
                 - {{ .Values.pipeline.pageLimit | quote }}
+                - --lock-stale-seconds
+                - {{ .Values.pipeline.lockStaleSeconds | quote }}
                 - --config
                 - /etc/blackduck-wintermute/jira-rollup-config.json
                 {{- if eq $mode "apply" }}
@@ -86,6 +89,14 @@ spec:
                   value: /var/lib/blackduck-wintermute
                 - name: TMPDIR
                   value: /tmp
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
                 {{- if .Values.caBundle.existingConfigMap }}
                 - name: SSL_CERT_FILE
                   value: {{ .Values.caBundle.mountPath | quote }}

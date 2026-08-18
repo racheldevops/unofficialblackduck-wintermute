@@ -22,10 +22,10 @@ variables:
   WINTERMUTE_PARENT_WORKERS: "2"
   WINTERMUTE_ROLLUP_WORKERS: "2"
   WINTERMUTE_PAGE_LIMIT: "500"
+  WINTERMUTE_LOCK_STALE_SECONDS: "10800"
 
   WINTERMUTE_JIRA_VERIFY_TLS: "true"
   WINTERMUTE_BLACKDUCK_INSECURE: "false"
-
   WINTERMUTE_CA_BUNDLE_CONFIGMAP: ""
 
 helm:deploy:wintermute-jira:
@@ -101,6 +101,7 @@ helm:deploy:wintermute-jira:
         --set "pipeline.parentWorkers=${WINTERMUTE_PARENT_WORKERS}" \
         --set "pipeline.rollupWorkers=${WINTERMUTE_ROLLUP_WORKERS}" \
         --set "pipeline.pageLimit=${WINTERMUTE_PAGE_LIMIT}" \
+        --set "pipeline.lockStaleSeconds=${WINTERMUTE_LOCK_STALE_SECONDS}" \
         --set "blackDuck.insecure=${WINTERMUTE_BLACKDUCK_INSECURE}" \
         --set-string "caBundle.existingConfigMap=${WINTERMUTE_CA_BUNDLE_CONFIGMAP}" \
         "${HELM_WINTERMUTE_NAME}" \
