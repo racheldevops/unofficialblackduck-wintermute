@@ -30,6 +30,9 @@ from wintermute.blackduck.lineage import (
 from wintermute.blackduck.models import ProjectVersionRef
 from wintermute.blackduck import discovery_cache as shared_discovery_cache
 from wintermute.blackduck.client import BlackDuckClient as SharedBlackDuckClient
+from wintermute.blackduck.request_control import (
+    BlackDuckCircuitOpenError,
+)
 from wintermute.concurrency import (
     MAX_IO_WORKERS,
     bounded_worker_count,
@@ -599,6 +602,8 @@ def scan_one_parent(
             debug=debug,
         )
         return parent, reason, relations, None
+    except BlackDuckCircuitOpenError:
+        raise
     except RuntimeError as error:
         return parent, reason, [], str(error)
 

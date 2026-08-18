@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from wintermute.blackduck.circuit_recovery import run_with_circuit_recovery
 from wintermute.concurrency import MAX_IO_WORKERS, bounded_worker_count
 from wintermute.jira import find_parent_projects, findings_hierarchy_plan, findings_to_jira, subp_vuln_rollup
 from wintermute.paths import ensure_parent_dir, output_root, package_path
@@ -115,7 +116,9 @@ def run_stage(summary: dict[str, Any], name: str, module: ModuleType, arguments:
     stage_result: dict[str, Any] = {'name': name, 'module': module.__name__, 'started_at': started_at, 'arguments': list(arguments), 'status': 'running', 'exit_code': None, 'elapsed_seconds': None, 'expected_outputs': [str(path) for path in expected_outputs]}
     summary.setdefault('stages', []).append(stage_result)
     try:
-        exit_code = invoke_module_main(module, arguments)
+        exit_code = run_with_circuit_recovery(
+            lambda: invoke_module_main(module, arguments),
+        )
     except KeyboardInterrupt:
         stage_result['status'] = 'interrupted'
         stage_result['exit_code'] = EXIT_INTERRUPTED

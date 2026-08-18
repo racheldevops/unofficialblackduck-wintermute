@@ -5,6 +5,9 @@ import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from wintermute.blackduck.request_control import (
+    BlackDuckCircuitOpenError,
+)
 from wintermute.blackduck.models import (
     LineageContext,
     ProjectVersionRef,
@@ -127,6 +130,8 @@ def resolve_project_version(
     try:
         project = client.get(project_href)
         version = client.get(version_href)
+    except BlackDuckCircuitOpenError:
+        raise
     except RuntimeError:
         return None
 
@@ -175,6 +180,8 @@ def get_bom_components(
 
     try:
         return client.paged_get(components_url)
+    except BlackDuckCircuitOpenError:
+        raise
     except RuntimeError as direct_error:
         try:
             version = client.get(
@@ -192,6 +199,8 @@ def get_bom_components(
             if linked_url:
                 return client.paged_get(linked_url)
 
+        except BlackDuckCircuitOpenError:
+            raise
         except RuntimeError:
             pass
 

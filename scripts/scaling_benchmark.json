@@ -10,11 +10,7 @@
     "--resolve-bom-names",
     "--strict",
     "--insecure",
-    "--debug",
-    "--exclude-parent-project",
-    "zz-api-parent-rollup-test-20260625-171201",
-    "--exclude-child-project",
-    "AM_oss-mirage-agentic-backend"
+    "--debug"
   ],
   "jira_config": "src/wintermute/jira/config/jira-rollup-config.json",
   "environment_names": [

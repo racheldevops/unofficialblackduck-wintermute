@@ -16,6 +16,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 from wintermute.blackduck.client import BlackDuckClient as SharedBlackDuckClient
+from wintermute.blackduck.request_control import (
+    BlackDuckCircuitOpenError,
+)
 from wintermute.blackduck.criteria import (
     jira_parent_rollup_criteria,
 )
@@ -279,6 +282,8 @@ def discover_direct_subprojects(
 
             try:
                 child_version = client.get(candidate_href)
+            except BlackDuckCircuitOpenError:
+                raise
             except RuntimeError as error:
                 if debug:
                     print(
@@ -318,6 +323,8 @@ def discover_direct_subprojects(
                     str(component_name),
                     str(component_version_name),
                 )
+            except BlackDuckCircuitOpenError:
+                raise
             except RuntimeError:
                 continue
 
@@ -581,6 +588,8 @@ def read_project_custom_field(
 
     try:
         project = client.get(project_href)
+    except BlackDuckCircuitOpenError:
+        raise
     except RuntimeError as error:
         if client.debug:
             print(
@@ -633,6 +642,8 @@ def read_project_custom_field(
 
         try:
             custom_fields = client.paged_get(candidate_url)
+        except BlackDuckCircuitOpenError:
+            raise
         except RuntimeError as error:
             if client.debug:
                 print(
@@ -918,6 +929,8 @@ def load_subproject_refs_from_parent_csv(
                 "",
                 time.monotonic() - started,
             )
+        except BlackDuckCircuitOpenError:
+            raise
         except RuntimeError as error:
             return (
                 href,

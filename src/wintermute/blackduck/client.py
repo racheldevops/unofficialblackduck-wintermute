@@ -766,6 +766,7 @@ class BlackDuckClient:
             .record_server_failure(
                 status,
                 url,
+                context=permit.context,
             )
         )
         self._log_network_result(

@@ -32,6 +32,14 @@ from wintermute.blackduck.vulnerabilities import (
     vulnerability_score,
     vulnerability_severity,
 )
+from wintermute.blackduck.circuit_recovery import (
+    default_quarantine_path,
+    load_active_quarantine,
+)
+from wintermute.blackduck.request_control import (
+    BlackDuckCircuitOpenError,
+    blackduck_request_context,
+)
 from wintermute.concurrency import (
     DEFAULT_IO_WORKERS,
     MAX_COMPONENT_WORKERS,
@@ -146,11 +154,15 @@ def get_vulnerable_components(
 
     try:
         return client.paged_get(direct_url)
+    except BlackDuckCircuitOpenError:
+        raise
     except RuntimeError as direct_error:
         try:
             version = client.get(
                 project_version_href
             )
+        except BlackDuckCircuitOpenError:
+            raise
         except RuntimeError:
             raise direct_error
 
@@ -273,6 +285,8 @@ def component_details(
             version_resource = client.get(
                 version_href
             )
+        except BlackDuckCircuitOpenError:
+            raise
         except RuntimeError:
             version_resource = {}
         else:
@@ -322,6 +336,8 @@ def get_policy_rules(
 
     try:
         return client.paged_get(url)
+    except BlackDuckCircuitOpenError:
+        raise
     except RuntimeError:
         return []
 
@@ -713,6 +729,8 @@ def collect_target(
                 )
                 or ""
             )
+        except BlackDuckCircuitOpenError:
+            raise
         except Exception as error:
             failure = CollectionFailure(
                 target_external_id=(
@@ -768,36 +786,53 @@ def collect_target(
             ),
         )
 
-    try:
-        components = get_vulnerable_components(
-            client,
-            project_version.version_href,
-        )
-        components = dedupe_vulnerable_components(
-            components
-        )
-    except Exception as error:
-        failure = CollectionFailure(
-            target_external_id=(
-                project_version.external_id
-            ),
-            project=project_version.project,
-            project_version=project_version.version,
-            project_version_href=(
-                project_version.version_href
-            ),
-            stage="load-vulnerable-components",
-            error=str(error),
-        )
+    with blackduck_request_context(
+        child_project=project_version.project,
+        child_version=project_version.version,
+        child_version_href=project_version.version_href,
+        parent_projects=";".join(
+            sorted(
+                {
+                    context.parent.project
+                    for context in target.lineage_contexts
+                    if context.parent.project
+                }
+            )
+        ),
+        stage="load-vulnerable-components",
+    ):
+        try:
+            components = get_vulnerable_components(
+                client,
+                project_version.version_href,
+            )
+            components = dedupe_vulnerable_components(
+                components
+            )
+        except BlackDuckCircuitOpenError:
+            raise
+        except Exception as error:
+            failure = CollectionFailure(
+                target_external_id=(
+                    project_version.external_id
+                ),
+                project=project_version.project,
+                project_version=project_version.version,
+                project_version_href=(
+                    project_version.version_href
+                ),
+                stage="load-vulnerable-components",
+                error=str(error),
+            )
 
-        return TargetCollectionResult(
-            target=target,
-            findings=(),
-            failures=(failure,),
-            elapsed_seconds=(
-                time.monotonic() - started
-            ),
-        )
+            return TargetCollectionResult(
+                target=target,
+                findings=(),
+                failures=(failure,),
+                elapsed_seconds=(
+                    time.monotonic() - started
+                ),
+            )
 
     if not components:
         return TargetCollectionResult(
@@ -842,53 +877,77 @@ def collect_target(
     ]:
         _, component = item
 
-        try:
-            return (
-                collect_component_findings(
-                    worker_client(),
-                    target,
-                    component,
-                    criteria,
-                    entity=entity,
-                ),
-                None,
-            )
-        except Exception as error:
-            name = str(
+        with blackduck_request_context(
+            child_project=project_version.project,
+            child_version=project_version.version,
+            child_version_href=project_version.version_href,
+            parent_projects=";".join(
+                sorted(
+                    {
+                        context.parent.project
+                        for context in target.lineage_contexts
+                        if context.parent.project
+                    }
+                )
+            ),
+            component=str(
                 first_value_by_key(
                     component,
-                    (
-                        "componentName",
-                        "name",
-                    ),
+                    ("componentName", "name"),
                 )
                 or ""
-            )
-            href = canonical_href(
-                get_self_href(component)
-            )
+            ),
+            stage="component-vulnerabilities",
+        ):
+            try:
+                return (
+                    collect_component_findings(
+                        worker_client(),
+                        target,
+                        component,
+                        criteria,
+                        entity=entity,
+                    ),
+                    None,
+                )
+            except BlackDuckCircuitOpenError:
+                raise
+            except Exception as error:
+                name = str(
+                    first_value_by_key(
+                        component,
+                        (
+                            "componentName",
+                            "name",
+                        ),
+                    )
+                    or ""
+                )
+                href = canonical_href(
+                    get_self_href(component)
+                )
 
-            return (
-                [],
-                CollectionFailure(
-                    target_external_id=(
-                        project_version.external_id
+                return (
+                    [],
+                    CollectionFailure(
+                        target_external_id=(
+                            project_version.external_id
+                        ),
+                        project=(
+                            project_version.project
+                        ),
+                        project_version=(
+                            project_version.version
+                        ),
+                        project_version_href=(
+                            project_version.version_href
+                        ),
+                        stage="component-details",
+                        error=str(error),
+                        component=name,
+                        component_href=href,
                     ),
-                    project=(
-                        project_version.project
-                    ),
-                    project_version=(
-                        project_version.version
-                    ),
-                    project_version_href=(
-                        project_version.version_href
-                    ),
-                    stage="component-details",
-                    error=str(error),
-                    component=name,
-                    component_href=href,
-                ),
-            )
+                )
 
     component_results = ordered_parallel_map(
         enumerate(components),
@@ -934,10 +993,59 @@ def collect_targets(
     entity_resolver: EntityResolver | None = None,
 ) -> CollectionRunResult:
     target_list = list(targets)
+    quarantined_results: list[TargetCollectionResult] = []
+    quarantine = load_active_quarantine(
+        default_quarantine_path()
+    )
+
+    if quarantine is not None:
+        active_targets: list[CollectionTarget] = []
+
+        for target in target_list:
+            project_version = target.project_version
+
+            if (
+                project_version.version_href
+                != quarantine.child_version_href
+            ):
+                active_targets.append(target)
+                continue
+
+            quarantined_results.append(
+                TargetCollectionResult(
+                    target=target,
+                    findings=(),
+                    failures=(
+                        CollectionFailure(
+                            target_external_id=(
+                                project_version.external_id
+                            ),
+                            project=project_version.project,
+                            project_version=(
+                                project_version.version
+                            ),
+                            project_version_href=(
+                                project_version.version_href
+                            ),
+                            stage="temporary-quarantine",
+                            error=(
+                                "Black Duck target is temporarily "
+                                "quarantined until "
+                                f"{quarantine.retry_after}"
+                            ),
+                        ),
+                    ),
+                    elapsed_seconds=0.0,
+                )
+            )
+
+        target_list = active_targets
 
     if not target_list:
         return CollectionRunResult(
-            target_results=(),
+            target_results=tuple(
+                quarantined_results
+            ),
         )
 
     worker_count = min(
@@ -968,13 +1076,28 @@ def collect_targets(
     def collect(
         target: CollectionTarget,
     ) -> TargetCollectionResult:
-        return collect_target(
-            worker_client(),
-            target,
-            criteria,
-            component_workers=component_workers,
-            entity_resolver=entity_resolver,
-        )
+        with blackduck_request_context(
+            child_project=target.project_version.project,
+            child_version=target.project_version.version,
+            child_version_href=target.project_version.version_href,
+            parent_projects=";".join(
+                sorted(
+                    {
+                        context.parent.project
+                        for context in target.lineage_contexts
+                        if context.parent.project
+                    }
+                )
+            ),
+            stage="collect-target",
+        ):
+            return collect_target(
+                worker_client(),
+                target,
+                criteria,
+                component_workers=component_workers,
+                entity_resolver=entity_resolver,
+            )
 
     results = ordered_parallel_map(
         target_list,
@@ -984,5 +1107,8 @@ def collect_targets(
     )
 
     return CollectionRunResult(
-        target_results=tuple(results),
+        target_results=(
+            tuple(results)
+            + tuple(quarantined_results)
+        ),
     )

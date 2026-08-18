@@ -30,9 +30,7 @@ CIRCUIT_WINDOW_ENV = (
     "WINTERMUTE_BLACKDUCK_CIRCUIT_BREAKER_WINDOW_SECONDS"
 )
 
-_REQUEST_CONTEXT: ContextVar[
-    dict[str, str]
-] = ContextVar(
+_REQUEST_CONTEXT: ContextVar[dict[str, str]] = ContextVar(
     "wintermute_blackduck_request_context",
     default={},
 )
@@ -137,6 +135,22 @@ class RequestPermit:
 
 
 @dataclass(frozen=True)
+class CircuitFailure:
+    observed_at_epoch: float
+    status: int
+    url: str
+    context: dict[str, str]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "observed_at_epoch": self.observed_at_epoch,
+            "status": self.status,
+            "url": self.url,
+            "context": dict(self.context),
+        }
+
+
+@dataclass(frozen=True)
 class CircuitSnapshot:
     open: bool
     failure_count: int
@@ -145,6 +159,7 @@ class CircuitSnapshot:
     opened_at_epoch: float | None
     last_status: int | None
     last_url: str
+    failures: tuple[CircuitFailure, ...]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -155,11 +170,26 @@ class CircuitSnapshot:
             "opened_at_epoch": self.opened_at_epoch,
             "last_status": self.last_status,
             "last_url": self.last_url,
+            "failures": [
+                failure.as_dict()
+                for failure in self.failures
+            ],
         }
 
 
 class BlackDuckCircuitOpenError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        snapshot: CircuitSnapshot,
+        controller: BlackDuckRequestController,
+    ) -> None:
+        super().__init__(message)
+        self.snapshot = snapshot
+        self.controller = controller
+
+    def reset_circuit(self) -> None:
+        self.controller.reset()
 
 
 class BlackDuckRequestController:
@@ -207,7 +237,7 @@ class BlackDuckRequestController:
         self._lock = threading.RLock()
         self._next_request_at = 0.0
         self._failures: deque[
-            tuple[float, int, str]
+            tuple[float, CircuitFailure]
         ] = deque()
         self._circuit_open = False
         self._opened_at_epoch: float | None = None
@@ -318,6 +348,8 @@ class BlackDuckRequestController:
         self,
         status: int,
         url: str,
+        *,
+        context: dict[str, str] | None = None,
     ) -> tuple[int, bool]:
         status = int(status)
 
@@ -329,13 +361,19 @@ class BlackDuckRequestController:
         with self._lock:
             now = float(self._monotonic())
             self._prune_failures_locked(now)
-            self._failures.append(
-                (
-                    now,
-                    status,
-                    safe_url,
-                )
+            failure = CircuitFailure(
+                observed_at_epoch=float(
+                    self._wall_time()
+                ),
+                status=status,
+                url=safe_url,
+                context=dict(
+                    context
+                    if context is not None
+                    else current_request_context()
+                ),
             )
+            self._failures.append((now, failure))
             self._last_status = status
             self._last_url = safe_url
 
@@ -378,22 +416,39 @@ class BlackDuckRequestController:
                 opened_at_epoch=self._opened_at_epoch,
                 last_status=self._last_status,
                 last_url=self._last_url,
+                failures=tuple(
+                    failure
+                    for _, failure in self._failures
+                ),
+            )
+
+    def reset(self) -> None:
+        with self._lock:
+            self._failures.clear()
+            self._circuit_open = False
+            self._opened_at_epoch = None
+            self._last_status = None
+            self._last_url = ""
+            self._next_request_at = float(
+                self._monotonic()
             )
 
     def circuit_error(
         self,
     ) -> BlackDuckCircuitOpenError:
         snapshot = self.snapshot()
-
-        return BlackDuckCircuitOpenError(
+        error = BlackDuckCircuitOpenError(
             "Black Duck circuit breaker is open after "
             f"{snapshot.failure_count} server failure(s) "
             f"within {snapshot.window_seconds:g}s; "
             f"threshold={snapshot.threshold}, "
             f"last_status={snapshot.last_status}, "
             f"last_url={snapshot.last_url}, "
-            f"opened_at_epoch={snapshot.opened_at_epoch}"
+            f"opened_at_epoch={snapshot.opened_at_epoch}",
+            snapshot,
+            self,
         )
+        return error
 
     def _raise_if_open_locked(self) -> None:
         if self._circuit_open:
