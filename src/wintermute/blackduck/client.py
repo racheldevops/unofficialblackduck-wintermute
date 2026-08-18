@@ -6,6 +6,7 @@ import ssl
 import sys
 import threading
 import time
+from contextlib import AbstractContextManager
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import (
@@ -17,6 +18,11 @@ from urllib.parse import (
 from urllib.request import Request, urlopen
 
 from wintermute.blackduck.cache import ApiResponseCache
+from wintermute.blackduck.request_control import (
+    BlackDuckRequestController,
+    RequestPermit,
+    blackduck_request_context,
+)
 
 
 RETRYABLE_STATUSES = {
@@ -55,7 +61,15 @@ class BlackDuckClient:
         api_cache: ApiResponseCache | None = None,
         bearer_token: str | None = None,
         refresh_on_unauthorized: bool = True,
-    ):
+        request_control: (
+            BlackDuckRequestController | None
+        ) = None,
+        request_interval_seconds: float | None = None,
+        circuit_breaker_threshold: int | None = None,
+        circuit_breaker_window_seconds: (
+            float | None
+        ) = None,
+    ) -> None:
         if insecure and ca_bundle:
             raise ValueError(
                 "Use either insecure mode or a CA bundle, not both."
@@ -88,12 +102,28 @@ class BlackDuckClient:
             tuple[str, str, float],
             list[dict[str, Any]],
         ] = {}
+        self.request_control = (
+            request_control
+            or BlackDuckRequestController.from_environment(
+                request_interval_seconds=(
+                    request_interval_seconds
+                ),
+                circuit_breaker_threshold=(
+                    circuit_breaker_threshold
+                ),
+                circuit_breaker_window_seconds=(
+                    circuit_breaker_window_seconds
+                ),
+            )
+        )
 
         if insecure:
             self.ssl_context = ssl._create_unverified_context()
         elif ca_bundle:
-            self.ssl_context = ssl.create_default_context(
-                cafile=ca_bundle
+            self.ssl_context = (
+                ssl.create_default_context(
+                    cafile=ca_bundle
+                )
             )
         else:
             self.ssl_context = None
@@ -108,7 +138,17 @@ class BlackDuckClient:
         with self._token_state.lock:
             self._token_state.token = value
 
-    def clone_for_worker(self) -> BlackDuckClient:
+    def request_context(
+        self,
+        **values: Any,
+    ) -> AbstractContextManager[None]:
+        return blackduck_request_context(
+            **values
+        )
+
+    def clone_for_worker(
+        self,
+    ) -> BlackDuckClient:
         worker = self.__class__(
             base_url=self.base_url,
             api_token=self.api_token,
@@ -122,6 +162,7 @@ class BlackDuckClient:
             refresh_on_unauthorized=(
                 self.refresh_on_unauthorized
             ),
+            request_control=self.request_control,
         )
         worker.ssl_context = self.ssl_context
         worker._token_state = self._token_state
@@ -151,14 +192,22 @@ class BlackDuckClient:
                 "Authorization": f"token {self.api_token}",
                 "Accept": "application/json",
             }
+            attempts = self.retries + 1
 
-            for attempt in range(self.retries + 1):
+            for attempt in range(attempts):
                 request = Request(
                     url,
                     data=b"",
                     headers=headers,
                     method="POST",
                 )
+                permit = (
+                    self.request_control.before_request(
+                        "POST",
+                        url,
+                    )
+                )
+                started = time.monotonic()
 
                 try:
                     with urlopen(
@@ -168,6 +217,23 @@ class BlackDuckClient:
                     ) as response:
                         text = response.read().decode("utf-8")
 
+                    duration = (
+                        time.monotonic() - started
+                    )
+                    self.request_control.record_success()
+                    self._log_network_result(
+                        "POST",
+                        permit,
+                        attempt,
+                        attempts,
+                        duration,
+                        "success",
+                        getattr(
+                            response,
+                            "status",
+                            200,
+                        ),
+                    )
                     payload = json.loads(text)
                     token = str(
                         payload.get("bearerToken") or ""
@@ -183,31 +249,95 @@ class BlackDuckClient:
                     return
 
                 except HTTPError as error:
-                    message = self._http_error_message(error)
+                    duration = (
+                        time.monotonic() - started
+                    )
+                    message = (
+                        self._http_error_message(
+                            error
+                        )
+                    )
+                    count, opened = (
+                        self._record_http_failure(
+                            "POST",
+                            url,
+                            permit,
+                            attempt,
+                            attempts,
+                            duration,
+                            error.code,
+                        )
+                    )
+
+                    if opened:
+                        raise (
+                            self.request_control
+                            .circuit_error()
+                        ) from error
 
                     if (
-                        error.code not in RETRYABLE_STATUSES
+                        error.code
+                        not in RETRYABLE_STATUSES
                         or attempt >= self.retries
                     ):
                         raise RuntimeError(
-                            f"Authentication failed: {message}"
+                            "Authentication failed: "
+                            f"{message}"
                         ) from error
 
-                    self._sleep_for_retry(error, attempt)
+                    self._sleep_for_retry(
+                        error,
+                        attempt,
+                        circuit_failure_count=count,
+                    )
 
                 except (
                     URLError,
                     TimeoutError,
                     OSError,
-                    json.JSONDecodeError,
                 ) as error:
+                    duration = (
+                        time.monotonic() - started
+                    )
+                    self._log_network_result(
+                        "POST",
+                        permit,
+                        attempt,
+                        attempts,
+                        duration,
+                        type(error).__name__,
+                        None,
+                    )
+
                     if attempt >= self.retries:
                         raise RuntimeError(
-                            f"Authentication failed after "
-                            f"{self.retries + 1} attempt(s): {error}"
+                            "Authentication failed after "
+                            f"{attempts} attempt(s): "
+                            f"{error}"
                         ) from error
 
-                    self._sleep_for_retry(error, attempt)
+                    self._sleep_for_retry(
+                        error,
+                        attempt,
+                    )
+
+                except json.JSONDecodeError as error:
+                    duration = (
+                        time.monotonic() - started
+                    )
+                    self._log_network_result(
+                        "POST",
+                        permit,
+                        attempt,
+                        attempts,
+                        duration,
+                        "invalid-json",
+                        None,
+                    )
+                    raise RuntimeError(
+                        "Authentication returned "
+                        f"invalid JSON: {error}"
+                    ) from error
 
             raise RuntimeError(
                 "Authentication failed unexpectedly"
@@ -232,7 +362,10 @@ class BlackDuckClient:
         body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         method = method.upper()
-        url = self._make_url(url_or_path, params)
+        url = self._make_url(
+            url_or_path,
+            params,
+        )
         raw_cache_key = (
             url
             if (
@@ -255,10 +388,13 @@ class BlackDuckClient:
         data = None
 
         if body is not None:
-            data = json.dumps(body).encode("utf-8")
+            data = json.dumps(
+                body
+            ).encode("utf-8")
 
         attempt = 0
         token_refreshed = False
+        attempts = self.retries + 1
 
         while attempt <= self.retries:
             headers = {
@@ -280,6 +416,13 @@ class BlackDuckClient:
                 headers=headers,
                 method=method,
             )
+            permit = (
+                self.request_control.before_request(
+                    method,
+                    url,
+                )
+            )
+            started = time.monotonic()
 
             try:
                 with urlopen(
@@ -289,6 +432,23 @@ class BlackDuckClient:
                 ) as response:
                     text = response.read().decode("utf-8")
 
+                duration = (
+                    time.monotonic() - started
+                )
+                self.request_control.record_success()
+                self._log_network_result(
+                    method,
+                    permit,
+                    attempt,
+                    attempts,
+                    duration,
+                    "success",
+                    getattr(
+                        response,
+                        "status",
+                        200,
+                    ),
+                )
                 payload: dict[str, Any] = (
                     json.loads(text)
                     if text
@@ -304,7 +464,31 @@ class BlackDuckClient:
                 return payload
 
             except HTTPError as error:
-                message = self._http_error_message(error)
+                duration = (
+                    time.monotonic() - started
+                )
+                message = (
+                    self._http_error_message(
+                        error
+                    )
+                )
+                count, opened = (
+                    self._record_http_failure(
+                        method,
+                        url,
+                        permit,
+                        attempt,
+                        attempts,
+                        duration,
+                        error.code,
+                    )
+                )
+
+                if opened:
+                    raise (
+                        self.request_control
+                        .circuit_error()
+                    ) from error
 
                 if (
                     error.code == 401
@@ -331,16 +515,42 @@ class BlackDuckClient:
                 TimeoutError,
                 OSError,
             ) as error:
+                duration = (
+                    time.monotonic() - started
+                )
+                self._log_network_result(
+                    method,
+                    permit,
+                    attempt,
+                    attempts,
+                    duration,
+                    type(error).__name__,
+                    None,
+                )
+
                 if attempt >= self.retries:
                     raise RuntimeError(
                         f"{method} {url} failed after "
-                        f"{self.retries + 1} attempt(s): {error}"
+                        f"{attempts} attempt(s): "
+                        f"{error}"
                     ) from error
 
                 self._sleep_for_retry(error, attempt)
                 attempt += 1
 
             except json.JSONDecodeError as error:
+                duration = (
+                    time.monotonic() - started
+                )
+                self._log_network_result(
+                    method,
+                    permit,
+                    attempt,
+                    attempts,
+                    duration,
+                    "invalid-json",
+                    None,
+                )
                 raise RuntimeError(
                     f"{method} {url} returned invalid JSON: "
                     f"{error}"
@@ -368,8 +578,10 @@ class BlackDuckClient:
 
         if self.cache_paged_results:
             with self._cache_lock:
-                cached = self.paged_result_cache.get(
-                    source_url
+                cached = (
+                    self.paged_result_cache.get(
+                        source_url
+                    )
                 )
 
                 if cached is not None:
@@ -386,9 +598,11 @@ class BlackDuckClient:
             )
 
         if self.api_cache is not None:
-            items = self.api_cache.get_or_load_items(
-                source_url,
-                load_pages,
+            items = (
+                self.api_cache.get_or_load_items(
+                    source_url,
+                    load_pages,
+                )
             )
         else:
             items, _ = load_pages()
@@ -422,8 +636,9 @@ class BlackDuckClient:
             )
 
             if "items" not in payload:
-                return ([payload] if payload else []), (
-                    1 if payload else 0
+                return (
+                    [payload] if payload else [],
+                    1 if payload else 0,
                 )
 
             page_items = payload.get("items") or []
@@ -486,10 +701,12 @@ class BlackDuckClient:
         url_or_path: str,
         params: dict[str, Any] | None = None,
     ) -> int:
-        count, _ = self.collection_count_and_items(
-            url_or_path,
-            params=params,
-            limit=1,
+        count, _ = (
+            self.collection_count_and_items(
+                url_or_path,
+                params=params,
+                limit=1,
+            )
         )
         return count
 
@@ -534,6 +751,78 @@ class BlackDuckClient:
             )
         )
 
+    def _record_http_failure(
+        self,
+        method: str,
+        url: str,
+        permit: RequestPermit,
+        attempt: int,
+        attempts: int,
+        duration: float,
+        status: int,
+    ) -> tuple[int, bool]:
+        count, opened = (
+            self.request_control
+            .record_server_failure(
+                status,
+                url,
+            )
+        )
+        self._log_network_result(
+            method,
+            permit,
+            attempt,
+            attempts,
+            duration,
+            "http-error",
+            status,
+            circuit_failure_count=count,
+            circuit_open=opened,
+        )
+        return count, opened
+
+    def _log_network_result(
+        self,
+        method: str,
+        permit: RequestPermit,
+        attempt: int,
+        attempts: int,
+        duration: float,
+        outcome: str,
+        status: int | None,
+        *,
+        circuit_failure_count: (
+            int | None
+        ) = None,
+        circuit_open: bool | None = None,
+    ) -> None:
+        if not self.debug:
+            return
+
+        context = ",".join(
+            f"{key}={value}"
+            for key, value
+            in sorted(permit.context.items())
+        )
+        context = context or "none"
+
+        print(
+            "Black Duck network request: "
+            f"method={method} "
+            f"url={permit.sanitized_url} "
+            f"attempt={attempt + 1}/{attempts} "
+            f"duration={duration:.3f}s "
+            f"pacing_wait="
+            f"{permit.wait_seconds:.3f}s "
+            f"outcome={outcome} "
+            f"status={status} "
+            f"context={context} "
+            f"circuit_failures="
+            f"{circuit_failure_count} "
+            f"circuit_open={circuit_open}",
+            file=sys.stderr,
+        )
+
     def _http_error_message(
         self,
         error: HTTPError,
@@ -543,7 +832,8 @@ class BlackDuckClient:
             errors="replace",
         )
         return (
-            f"HTTP {error.code} {error.reason}: "
+            f"HTTP {error.code} "
+            f"{error.reason}: "
             f"{body[:4000]}"
         )
 
@@ -551,6 +841,10 @@ class BlackDuckClient:
         self,
         error: object,
         attempt: int,
+        *,
+        circuit_failure_count: (
+            int | None
+        ) = None,
     ) -> None:
         retry_after: float | None = None
 
@@ -571,8 +865,11 @@ class BlackDuckClient:
 
         if self.debug:
             print(
-                f"Retrying Black Duck request after "
-                f"{error}; sleeping {sleep_seconds}s",
+                "Retrying Black Duck request after "
+                f"{error}; sleeping "
+                f"{sleep_seconds}s; "
+                f"circuit_failures="
+                f"{circuit_failure_count}",
                 file=sys.stderr,
             )
 

@@ -274,6 +274,26 @@ def build_version_inventory(
     ]
 
 
+
+
+def filter_excluded_parent_projects(
+        inventory: list[VersionInfo],
+        excluded_projects: list[str] | set[str],
+) -> list[VersionInfo]:
+    excluded = {
+        str(value).strip()
+        for value in excluded_projects
+        if str(value).strip()
+    }
+
+    if not excluded:
+        return list(inventory)
+
+    return [
+        version
+        for version in inventory
+        if version.project_name not in excluded
+    ]
 def build_indexes(
         inventory: list[VersionInfo],
 ) -> tuple[dict[str, VersionInfo], dict[tuple[str, str], list[VersionInfo]]]:
@@ -851,6 +871,15 @@ def parse_args() -> argparse.Namespace:
         help="Only scan projects whose names contain this text.",
     )
     parser.add_argument(
+        "--exclude-parent-project",
+        action="append",
+        default=[],
+        help=(
+            "Exclude an exact parent project name. "
+            "Repeat for multiple projects."
+        ),
+    )
+    parser.add_argument(
         "--max-projects",
         type=int,
         help="Optional safety limit for testing.",
@@ -1002,6 +1031,19 @@ def main() -> int:
         debug=args.debug,
         workers=args.workers,
     )
+
+    original_inventory_count = len(inventory)
+    inventory = filter_excluded_parent_projects(
+        inventory,
+        args.exclude_parent_project,
+    )
+
+    if args.debug and len(inventory) != original_inventory_count:
+        print(
+            f"Excluded {original_inventory_count - len(inventory)} "
+            "parent project version(s) from BOM scanning.",
+            file=sys.stderr,
+        )
 
     versions_by_href, versions_by_name = build_indexes(inventory)
 

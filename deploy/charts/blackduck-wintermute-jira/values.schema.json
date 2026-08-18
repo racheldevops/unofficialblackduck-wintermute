@@ -137,6 +137,22 @@
           "type": "integer",
           "minimum": 300,
           "maximum": 86400
+        },
+        "excludeParentProjects": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "excludeChildProjects": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },
@@ -156,6 +172,47 @@
         "size": {
           "type": "string",
           "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$"
+        }
+      }
+    },
+    "blackDuck": {
+      "type": "object",
+      "required": [
+        "insecure",
+        "requestIntervalSeconds",
+        "circuitBreakerThreshold",
+        "circuitBreakerWindowSeconds",
+        "cacheCheckpointEntries",
+        "cacheCheckpointSeconds"
+      ],
+      "properties": {
+        "insecure": {
+          "type": "boolean"
+        },
+        "requestIntervalSeconds": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 60
+        },
+        "circuitBreakerThreshold": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "circuitBreakerWindowSeconds": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "cacheCheckpointEntries": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "cacheCheckpointSeconds": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 3600
         }
       }
     }

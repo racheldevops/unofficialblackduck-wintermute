@@ -22,6 +22,11 @@ jira:
 
 blackDuck:
   insecure: false
+  requestIntervalSeconds: 0.5
+  circuitBreakerThreshold: 5
+  circuitBreakerWindowSeconds: 60
+  cacheCheckpointEntries: 25
+  cacheCheckpointSeconds: 30
 
 cronJob:
   schedule: "0 2 * * *"
@@ -45,6 +50,8 @@ pipeline:
   rollupWorkers: 2
   pageLimit: 500
   lockStaleSeconds: 10800
+  excludeParentProjects: []
+  excludeChildProjects: []
   extraArgs: []
 
 persistence:

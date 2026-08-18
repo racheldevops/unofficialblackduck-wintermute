@@ -257,6 +257,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--only-subproject')
     parser.add_argument('--only-vulnerability')
     parser.add_argument('--project-name-contains', help='Optional parent discovery project-name filter.')
+    parser.add_argument(
+        "--exclude-parent-project",
+        action="append",
+        default=[],
+        help=(
+            "Exclude an exact parent project name. "
+            "Repeat for multiple projects."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-child-project",
+        action="append",
+        default=[],
+        help=(
+            "Exclude an exact child project name. "
+            "Repeat for multiple projects."
+        ),
+    )
     parser.add_argument('--threshold', type=float, default=7.0)
     parser.add_argument('--score-field', default='overallScore')
     parser.add_argument('--entity-custom-field', default='')
@@ -287,6 +305,28 @@ def validate_args(args: argparse.Namespace) -> None:
     )
     args.allow_empty = bool(
         getattr(args, "allow_empty", False)
+    )
+    args.exclude_parent_project = sorted(
+        {
+            str(value).strip()
+            for value in getattr(
+                args,
+                "exclude_parent_project",
+                [],
+            )
+            if str(value).strip()
+        }
+    )
+    args.exclude_child_project = sorted(
+        {
+            str(value).strip()
+            for value in getattr(
+                args,
+                "exclude_child_project",
+                [],
+            )
+            if str(value).strip()
+        }
     )
     args.workers = int(getattr(args, "workers", 2))
     args.parent_timeout = int(
@@ -470,6 +510,13 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 parent_arguments.append('--resolve-bom-names')
             if args.project_name_contains:
                 parent_arguments.extend(['--project-name-contains', args.project_name_contains])
+            for excluded_project in args.exclude_parent_project:
+                parent_arguments.extend(
+                    [
+                        "--exclude-parent-project",
+                        excluded_project,
+                    ]
+                )
             if args.ca_bundle:
                 parent_arguments.extend(['--ca-bundle', args.ca_bundle])
             elif args.insecure:
@@ -497,6 +544,20 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 rollup_arguments.extend(['--parent-version', args.only_parent_version])
             if args.only_subproject:
                 rollup_arguments.extend(['--only-child-project', args.only_subproject])
+            for excluded_project in args.exclude_parent_project:
+                rollup_arguments.extend(
+                    [
+                        "--exclude-parent-project",
+                        excluded_project,
+                    ]
+                )
+            for excluded_project in args.exclude_child_project:
+                rollup_arguments.extend(
+                    [
+                        "--exclude-child-project",
+                        excluded_project,
+                    ]
+                )
             if args.require_entity:
                 rollup_arguments.append('--require-entity')
             if args.refresh_blackduck_cache:

@@ -18,10 +18,12 @@ variables:
   WINTERMUTE_CONFIRM_APPLY: "false"
   WINTERMUTE_MAX_CREATE: "10"
 
-  WINTERMUTE_WORKERS: "2"
-  WINTERMUTE_PARENT_WORKERS: "2"
-  WINTERMUTE_ROLLUP_WORKERS: "2"
-  WINTERMUTE_PAGE_LIMIT: "500"
+  WINTERMUTE_WORKERS: "1"
+  WINTERMUTE_PARENT_WORKERS: "1"
+  WINTERMUTE_ROLLUP_WORKERS: "1"
+  WINTERMUTE_PAGE_LIMIT: "100"
+  WINTERMUTE_EXCLUDE_PARENT_PROJECTS: "[]"
+  WINTERMUTE_EXCLUDE_CHILD_PROJECTS: "[]"
   WINTERMUTE_LOCK_STALE_SECONDS: "10800"
 
   WINTERMUTE_JIRA_VERIFY_TLS: "true"
@@ -101,6 +103,8 @@ helm:deploy:wintermute-jira:
         --set "pipeline.parentWorkers=${WINTERMUTE_PARENT_WORKERS}" \
         --set "pipeline.rollupWorkers=${WINTERMUTE_ROLLUP_WORKERS}" \
         --set "pipeline.pageLimit=${WINTERMUTE_PAGE_LIMIT}" \
+        --set-json "pipeline.excludeParentProjects=${WINTERMUTE_EXCLUDE_PARENT_PROJECTS}" \
+        --set-json "pipeline.excludeChildProjects=${WINTERMUTE_EXCLUDE_CHILD_PROJECTS}" \
         --set "pipeline.lockStaleSeconds=${WINTERMUTE_LOCK_STALE_SECONDS}" \
         --set "blackDuck.insecure=${WINTERMUTE_BLACKDUCK_INSECURE}" \
         --set-string "caBundle.existingConfigMap=${WINTERMUTE_CA_BUNDLE_CONFIGMAP}" \

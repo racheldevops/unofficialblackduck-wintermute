@@ -9,7 +9,12 @@
     "--dry-run",
     "--resolve-bom-names",
     "--strict",
-    "--insecure"
+    "--insecure",
+    "--debug",
+    "--exclude-parent-project",
+    "zz-api-parent-rollup-test-20260625-171201",
+    "--exclude-child-project",
+    "AM_oss-mirage-agentic-backend"
   ],
   "jira_config": "src/wintermute/jira/config/jira-rollup-config.json",
   "environment_names": [
@@ -37,7 +42,18 @@
     "cpus": 2,
     "memory": "2g",
     "tmpfs": "/tmp:rw,size=1g",
-    "extra_run_args": []
+    "extra_run_args": [
+      "--env",
+      "WINTERMUTE_BLACKDUCK_REQUEST_INTERVAL_SECONDS=0.5",
+      "--env",
+      "WINTERMUTE_BLACKDUCK_CIRCUIT_BREAKER_THRESHOLD=5",
+      "--env",
+      "WINTERMUTE_BLACKDUCK_CIRCUIT_BREAKER_WINDOW_SECONDS=60",
+      "--env",
+      "WINTERMUTE_BLACKDUCK_CACHE_CHECKPOINT_ENTRIES=25",
+      "--env",
+      "WINTERMUTE_BLACKDUCK_CACHE_CHECKPOINT_SECONDS=30"
+    ]
   },
   "kubernetes": {
     "enabled": false,
