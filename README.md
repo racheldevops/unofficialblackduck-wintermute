@@ -34,4 +34,11 @@ Wintermute tracks and is tested against the latest Black Duck SCA release availa
 
 Older Black Duck releases are outside the tested baseline and may behave differently as APIs evolve. This describes the versions exercised during development, not a compatibility guarantee.
 
+## Black Duck SCA Hardware Spec
+
+The minimum BDSCA hardware spec to run wintermute at its slowest pace is "sizes-gen04/250sph.yaml"
+The recommended spec is: "sizes-gen05/500sph.yaml"
+
+Please check the official BDSCA Hardware guide [here](https://docs.blackduck.com/r/blackduck/black-duck-compatibility-reference/black-duck-sca-hardware-scaling-guidelines.html)
+
 > Wintermute is an unofficial personal DevSecOps/GitOps project and is not supported by Black Duck. Validate dry-run output and customer configuration before enabling destination changes. Contribution is welcomed.
