@@ -36,8 +36,11 @@ Older Black Duck releases are outside the tested baseline and may behave differe
 
 ## Black Duck SCA Hardware Spec
 
-The minimum BDSCA hardware spec to run wintermute at its slowest pace is "sizes-gen04/250sph.yaml"
-The recommended spec is: "sizes-gen05/500sph.yaml"
+The minimum BDSCA hardware spec to run wintermute at its slowest pace (7,500 api requests/hr) is: <p>
+```"sizes-gen04/250sph.yaml"```
+
+The recommended spec is: <p>
+``` "sizes-gen05/500sph.yaml" ```
 
 Please check the official BDSCA Hardware guide [here](https://docs.blackduck.com/r/blackduck/black-duck-compatibility-reference/black-duck-sca-hardware-scaling-guidelines.html)
 
