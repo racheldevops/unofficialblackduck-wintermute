@@ -24,6 +24,7 @@ REQUIRED_SECRETS = (
     "blackduck-wintermute-blackduck-credentials",
     "blackduck-wintermute-jira-credentials",
     "blackduck-wintermute-datadog-credentials",
+    "blackduck-wintermute-scm-credentials",
 )
 
 APPLY_RESOURCES = (
@@ -116,6 +117,7 @@ def validate_rendered_manifest(
         "source": 3,
         "jira": 1,
         "datadog": 1,
+        "scm": 1,
     }
 
     for target, expected_count in (
@@ -223,6 +225,11 @@ def required_secrets_for_manifest(
         "datadog-mode",
         "dry-run",
     )
+    scm_mode = workflow_parameter_value(
+        manifest,
+        "scm-mode",
+        "disabled",
+    )
 
     if jira_mode != "disabled":
         required.append(
@@ -232,6 +239,11 @@ def required_secrets_for_manifest(
     if datadog_mode != "disabled":
         required.append(
             "blackduck-wintermute-datadog-credentials"
+        )
+
+    if scm_mode != "disabled":
+        required.append(
+            "blackduck-wintermute-scm-credentials"
         )
 
     return tuple(required)

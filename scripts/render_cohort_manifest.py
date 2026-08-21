@@ -16,11 +16,16 @@ IMAGE_TARGETS = (
     "source",
     "jira",
     "datadog",
+    "scm",
 )
-VALID_MODES = {
+DESTINATION_MODES = {
     "disabled",
     "dry-run",
     "apply",
+}
+SCM_MODES = {
+    "disabled",
+    "read-only",
 }
 TAG_RE = re.compile(
     r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
@@ -40,6 +45,7 @@ def validate_options(
     datadog_mode: str,
     confirm_apply: bool,
     retain_cohorts: int,
+    scm_mode: str = "disabled",
 ) -> None:
     if not registry_host.strip():
         raise RuntimeError(
@@ -72,14 +78,19 @@ def validate_options(
             f"Invalid Kubernetes namespace: {namespace!r}"
         )
 
-    if jira_mode not in VALID_MODES:
+    if jira_mode not in DESTINATION_MODES:
         raise RuntimeError(
             f"Invalid Jira mode: {jira_mode}"
         )
 
-    if datadog_mode not in VALID_MODES:
+    if datadog_mode not in DESTINATION_MODES:
         raise RuntimeError(
             f"Invalid Datadog mode: {datadog_mode}"
+        )
+
+    if scm_mode not in SCM_MODES:
+        raise RuntimeError(
+            f"Invalid SCM mode: {scm_mode}"
         )
 
     if (
@@ -115,8 +126,6 @@ def image_names(
     }
 
 
-
-
 def schedule_patch(
     *,
     schedule: str,
@@ -127,11 +136,11 @@ def schedule_patch(
     confirm_apply: bool,
     retain_cohorts: int,
     images: dict[str, str] | None = None,
+    scm_mode: str = "disabled",
 ) -> str:
     images = images or {
-        "source": "blackduck-wintermute-source",
-        "jira": "blackduck-wintermute-jira",
-        "datadog": "blackduck-wintermute-datadog",
+        target: f"blackduck-wintermute-{target}"
+        for target in IMAGE_TARGETS
     }
 
     return f"""apiVersion: argoproj.io/v1alpha1
@@ -152,10 +161,14 @@ spec:
           value: {images["jira"]}
         - name: datadog-image
           value: {images["datadog"]}
+        - name: scm-image
+          value: {images["scm"]}
         - name: jira-mode
           value: {jira_mode}
         - name: datadog-mode
           value: {datadog_mode}
+        - name: scm-mode
+          value: {scm_mode}
         - name: confirm-apply
           value: {json.dumps(str(confirm_apply).lower())}
         - name: retain-cohorts
@@ -179,6 +192,7 @@ def render_manifest(
     timezone: str,
     suspend: bool,
     kubectl: str = "kubectl",
+    scm_mode: str = "disabled",
 ) -> None:
     validate_options(
         registry_host=registry_host,
@@ -187,6 +201,7 @@ def render_manifest(
         namespace=namespace,
         jira_mode=jira_mode,
         datadog_mode=datadog_mode,
+        scm_mode=scm_mode,
         confirm_apply=confirm_apply,
         retain_cohorts=retain_cohorts,
     )
@@ -232,6 +247,7 @@ def render_manifest(
                 suspend=suspend,
                 jira_mode=jira_mode,
                 datadog_mode=datadog_mode,
+                scm_mode=scm_mode,
                 confirm_apply=confirm_apply,
                 retain_cohorts=retain_cohorts,
                 images=images,
@@ -371,13 +387,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--jira-mode",
-        choices=sorted(VALID_MODES),
+        choices=sorted(DESTINATION_MODES),
         default="dry-run",
     )
     parser.add_argument(
         "--datadog-mode",
-        choices=sorted(VALID_MODES),
+        choices=sorted(DESTINATION_MODES),
         default="dry-run",
+    )
+    parser.add_argument(
+        "--scm-mode",
+        choices=sorted(SCM_MODES),
+        default="disabled",
     )
     parser.add_argument(
         "--confirm-apply",
@@ -423,6 +444,7 @@ def main() -> int:
             namespace=args.namespace,
             jira_mode=args.jira_mode,
             datadog_mode=args.datadog_mode,
+            scm_mode=args.scm_mode,
             confirm_apply=args.confirm_apply,
             retain_cohorts=args.retain_cohorts,
             schedule=args.schedule,

@@ -5,7 +5,7 @@ setopt ERR_EXIT NO_UNSET PIPE_FAIL
 root="${0:A:h:h}"
 context="${LOCAL_K8S_CONTEXT:-docker-desktop}"
 namespace="${LOCAL_SCM_NAMESPACE:-blackduck-wintermute-scm-local}"
-image="${LOCAL_SCM_IMAGE:-blackduck-wintermute-source:scm-local}"
+image="${LOCAL_SCM_IMAGE:-blackduck-wintermute-scm:local}"
 storage="${LOCAL_SCM_STORAGE:-5Gi}"
 state_dir="${root}/.local-k8s"
 manifest="${state_dir}/scm-overview-local.yaml"
@@ -61,7 +61,7 @@ mkdir -p "${state_dir}"
 print "Building ${image}"
 docker build \
   --pull \
-  --target source \
+  --target scm \
   --tag "${image}" \
   "${root}"
 

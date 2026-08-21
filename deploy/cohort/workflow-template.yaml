@@ -18,6 +18,8 @@ spec:
         value: blackduck-wintermute-jira
       - name: datadog-image
         value: blackduck-wintermute-datadog
+      - name: scm-image
+        value: blackduck-wintermute-scm
       - name: jira-mode
         value: dry-run
         enum:
@@ -30,6 +32,11 @@ spec:
           - disabled
           - dry-run
           - apply
+      - name: scm-mode
+        value: disabled
+        enum:
+          - disabled
+          - read-only
       - name: confirm-apply
         value: "false"
         enum:
@@ -56,6 +63,9 @@ spec:
     - name: datadog-data
       persistentVolumeClaim:
         claimName: blackduck-wintermute-datadog-data
+    - name: scm-data
+      persistentVolumeClaim:
+        claimName: blackduck-wintermute-scm-data
     - name: jira-config
       configMap:
         name: blackduck-wintermute-cohort-jira-config
@@ -75,11 +85,17 @@ spec:
                   value: "{{workflow.parameters.jira-mode}}"
                 - name: datadog-mode
                   value: "{{workflow.parameters.datadog-mode}}"
+                - name: scm-mode
+                  value: "{{workflow.parameters.scm-mode}}"
                 - name: confirm-apply
                   value: "{{workflow.parameters.confirm-apply}}"
           - name: source
             depends: validate-modes.Succeeded
             template: source
+          - name: scm
+            depends: validate-modes.Succeeded
+            when: "{{=workflow.parameters['scm-mode'] != 'disabled'}}"
+            template: scm
           - name: jira
             depends: source.Succeeded
             when: "{{=workflow.parameters['jira-mode'] != 'disabled'}}"
@@ -119,6 +135,7 @@ spec:
         parameters:
           - name: jira-mode
           - name: datadog-mode
+          - name: scm-mode
           - name: confirm-apply
       securityContext:
         runAsNonRoot: true
@@ -132,26 +149,29 @@ spec:
         command:
           - python
         source: |
-          import sys
-
           jira_mode = "{{inputs.parameters.jira-mode}}"
           datadog_mode = "{{inputs.parameters.datadog-mode}}"
+          scm_mode = "{{inputs.parameters.scm-mode}}"
           confirmed = "{{inputs.parameters.confirm-apply}}" == "true"
 
-          valid_modes = {"disabled", "dry-run", "apply"}
+          valid_destination_modes = {"disabled", "dry-run", "apply"}
+          valid_scm_modes = {"disabled", "read-only"}
 
-          if jira_mode not in valid_modes:
+          if jira_mode not in valid_destination_modes:
               raise SystemExit(f"Invalid Jira mode: {jira_mode}")
 
-          if datadog_mode not in valid_modes:
+          if datadog_mode not in valid_destination_modes:
               raise SystemExit(f"Invalid Datadog mode: {datadog_mode}")
+
+          if scm_mode not in valid_scm_modes:
+              raise SystemExit(f"Invalid SCM mode: {scm_mode}")
 
           if "apply" in {jira_mode, datadog_mode} and not confirmed:
               raise SystemExit(
                   "Apply mode requires confirm-apply=true"
               )
 
-          print("Cohort destination modes validated.")
+          print("Cohort and SCM modes validated.")
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
@@ -224,6 +244,67 @@ spec:
             mountPath: /var/lib/blackduck-wintermute/cohorts
           - name: source-data
             mountPath: /var/lib/blackduck-wintermute/source
+          - name: tmp
+            mountPath: /tmp
+
+    - name: scm
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      container:
+        image: "{{workflow.parameters.scm-image}}"
+        imagePullPolicy: IfNotPresent
+        command:
+          - blackduck-wintermute-scm-overview
+        args:
+          - --output-root
+          - /var/lib/blackduck-wintermute/scm
+          - --workers
+          - "1"
+          - --evidence-workers
+          - "1"
+          - --scan-evidence-workers
+          - "1"
+          - --page-limit
+          - "100"
+          - --max-hours
+          - "2"
+        envFrom:
+          - secretRef:
+              name: blackduck-wintermute-blackduck-credentials
+          - secretRef:
+              name: blackduck-wintermute-scm-credentials
+        env:
+          - name: WINTERMUTE_OUTPUT_DIR
+            value: /var/lib/blackduck-wintermute/scm
+          - name: TMPDIR
+            value: /tmp
+          - name: WINTERMUTE_BLACKDUCK_REQUEST_INTERVAL_SECONDS
+            value: "0.5"
+          - name: WINTERMUTE_BLACKDUCK_CIRCUIT_BREAKER_THRESHOLD
+            value: "5"
+          - name: WINTERMUTE_BLACKDUCK_CIRCUIT_BREAKER_WINDOW_SECONDS
+            value: "60"
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+        volumeMounts:
+          - name: scm-data
+            mountPath: /var/lib/blackduck-wintermute/scm
           - name: tmp
             mountPath: /tmp
 

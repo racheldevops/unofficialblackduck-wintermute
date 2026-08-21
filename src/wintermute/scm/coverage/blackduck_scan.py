@@ -5,6 +5,10 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
+from wintermute.blackduck.request_control import (
+    BlackDuckCircuitOpenError,
+    blackduck_request_context,
+)
 from wintermute.blackduck.resources import (
     get_link,
     get_self_href,
@@ -365,6 +369,8 @@ def collect_version_evidence(
         version_resource = client.get(
             version.href
         )
+    except BlackDuckCircuitOpenError:
+        raise
     except Exception as error:
         failure(
             "load-project-version-scan-evidence",
@@ -404,6 +410,8 @@ def collect_version_evidence(
 
             if linked_bom is not None:
                 bom_exists = linked_bom
+        except BlackDuckCircuitOpenError:
+            raise
         except Exception as error:
             failure(
                 "load-bom-status",
@@ -463,6 +471,8 @@ def collect_version_evidence(
                             summary_records
                         )
                         location_complete = True
+                    except BlackDuckCircuitOpenError:
+                        raise
                     except Exception as error:
                         failure(
                             "load-scan-summaries",
@@ -488,6 +498,8 @@ def collect_version_evidence(
                 or all(location_completeness)
             )
 
+        except BlackDuckCircuitOpenError:
+            raise
         except Exception as error:
             failure(
                 "load-code-locations",
@@ -605,11 +617,19 @@ def collect_blackduck_scan_evidence(
     ) -> VersionEvidenceResult:
         project, version = target
 
-        return collect_version_evidence(
-            worker_client(),
-            project,
-            version,
-        )
+        with blackduck_request_context(
+            project=project.name,
+            project_id=project.project_id,
+            project_version=version.name,
+            project_version_id=version.version_id,
+            project_version_href=version.href,
+            stage="scm-direct-scan-evidence",
+        ):
+            return collect_version_evidence(
+                worker_client(),
+                project,
+                version,
+            )
 
     results = ordered_parallel_map(
         targets,

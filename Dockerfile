@@ -70,6 +70,11 @@ FROM runtime-base AS datadog
 ENTRYPOINT ["blackduck-wintermute-datadog-cohort"]
 CMD ["--dry-run", "--strict"]
 
+FROM runtime-base AS scm
+
+ENTRYPOINT ["blackduck-wintermute-scm-overview"]
+CMD ["--workers", "1", "--evidence-workers", "1", "--scan-evidence-workers", "1", "--page-limit", "100", "--max-hours", "2"]
+
 FROM runtime-base AS runtime
 
 ENTRYPOINT ["blackduck-jira-pipeline"]

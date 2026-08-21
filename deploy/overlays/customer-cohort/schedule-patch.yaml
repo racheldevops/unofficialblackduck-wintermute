@@ -16,10 +16,14 @@ spec:
           value: registry.invalid/customer/blackduck-wintermute-jira:replace-me
         - name: datadog-image
           value: registry.invalid/customer/blackduck-wintermute-datadog:replace-me
+        - name: scm-image
+          value: registry.invalid/customer/blackduck-wintermute-scm:replace-me
         - name: jira-mode
           value: dry-run
         - name: datadog-mode
           value: dry-run
+        - name: scm-mode
+          value: disabled
         - name: confirm-apply
           value: "false"
         - name: retain-cohorts

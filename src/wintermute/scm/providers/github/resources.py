@@ -16,6 +16,11 @@ RESOURCE_STATUS_OK = "ok"
 RESOURCE_STATUS_UNSUPPORTED = "unsupported"
 RESOURCE_STATUS_FAILED = "failed"
 
+PLAN_REQUIRED_MARKERS = (
+    "upgrade to github",
+    "to enable this feature",
+)
+
 
 @dataclass(frozen=True)
 class GitHubResourceFailure:
@@ -49,6 +54,23 @@ class GitHubResources:
         GitHubResourceFailure,
         ...
     ] = ()
+
+
+def unsupported_feature_error(
+    error: GitHubRestError,
+) -> bool:
+    if error.category == "not_found":
+        return True
+
+    if error.status_code != 403:
+        return False
+
+    message = str(error).casefold()
+
+    return all(
+        marker in message
+        for marker in PLAN_REQUIRED_MARKERS
+    )
 
 
 def validate_tenant(
@@ -329,7 +351,7 @@ def read_github_resources(
     except GitHubRestError as error:
         property_error = str(error)
 
-        if error.category == "not_found":
+        if unsupported_feature_error(error):
             property_status = (
                 RESOURCE_STATUS_UNSUPPORTED
             )
@@ -410,7 +432,7 @@ def read_github_resources(
     except GitHubRestError as error:
         ruleset_error = str(error)
 
-        if error.category == "not_found":
+        if unsupported_feature_error(error):
             ruleset_status = (
                 RESOURCE_STATUS_UNSUPPORTED
             )
