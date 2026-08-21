@@ -16,6 +16,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 from wintermute.blackduck.client import BlackDuckClient as SharedBlackDuckClient
+from wintermute.blackduck.request_control import (
+    BlackDuckCircuitOpenError,
+)
 from wintermute.blackduck.criteria import (
     jira_parent_rollup_criteria,
 )
@@ -279,6 +282,8 @@ def discover_direct_subprojects(
 
             try:
                 child_version = client.get(candidate_href)
+            except BlackDuckCircuitOpenError:
+                raise
             except RuntimeError as error:
                 if debug:
                     print(
@@ -318,6 +323,8 @@ def discover_direct_subprojects(
                     str(component_name),
                     str(component_version_name),
                 )
+            except BlackDuckCircuitOpenError:
+                raise
             except RuntimeError:
                 continue
 
@@ -581,6 +588,8 @@ def read_project_custom_field(
 
     try:
         project = client.get(project_href)
+    except BlackDuckCircuitOpenError:
+        raise
     except RuntimeError as error:
         if client.debug:
             print(
@@ -633,6 +642,8 @@ def read_project_custom_field(
 
         try:
             custom_fields = client.paged_get(candidate_url)
+        except BlackDuckCircuitOpenError:
+            raise
         except RuntimeError as error:
             if client.debug:
                 print(
@@ -775,6 +786,8 @@ def load_subproject_refs_from_parent_csv(
         debug: bool,
         failures: list[FailedRelationship] | None = None,
         workers: int = 1,
+        excluded_parent_projects: set[str] | None = None,
+        excluded_child_projects: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     required_columns = {
         "parent_project",
@@ -797,6 +810,25 @@ def load_subproject_refs_from_parent_csv(
             )
 
         rows = [dict(row) for row in reader]
+
+    excluded_parent_projects = {
+        str(value).strip()
+        for value in (excluded_parent_projects or set())
+        if str(value).strip()
+    }
+    excluded_child_projects = {
+        str(value).strip()
+        for value in (excluded_child_projects or set())
+        if str(value).strip()
+    }
+    rows = [
+        row
+        for row in rows
+        if str(row.get("parent_project") or "")
+        not in excluded_parent_projects
+        and str(row.get("child_project") or "")
+        not in excluded_child_projects
+    ]
 
     stubs: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -897,6 +929,8 @@ def load_subproject_refs_from_parent_csv(
                 "",
                 time.monotonic() - started,
             )
+        except BlackDuckCircuitOpenError:
+            raise
         except RuntimeError as error:
             return (
                 href,
@@ -1562,6 +1596,15 @@ def parse_args() -> argparse.Namespace:
         help="Parent version name or parent-version filter.",
     )
     parser.add_argument(
+        "--exclude-parent-project",
+        action="append",
+        default=[],
+        help=(
+            "Exclude an exact parent project name. "
+            "Repeat for multiple projects."
+        ),
+    )
+    parser.add_argument(
         "--threshold",
         type=float,
         default=7.0,
@@ -1573,7 +1616,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--entity-custom-field",
-        default="foo Entity",
+        default="",
         help=(
             "Black Duck project custom-field name copied into findings. "
             "Use an empty string to disable."
@@ -1606,6 +1649,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--only-child-href",
         help="Only check this exact child version href.",
+    )
+    parser.add_argument(
+        "--exclude-child-project",
+        action="append",
+        default=[],
+        help=(
+            "Exclude an exact child project name. "
+            "Repeat for multiple projects."
+        ),
     )
     parser.add_argument(
         "--out",
@@ -1700,6 +1752,25 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def validate_args(args: argparse.Namespace) -> None:
+    args.exclude_parent_project = {
+        str(value).strip()
+        for value in getattr(
+            args,
+            "exclude_parent_project",
+            [],
+        )
+        if str(value).strip()
+    }
+    args.exclude_child_project = {
+        str(value).strip()
+        for value in getattr(
+            args,
+            "exclude_child_project",
+            [],
+        )
+        if str(value).strip()
+    }
+
     if args.timeout <= 0:
         raise RuntimeError("--timeout must be greater than 0")
 
@@ -1846,6 +1917,8 @@ def main() -> int:
                 debug=args.debug,
                 failures=failed_relationships,
                 workers=args.workers,
+                excluded_parent_projects=args.exclude_parent_project,
+                excluded_child_projects=args.exclude_child_project,
             )
 
             subprojects = filter_subprojects_for_targeting(

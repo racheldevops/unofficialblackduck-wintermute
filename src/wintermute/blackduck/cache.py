@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import threading
+import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -15,6 +16,15 @@ from wintermute.paths import ensure_parent_dir
 
 
 CACHE_SCHEMA_VERSION = 1
+DEFAULT_CHECKPOINT_ENTRIES = 25
+DEFAULT_CHECKPOINT_SECONDS = 30.0
+
+CHECKPOINT_ENTRIES_ENV = (
+    "WINTERMUTE_BLACKDUCK_CACHE_CHECKPOINT_ENTRIES"
+)
+CHECKPOINT_SECONDS_ENV = (
+    "WINTERMUTE_BLACKDUCK_CACHE_CHECKPOINT_SECONDS"
+)
 
 
 def now_iso() -> str:
@@ -33,6 +43,40 @@ def parse_iso(value: str | None) -> datetime | None:
         return None
 
 
+def environment_int(
+    name: str,
+    default: int,
+) -> int:
+    raw = os.getenv(name, "").strip()
+
+    if not raw:
+        return default
+
+    try:
+        return int(raw)
+    except ValueError as error:
+        raise ValueError(
+            f"{name} must be an integer"
+        ) from error
+
+
+def environment_float(
+    name: str,
+    default: float,
+) -> float:
+    raw = os.getenv(name, "").strip()
+
+    if not raw:
+        return default
+
+    try:
+        return float(raw)
+    except ValueError as error:
+        raise ValueError(
+            f"{name} must be numeric"
+        ) from error
+
+
 class ApiResponseCache:
     def __init__(
         self,
@@ -42,19 +86,59 @@ class ApiResponseCache:
         max_entries: int,
         refresh: bool = False,
         debug: bool = False,
-    ):
+        checkpoint_entries: int | None = None,
+        checkpoint_seconds: float | None = None,
+    ) -> None:
         self.path = path
         self.base_url = base_url.rstrip("/")
         self.max_age_hours = max_age_hours
         self.max_entries = max_entries
         self.debug = debug
+        self.checkpoint_entries = (
+            environment_int(
+                CHECKPOINT_ENTRIES_ENV,
+                DEFAULT_CHECKPOINT_ENTRIES,
+            )
+            if checkpoint_entries is None
+            else int(checkpoint_entries)
+        )
+        self.checkpoint_seconds = (
+            environment_float(
+                CHECKPOINT_SECONDS_ENV,
+                DEFAULT_CHECKPOINT_SECONDS,
+            )
+            if checkpoint_seconds is None
+            else float(checkpoint_seconds)
+        )
+
+        if self.checkpoint_entries < 1:
+            raise ValueError(
+                "Cache checkpoint entry count "
+                "must be greater than zero"
+            )
+
+        if self.checkpoint_seconds <= 0:
+            raise ValueError(
+                "Cache checkpoint interval "
+                "must be greater than zero"
+            )
+
         self.lock = threading.RLock()
         self._lock = self.lock
         self._singleflight: SingleFlight[
             str,
             list[dict[str, Any]],
         ] = SingleFlight()
-        self.data: dict[str, Any] = self._fresh_data()
+        self.data: dict[str, Any] = (
+            self._fresh_data()
+        )
+        self._dirty_entries = 0
+        self._checkpoint_stop = (
+            threading.Event()
+        )
+        self._checkpoint_thread: (
+            threading.Thread | None
+        ) = None
 
         if refresh:
             print(
@@ -75,6 +159,8 @@ class ApiResponseCache:
         refresh: bool,
         max_entries: int,
         debug: bool,
+        checkpoint_entries: int | None = None,
+        checkpoint_seconds: float | None = None,
     ) -> ApiResponseCache:
         return cls(
             path=path,
@@ -83,6 +169,8 @@ class ApiResponseCache:
             max_entries=max_entries,
             refresh=refresh,
             debug=debug,
+            checkpoint_entries=checkpoint_entries,
+            checkpoint_seconds=checkpoint_seconds,
         )
 
     def _fresh_data(self) -> dict[str, Any]:
@@ -162,8 +250,8 @@ class ApiResponseCache:
         self.prune()
 
         print(
-            f"Loaded API cache from {self.path} with "
-            f"{len(self.data.get('entries', {}))} entrie(s).",
+            f"Loaded API cache from {self.path} "
+            f"with {len(entries)} entrie(s).",
             file=sys.stderr,
         )
 
@@ -246,7 +334,18 @@ class ApiResponseCache:
                 "total_count": total_count,
                 "items": copy.deepcopy(items),
             }
+            self._dirty_entries += 1
             self.prune_locked()
+
+            if (
+                self._dirty_entries
+                >= self.checkpoint_entries
+            ):
+                self._checkpoint_locked(
+                    reason="entry-count"
+                )
+            else:
+                self._ensure_checkpoint_thread_locked()
 
     def prune(self) -> None:
         with self.lock:
@@ -283,19 +382,107 @@ class ApiResponseCache:
             entries.pop(key, None)
 
     def save(self) -> None:
+        self._stop_checkpoint_thread()
+
+        with self.lock:
+            self._write_locked(
+                reason="final",
+                always=True,
+            )
+
+    def _ensure_checkpoint_thread_locked(
+        self,
+    ) -> None:
         if not self.path:
             return
 
+        if (
+            self._checkpoint_thread is not None
+            and self._checkpoint_thread.is_alive()
+        ):
+            return
+
+        self._checkpoint_stop.clear()
+        self._checkpoint_thread = (
+            threading.Thread(
+                target=self._checkpoint_loop,
+                name=(
+                    "wintermute-api-cache-"
+                    "checkpoint"
+                ),
+                daemon=True,
+            )
+        )
+        self._checkpoint_thread.start()
+
+    def _checkpoint_loop(self) -> None:
+        while not self._checkpoint_stop.wait(
+            self.checkpoint_seconds
+        ):
+            with self.lock:
+                if self._dirty_entries:
+                    self._checkpoint_locked(
+                        reason="elapsed-time"
+                    )
+
+    def _checkpoint_locked(
+        self,
+        *,
+        reason: str,
+    ) -> None:
+        try:
+            self._write_locked(
+                reason=reason,
+                always=False,
+            )
+        except OSError as error:
+            print(
+                "Warning: failed to checkpoint "
+                f"API cache {self.path}: {error}",
+                file=sys.stderr,
+            )
+
+    def _write_locked(
+        self,
+        *,
+        reason: str,
+        always: bool,
+    ) -> None:
+        if not self.path:
+            return
+
+        if (
+            not always
+            and self._dirty_entries == 0
+        ):
+            return
+
         ensure_parent_dir(self.path)
+        self.prune_locked()
+        self.data["updated_at"] = now_iso()
+        settings = self.data.setdefault(
+            "settings",
+            {},
+        )
+        settings["max_age_hours"] = (
+            self.max_age_hours
+        )
+        settings["max_entries"] = (
+            self.max_entries
+        )
+        settings["checkpoint_entries"] = (
+            self.checkpoint_entries
+        )
+        settings["checkpoint_seconds"] = (
+            self.checkpoint_seconds
+        )
+        temporary_path = (
+            f"{self.path}.tmp-"
+            f"{os.getpid()}-"
+            f"{uuid.uuid4().hex}"
+        )
 
-        with self.lock:
-            self.prune_locked()
-            self.data["updated_at"] = now_iso()
-            settings = self.data.setdefault("settings", {})
-            settings["max_age_hours"] = self.max_age_hours
-            settings["max_entries"] = self.max_entries
-            temporary_path = f"{self.path}.tmp"
-
+        try:
             with open(
                 temporary_path,
                 "w",
@@ -307,17 +494,55 @@ class ApiResponseCache:
                     indent=2,
                     sort_keys=True,
                 )
+                output_file.flush()
+                os.fsync(
+                    output_file.fileno()
+                )
 
-            os.replace(temporary_path, self.path)
-            entry_count = len(
-                self.data.get("entries", {})
+            os.replace(
+                temporary_path,
+                self.path,
+            )
+        finally:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+
+        self._dirty_entries = 0
+        entry_count = len(
+            self.data.get("entries", {})
+        )
+
+        if reason == "final":
+            print(
+                f"Wrote API cache: {self.path} "
+                f"({entry_count} entrie(s)).",
+                file=sys.stderr,
+            )
+        elif self.debug:
+            print(
+                "Checkpointed API cache: "
+                f"{self.path} "
+                f"({entry_count} entrie(s), "
+                f"reason={reason}).",
+                file=sys.stderr,
             )
 
-        print(
-            f"Wrote API cache: {self.path} "
-            f"({entry_count} entrie(s)).",
-            file=sys.stderr,
-        )
+    def _stop_checkpoint_thread(
+        self,
+    ) -> None:
+        self._checkpoint_stop.set()
+        thread = self._checkpoint_thread
+
+        if (
+            thread is not None
+            and thread
+            is not threading.current_thread()
+        ):
+            thread.join(timeout=2.0)
+
+        self._checkpoint_thread = None
 
     def _entry_for_url(
         self,
@@ -328,10 +553,20 @@ class ApiResponseCache:
         if not isinstance(entries, dict):
             return None
 
-        entry = entries.get(self._key_for_url(source_url))
-        return entry if isinstance(entry, dict) else None
+        entry = entries.get(
+            self._key_for_url(source_url)
+        )
 
-    def _is_stale(self, entry: dict[str, Any]) -> bool:
+        return (
+            entry
+            if isinstance(entry, dict)
+            else None
+        )
+
+    def _is_stale(
+        self,
+        entry: dict[str, Any],
+    ) -> bool:
         if self.max_age_hours < 0:
             return False
 

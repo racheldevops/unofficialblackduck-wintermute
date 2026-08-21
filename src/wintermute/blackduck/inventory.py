@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from wintermute.blackduck.models import ProjectVersionRef
+from wintermute.blackduck.request_control import (
+    BlackDuckCircuitOpenError,
+)
 from wintermute.blackduck.resources import (
     canonical_href,
     first_value_by_key,
@@ -200,6 +203,8 @@ def build_project_version_inventory(
                 ),
                 "",
             )
+        except BlackDuckCircuitOpenError:
+            raise
         except RuntimeError as error:
             return [], str(error)
 

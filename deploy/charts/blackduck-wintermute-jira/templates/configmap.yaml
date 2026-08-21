@@ -1,0 +1,24 @@
+{{- $jiraURL := required "jira.url is required" .Values.jira.url -}}
+{{- $projectKey := required "jira.projectKey is required" .Values.jira.projectKey -}}
+{{- $jira := dict
+      "url" $jiraURL
+      "project_key" $projectKey
+      "issue_type" .Values.jira.issueType
+      "api_version" .Values.jira.apiVersion
+      "auth_mode" .Values.jira.authMode
+      "verify_tls" .Values.jira.verifyTls
+-}}
+{{- $payload := dict
+      "jira" $jira
+      "issue" .Values.config.issue
+      "hierarchy" .Values.config.hierarchy
+-}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "blackduck-wintermute-jira.fullname" . }}-config
+  labels:
+    {{- include "blackduck-wintermute-jira.labels" . | nindent 4 }}
+data:
+  jira-rollup-config.json: |
+{{ toPrettyJson $payload | indent 4 }}

@@ -125,7 +125,7 @@ def jira_parent_rollup_criteria(
     *,
     threshold: float = 7.0,
     score_field: str = "overallScore",
-    entity_custom_field: str = "foo Entity",
+    entity_custom_field: str = "",
     require_entity: bool = False,
 ) -> CollectionCriteria:
     return CollectionCriteria(

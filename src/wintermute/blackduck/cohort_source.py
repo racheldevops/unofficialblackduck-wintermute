@@ -368,7 +368,7 @@ def parse_args(
     )
     parser.add_argument(
         "--entity-custom-field",
-        default="foo Entity",
+        default="",
     )
     parser.add_argument(
         "--require-entity",
