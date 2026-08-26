@@ -1,0 +1,104 @@
+{
+  "discovered_repository_count": 3,
+  "exclusion_count": 1,
+  "exclusions": [
+    {
+      "reason": "archived",
+      "repository": {
+        "activity_status": "inactive",
+        "archived": true,
+        "canonical_url": "https://github.example/acme/archived-service",
+        "default_branch": "main",
+        "external_id": "6243bc6f7980999b272b19ccadaca4ba68d8763d1acd26769a5412b592f593ca",
+        "fork": false,
+        "head_sha": "",
+        "identity_key": "[\"github\",\"github.example\",\"R_archived\"]",
+        "language_bytes": [
+          {
+            "bytes": 100,
+            "language": "python"
+          }
+        ],
+        "language_data_complete": true,
+        "language_total_bytes": 100,
+        "languages": [
+          "python"
+        ],
+        "name": "archived-service",
+        "name_with_owner": "acme/archived-service",
+        "namespace": "acme",
+        "provider": "github",
+        "provider_instance": "github.example",
+        "pushed_at": "",
+        "repository_id": "R_archived",
+        "template": false,
+        "tenant_id": "O_acme",
+        "visibility": "private"
+      }
+    }
+  ],
+  "failure_count": 0,
+  "failures": [],
+  "reconciled": true,
+  "repositories": [
+    {
+      "activity_status": "inactive",
+      "archived": false,
+      "canonical_url": "https://github.example/acme/docs",
+      "default_branch": "",
+      "external_id": "f950481fae4875d1f947bf1bea1ecc0139106e6e1b07683606eba8ee59c2491e",
+      "fork": true,
+      "head_sha": "",
+      "identity_key": "[\"github\",\"github.example\",\"R_docs\"]",
+      "language_bytes": [],
+      "language_data_complete": true,
+      "language_total_bytes": 0,
+      "languages": [
+        "unknown"
+      ],
+      "name": "docs",
+      "name_with_owner": "acme/docs",
+      "namespace": "acme",
+      "provider": "github",
+      "provider_instance": "github.example",
+      "pushed_at": "2025-01-15T12:00:00Z",
+      "repository_id": "R_docs",
+      "template": false,
+      "tenant_id": "O_acme",
+      "visibility": "internal"
+    },
+    {
+      "activity_status": "active",
+      "archived": false,
+      "canonical_url": "https://github.example/acme/service-api",
+      "default_branch": "main",
+      "external_id": "2a6232600c3fb64fdcbaf1210a905710c5375aff9392e5966801a802c5b51e85",
+      "fork": false,
+      "head_sha": "",
+      "identity_key": "[\"github\",\"github.example\",\"R_service_api\"]",
+      "language_bytes": [
+        {
+          "bytes": 100,
+          "language": "python"
+        }
+      ],
+      "language_data_complete": true,
+      "language_total_bytes": 100,
+      "languages": [
+        "python"
+      ],
+      "name": "service-api",
+      "name_with_owner": "acme/service-api",
+      "namespace": "acme",
+      "provider": "github",
+      "provider_instance": "github.example",
+      "pushed_at": "2026-07-01T09:30:00Z",
+      "repository_id": "R_service_api",
+      "template": false,
+      "tenant_id": "O_acme",
+      "visibility": "private"
+    }
+  ],
+  "repository_count": 2,
+  "schema_version": 1
+}

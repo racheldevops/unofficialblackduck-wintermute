@@ -39,6 +39,14 @@ on:
           - dry-run
           - apply
         default: dry-run
+      scm_mode:
+        description: SCM inventory and coverage mode
+        required: true
+        type: choice
+        options:
+          - disabled
+          - read-only
+        default: disabled
       confirm_apply:
         description: Confirm destination apply mode
         required: true
@@ -87,10 +95,18 @@ jobs:
         with:
           version: latest
 
-      - name: Validate apply confirmation
+      - name: Validate deployment inputs
         shell: bash
+        env:
+          REGISTRY_HOST: ${{ vars.REGISTRY_HOST }}
+          REGISTRY_REPOSITORY: ${{ vars.REGISTRY_REPOSITORY }}
+          SCM_GITHUB_ORG: ${{ vars.SCM_GITHUB_ORG }}
+          SCM_GITHUB_TOKEN: ${{ secrets.SCM_GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          [[ -n "${REGISTRY_HOST}" ]]
+          [[ -n "${REGISTRY_REPOSITORY}" ]]
 
           if [[ \
             "${{ inputs.jira_mode }}" == "apply" || \
@@ -98,6 +114,21 @@ jobs:
           ]]; then
             [[ "${{ inputs.confirm_apply }}" == "true" ]] || {
               echo "Apply mode requires confirm_apply=true"
+              exit 1
+            }
+          fi
+
+          if [[ \
+            "${{ inputs.operation }}" == "apply" && \
+            "${{ inputs.scm_mode }}" == "read-only" \
+          ]]; then
+            [[ -n "${SCM_GITHUB_ORG}" ]] || {
+              echo "SCM_GITHUB_ORG variable is required"
+              exit 1
+            }
+
+            [[ -n "${SCM_GITHUB_TOKEN}" ]] || {
+              echo "SCM_GITHUB_TOKEN secret is required"
               exit 1
             }
           fi
@@ -117,6 +148,7 @@ jobs:
             --namespace "${{ inputs.namespace }}"
             --jira-mode "${{ inputs.jira_mode }}"
             --datadog-mode "${{ inputs.datadog_mode }}"
+            --scm-mode "${{ inputs.scm_mode }}"
             --retain-cohorts "${{ inputs.retain_cohorts }}"
             --schedule "${{ inputs.schedule }}"
             --timezone "${{ inputs.timezone }}"
@@ -152,6 +184,7 @@ jobs:
           kubeconfig="${RUNNER_TEMP}/kubeconfig"
           printf '%s' "${KUBE_CONFIG_B64}" \
             | base64 --decode > "${kubeconfig}"
+
           chmod 600 "${kubeconfig}"
           echo "KUBECONFIG=${kubeconfig}" >> "${GITHUB_ENV}"
 
@@ -161,8 +194,71 @@ jobs:
         run: |
           set -euo pipefail
 
+          kubectl get crd workflows.argoproj.io
           kubectl get crd workflowtemplates.argoproj.io
           kubectl get crd cronworkflows.argoproj.io
+
+      - name: Apply scoped SCM credentials
+        if: ${{ inputs.operation == 'apply' && inputs.scm_mode == 'read-only' }}
+        shell: bash
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
+          SCM_GITHUB_ORG: ${{ vars.SCM_GITHUB_ORG }}
+          SCM_GITHUB_TOKEN: ${{ secrets.SCM_GITHUB_TOKEN }}
+          SCM_GITHUB_GRAPHQL_URL: ${{ vars.SCM_GITHUB_GRAPHQL_URL }}
+          SCM_GITHUB_REST_URL: ${{ vars.SCM_GITHUB_REST_URL }}
+        run: |
+          set -euo pipefail
+          set +x
+
+          python - <<'PY' | kubectl apply --filename -
+          import json
+          import os
+
+          values = {
+              "GITHUB_ORG": os.environ[
+                  "SCM_GITHUB_ORG"
+              ],
+              "GITHUB_TOKEN": os.environ[
+                  "SCM_GITHUB_TOKEN"
+              ],
+          }
+
+          for source, target in (
+              (
+                  "SCM_GITHUB_GRAPHQL_URL",
+                  "GITHUB_GRAPHQL_URL",
+              ),
+              (
+                  "SCM_GITHUB_REST_URL",
+                  "GITHUB_REST_URL",
+              ),
+          ):
+              value = os.getenv(source, "").strip()
+
+              if value:
+                  values[target] = value
+
+          print(
+              json.dumps(
+                  {
+                      "apiVersion": "v1",
+                      "kind": "Secret",
+                      "metadata": {
+                          "name": (
+                              "blackduck-wintermute-"
+                              "scm-credentials"
+                          ),
+                          "namespace": os.environ[
+                              "NAMESPACE"
+                          ],
+                      },
+                      "type": "Opaque",
+                      "stringData": values,
+                  }
+              )
+          )
+          PY
 
       - name: Validate cluster prerequisites
         if: ${{ inputs.operation != 'render' }}
@@ -170,16 +266,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          python scripts/validate_cohort_cluster.py             --manifest rendered-cohort-manifest.yaml             --namespace "${{ inputs.namespace }}"             --require-secrets             --report cohort-cluster-preflight.json
+          python scripts/validate_cohort_cluster.py \
+            --manifest rendered-cohort-manifest.yaml \
+            --namespace "${{ inputs.namespace }}" \
+            --require-secrets \
+            --report cohort-cluster-preflight.json
 
       - name: Diff
         if: ${{ inputs.operation == 'diff' || inputs.operation == 'apply' }}
         shell: bash
         run: |
-          set -euo pipefail
           set +e
+
           kubectl diff \
             --filename rendered-cohort-manifest.yaml
+
           diff_exit=$?
           set -e
 
@@ -206,4 +307,19 @@ jobs:
             rendered-cohort-manifest.yaml
             rendered-cohort-manifest.sha256
             cohort-cluster-preflight.json
-          if-no-files-found: error
+          if-no-files-found: warn
+
+      - name: Write deployment summary
+        shell: bash
+        run: |
+          {
+            echo "## Wintermute cohort deployment"
+            echo
+            echo "Operation: ${{ inputs.operation }}"
+            echo "Namespace: ${{ inputs.namespace }}"
+            echo "Image tag: ${{ inputs.image_tag }}"
+            echo "Jira mode: ${{ inputs.jira_mode }}"
+            echo "Datadog mode: ${{ inputs.datadog_mode }}"
+            echo "SCM mode: ${{ inputs.scm_mode }}"
+            echo "Schedule enabled: ${{ inputs.enable_schedule }}"
+          } >> "${GITHUB_STEP_SUMMARY}"

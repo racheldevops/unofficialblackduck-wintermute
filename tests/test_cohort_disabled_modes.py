@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import sys
 from pathlib import Path
 
 from wintermute.blackduck import (
@@ -11,7 +13,27 @@ from wintermute.blackduck import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_workflow_can_skip_each_destination() -> None:
+def load_validator():
+    script = (
+        ROOT
+        / "scripts"
+        / "validate_cohort_cluster.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "disabled_mode_validator",
+        script,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    validator = importlib.util.module_from_spec(
+        spec
+    )
+    sys.modules[spec.name] = validator
+    spec.loader.exec_module(validator)
+    return validator
+
+
+def test_workflow_can_skip_destinations_and_scm() -> None:
     text = (
         ROOT
         / "deploy"
@@ -19,17 +41,19 @@ def test_workflow_can_skip_each_destination() -> None:
         / "workflow-template.yaml"
     ).read_text(encoding="utf-8")
 
-    assert text.count("          - disabled") == 2
-    assert (
-        "when: \"{{=workflow.parameters['jira-mode'] "
-        "!= 'disabled'}}\""
-        in text
-    )
-    assert (
-        "when: \"{{=workflow.parameters['datadog-mode'] "
-        "!= 'disabled'}}\""
-        in text
-    )
+    assert text.count("          - disabled") == 3
+
+    for mode in (
+        "jira",
+        "datadog",
+        "scm",
+    ):
+        assert (
+            f"workflow.parameters['{mode}-mode'] "
+            "!= 'disabled'"
+            in text
+        )
+
     assert "jira.Skipped || jira.Omitted" in text
     assert "datadog.Skipped || datadog.Omitted" in text
 
@@ -83,28 +107,13 @@ def test_finalizer_records_disabled_destinations(
     }
 
 
-def test_cluster_preflight_omits_disabled_secret() -> None:
-    import importlib.util
-    import sys
-
-    script = (
-        ROOT
-        / "scripts"
-        / "validate_cohort_cluster.py"
-    )
-    spec = importlib.util.spec_from_file_location(
-        "disabled_mode_validator",
-        script,
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    validator = importlib.util.module_from_spec(
-        spec
-    )
-    sys.modules[spec.name] = validator
-    spec.loader.exec_module(validator)
-
-    manifest = """
+def manifest(
+    *,
+    jira_mode: str,
+    datadog_mode: str,
+    scm_mode: str,
+) -> str:
+    return f"""
 apiVersion: argoproj.io/v1alpha1
 kind: CronWorkflow
 spec:
@@ -112,14 +121,23 @@ spec:
     arguments:
       parameters:
         - name: jira-mode
-          value: dry-run
+          value: {jira_mode}
         - name: datadog-mode
-          value: disabled
+          value: {datadog_mode}
+        - name: scm-mode
+          value: {scm_mode}
 """
 
+
+def test_cluster_preflight_omits_disabled_secrets() -> None:
+    validator = load_validator()
     secrets = (
         validator.required_secrets_for_manifest(
-            manifest
+            manifest(
+                jira_mode="dry-run",
+                datadog_mode="disabled",
+                scm_mode="disabled",
+            )
         )
     )
 
@@ -130,4 +148,26 @@ spec:
     assert (
         "blackduck-wintermute-datadog-credentials"
         not in secrets
+    )
+    assert (
+        "blackduck-wintermute-scm-credentials"
+        not in secrets
+    )
+
+
+def test_cluster_preflight_requires_enabled_scm_secret() -> None:
+    validator = load_validator()
+    secrets = (
+        validator.required_secrets_for_manifest(
+            manifest(
+                jira_mode="disabled",
+                datadog_mode="disabled",
+                scm_mode="read-only",
+            )
+        )
+    )
+
+    assert (
+        "blackduck-wintermute-scm-credentials"
+        in secrets
     )

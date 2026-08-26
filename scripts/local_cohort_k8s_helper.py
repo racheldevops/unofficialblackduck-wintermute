@@ -10,10 +10,14 @@ import sys
 from typing import Any
 
 
-VALID_MODES = {
+DESTINATION_MODES = {
     "disabled",
     "dry-run",
     "apply",
+}
+SCM_MODES = {
+    "disabled",
+    "read-only",
 }
 
 
@@ -91,14 +95,13 @@ def secret_data(
     payload = json.loads(completed.stdout)
     data = payload.get("data", {})
 
-    return (
-        {
-            str(key): str(value or "")
-            for key, value in data.items()
-        }
-        if isinstance(data, dict)
-        else {}
-    )
+    if not isinstance(data, dict):
+        return {}
+
+    return {
+        str(key): str(value or "")
+        for key, value in data.items()
+    }
 
 
 def apply_payload(
@@ -117,74 +120,159 @@ def apply_payload(
         print(completed.stdout, end="")
 
 
-def apply_secrets(args: argparse.Namespace) -> int:
+def opaque_secret(
+    namespace: str,
+    name: str,
+    values: dict[str, str],
+) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+        },
+        "type": "Opaque",
+        "data": {
+            key: encoded(value)
+            for key, value in values.items()
+            if value
+        },
+    }
+
+
+def registry_secret(
+    namespace: str,
+) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": (
+                "blackduck-wintermute-registry"
+            ),
+            "namespace": namespace,
+        },
+        "type": (
+            "kubernetes.io/dockerconfigjson"
+        ),
+        "data": {
+            ".dockerconfigjson": encoded(
+                '{"auths":{}}'
+            ),
+        },
+    }
+
+
+def scm_environment() -> dict[str, str]:
+    values = {
+        "GITHUB_ORG": os.getenv(
+            "GITHUB_ORG",
+            "",
+        ).strip(),
+        "GITHUB_TOKEN": os.getenv(
+            "GITHUB_TOKEN",
+            "",
+        ).strip(),
+        "GITHUB_GRAPHQL_URL": os.getenv(
+            "GITHUB_GRAPHQL_URL",
+            "",
+        ).strip(),
+        "GITHUB_REST_URL": os.getenv(
+            "GITHUB_REST_URL",
+            "",
+        ).strip(),
+    }
+    organization = values["GITHUB_ORG"]
+    token = values["GITHUB_TOKEN"]
+
+    if bool(organization) != bool(token):
+        raise RuntimeError(
+            "GITHUB_ORG and GITHUB_TOKEN must "
+            "either both be configured or both be absent"
+        )
+
+    return values
+
+
+def apply_secrets(
+    args: argparse.Namespace,
+) -> int:
     blackduck_url = os.getenv(
         "BLACKDUCK_URL",
         "",
-    )
+    ).strip()
     blackduck_token = os.getenv(
         "BLACKDUCK_API_TOKEN",
         "",
-    )
+    ).strip()
 
     if not blackduck_url or not blackduck_token:
         raise RuntimeError(
             "Black Duck credentials are missing"
         )
 
+    scm_values = scm_environment()
+
+    if (
+        args.require_scm
+        and (
+            not scm_values["GITHUB_ORG"]
+            or not scm_values["GITHUB_TOKEN"]
+        )
+    ):
+        raise RuntimeError(
+            "SCM read-only mode requires "
+            "GITHUB_ORG and GITHUB_TOKEN"
+        )
+
+    items = [
+        opaque_secret(
+            args.namespace,
+            (
+                "blackduck-wintermute-"
+                "blackduck-credentials"
+            ),
+            {
+                "BLACKDUCK_URL": blackduck_url,
+                "BLACKDUCK_API_TOKEN": (
+                    blackduck_token
+                ),
+            },
+        ),
+        registry_secret(args.namespace),
+    ]
+
+    if (
+        scm_values["GITHUB_ORG"]
+        and scm_values["GITHUB_TOKEN"]
+    ):
+        items.append(
+            opaque_secret(
+                args.namespace,
+                (
+                    "blackduck-wintermute-"
+                    "scm-credentials"
+                ),
+                scm_values,
+            )
+        )
+
     apply_payload(
         {
             "apiVersion": "v1",
             "kind": "List",
-            "items": [
-                {
-                    "apiVersion": "v1",
-                    "kind": "Secret",
-                    "metadata": {
-                        "name": (
-                            "blackduck-wintermute-"
-                            "blackduck-credentials"
-                        ),
-                        "namespace": args.namespace,
-                    },
-                    "type": "Opaque",
-                    "data": {
-                        "BLACKDUCK_URL": encoded(
-                            blackduck_url
-                        ),
-                        "BLACKDUCK_API_TOKEN": (
-                            encoded(blackduck_token)
-                        ),
-                    },
-                },
-                {
-                    "apiVersion": "v1",
-                    "kind": "Secret",
-                    "metadata": {
-                        "name": (
-                            "blackduck-wintermute-"
-                            "registry"
-                        ),
-                        "namespace": args.namespace,
-                    },
-                    "type": (
-                        "kubernetes.io/"
-                        "dockerconfigjson"
-                    ),
-                    "data": {
-                        ".dockerconfigjson": encoded(
-                            '{"auths":{}}'
-                        ),
-                    },
-                },
-            ],
+            "items": items,
         }
     )
 
-    for name in (
+    placeholder_names = (
         "blackduck-wintermute-jira-credentials",
         "blackduck-wintermute-datadog-credentials",
-    ):
+        "blackduck-wintermute-scm-credentials",
+    )
+
+    for name in placeholder_names:
         if secret_exists(
             args.namespace,
             name,
@@ -192,22 +280,17 @@ def apply_secrets(args: argparse.Namespace) -> int:
             continue
 
         apply_payload(
-            {
-                "apiVersion": "v1",
-                "kind": "Secret",
-                "metadata": {
-                    "name": name,
-                    "namespace": args.namespace,
-                },
-                "type": "Opaque",
-                "data": {},
-            }
+            opaque_secret(
+                args.namespace,
+                name,
+                {},
+            )
         )
 
     return 0
 
 
-def validate_apply_credentials(
+def validate_submit_credentials(
     args: argparse.Namespace,
 ) -> None:
     if args.jira_mode == "apply":
@@ -253,18 +336,43 @@ def validate_apply_credentials(
                 "Datadog apply credentials are not configured"
             )
 
+    if args.scm_mode == "read-only":
+        data = secret_data(
+            args.namespace,
+            (
+                "blackduck-wintermute-"
+                "scm-credentials"
+            ),
+        )
+
+        if not all(
+            data.get(name)
+            for name in (
+                "GITHUB_ORG",
+                "GITHUB_TOKEN",
+            )
+        ):
+            raise RuntimeError(
+                "SCM read-only credentials are not configured"
+            )
+
 
 def submit_workflow(
     args: argparse.Namespace,
 ) -> int:
-    if args.jira_mode not in VALID_MODES:
+    if args.jira_mode not in DESTINATION_MODES:
         raise RuntimeError(
             f"Invalid Jira mode: {args.jira_mode}"
         )
 
-    if args.datadog_mode not in VALID_MODES:
+    if args.datadog_mode not in DESTINATION_MODES:
         raise RuntimeError(
             f"Invalid Datadog mode: {args.datadog_mode}"
+        )
+
+    if args.scm_mode not in SCM_MODES:
+        raise RuntimeError(
+            f"Invalid SCM mode: {args.scm_mode}"
         )
 
     if (
@@ -289,7 +397,12 @@ def submit_workflow(
             "datadog-max-send must be greater than zero"
         )
 
-    validate_apply_credentials(args)
+    if args.retain_cohorts < 1:
+        raise RuntimeError(
+            "retain-cohorts must be greater than zero"
+        )
+
+    validate_submit_credentials(args)
 
     parameters = [
         {
@@ -305,12 +418,20 @@ def submit_workflow(
             "value": args.datadog_image,
         },
         {
+            "name": "scm-image",
+            "value": args.scm_image,
+        },
+        {
             "name": "jira-mode",
             "value": args.jira_mode,
         },
         {
             "name": "datadog-mode",
             "value": args.datadog_mode,
+        },
+        {
+            "name": "scm-mode",
+            "value": args.scm_mode,
         },
         {
             "name": "confirm-apply",
@@ -398,6 +519,10 @@ def parse_args() -> argparse.Namespace:
         "--namespace",
         required=True,
     )
+    apply_parser.add_argument(
+        "--require-scm",
+        action="store_true",
+    )
 
     submit = commands.add_parser("submit")
     submit.add_argument(
@@ -417,14 +542,23 @@ def parse_args() -> argparse.Namespace:
         required=True,
     )
     submit.add_argument(
+        "--scm-image",
+        required=True,
+    )
+    submit.add_argument(
         "--jira-mode",
-        choices=sorted(VALID_MODES),
+        choices=sorted(DESTINATION_MODES),
         default="dry-run",
     )
     submit.add_argument(
         "--datadog-mode",
-        choices=sorted(VALID_MODES),
+        choices=sorted(DESTINATION_MODES),
         default="dry-run",
+    )
+    submit.add_argument(
+        "--scm-mode",
+        choices=sorted(SCM_MODES),
+        default="disabled",
     )
     submit.add_argument(
         "--confirm-apply",

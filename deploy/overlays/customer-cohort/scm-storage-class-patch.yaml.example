@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: blackduck-wintermute-scm-data
+spec:
+  storageClassName: REPLACE_WITH_CUSTOMER_STORAGE_CLASS
+  resources:
+    requests:
+      storage: 5Gi

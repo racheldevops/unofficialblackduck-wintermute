@@ -31,6 +31,9 @@ blackduck-wintermute-cohort-source = "wintermute.blackduck.cohort_source:main"
 blackduck-wintermute-jira-cohort = "wintermute.jira.cohort_pipeline:main"
 blackduck-wintermute-datadog-cohort = "wintermute.datadog.cohort_pipeline:main"
 blackduck-wintermute-cohort-finalize = "wintermute.blackduck.cohort_finalize:main"
+blackduck-wintermute-scm-inventory = "wintermute.scm.cli:main"
+blackduck-wintermute-scm-overview = "wintermute.scm.overview:main"
+blackduck-wintermute-coverage = "wintermute.scm.coverage.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

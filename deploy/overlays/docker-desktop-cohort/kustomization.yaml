@@ -9,6 +9,12 @@ resources:
 
 patches:
   - path: schedule-patch.yaml
+  - path: insecure-network-patch.json
+    target:
+      group: argoproj.io
+      version: v1alpha1
+      kind: WorkflowTemplate
+      name: blackduck-wintermute-cohort
 
 configMapGenerator:
   - name: blackduck-wintermute-cohort-jira-config

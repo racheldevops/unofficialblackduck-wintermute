@@ -16,10 +16,14 @@ spec:
           value: blackduck-wintermute-jira:local
         - name: datadog-image
           value: blackduck-wintermute-datadog:local
+        - name: scm-image
+          value: blackduck-wintermute-scm:local
         - name: jira-mode
           value: dry-run
         - name: datadog-mode
           value: dry-run
+        - name: scm-mode
+          value: disabled
         - name: confirm-apply
           value: "false"
         - name: retain-cohorts

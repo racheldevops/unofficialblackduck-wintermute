@@ -53,3 +53,17 @@ spec:
   resources:
     requests:
       storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: blackduck-wintermute-scm-data
+  labels:
+    app.kubernetes.io/name: blackduck-wintermute
+    app.kubernetes.io/component: scm-state
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
