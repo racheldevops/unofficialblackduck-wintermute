@@ -93,7 +93,7 @@ spec:
             depends: validate-modes.Succeeded
             template: source
           - name: scm
-            depends: validate-modes.Succeeded
+            depends: source.Succeeded
             when: "{{=workflow.parameters['scm-mode'] != 'disabled'}}"
             template: scm
           - name: jira
@@ -262,7 +262,7 @@ spec:
           - blackduck-wintermute-scm-overview
         args:
           - --output-root
-          - /var/lib/blackduck-wintermute/scm
+          - /var/lib/blackduck-wintermute
           - --workers
           - "1"
           - --evidence-workers
@@ -280,7 +280,7 @@ spec:
               name: blackduck-wintermute-scm-credentials
         env:
           - name: WINTERMUTE_OUTPUT_DIR
-            value: /var/lib/blackduck-wintermute/scm
+            value: /var/lib/blackduck-wintermute
           - name: TMPDIR
             value: /tmp
           - name: WINTERMUTE_BLACKDUCK_REQUEST_INTERVAL_SECONDS

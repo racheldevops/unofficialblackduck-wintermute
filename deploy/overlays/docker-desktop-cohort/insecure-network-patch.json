@@ -1,0 +1,22 @@
+[
+  {
+    "op": "test",
+    "path": "/spec/templates/2/name",
+    "value": "source"
+  },
+  {
+    "op": "add",
+    "path": "/spec/templates/2/container/args/-",
+    "value": "--insecure"
+  },
+  {
+    "op": "test",
+    "path": "/spec/templates/3/name",
+    "value": "scm"
+  },
+  {
+    "op": "add",
+    "path": "/spec/templates/3/container/args/-",
+    "value": "--insecure"
+  }
+]
