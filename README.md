@@ -65,12 +65,12 @@ Older releases are outside the tested baseline and may behave differently as API
 
 The minimum Black Duck SCA hardware specification for Wintermute at its slowest request pace is:
 
-    sizes-gen04/250sph.yaml
+    sizes-gen05/250sph.yaml
 
 The recommended specification is:
 
     sizes-gen05/500sph.yaml
 
-See the official Black Duck SCA hardware scaling guidance for production sizing.
+Please check the official BDSCA Hardware guide [here](https://docs.blackduck.com/r/blackduck/black-duck-compatibility-reference/black-duck-sca-hardware-scaling-guidelines.html)
 
 > Wintermute is an unofficial DevSecOps and GitOps project and is not supported by Black Duck. Review dry-run output and customer configuration before enabling changes.
