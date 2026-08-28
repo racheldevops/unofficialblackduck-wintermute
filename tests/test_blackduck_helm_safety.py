@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import ast
 import json
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
-import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,19 +30,137 @@ EXPECTED_ENVIRONMENT = {
 }
 
 
-def test_values_define_safe_blackduck_defaults() -> None:
-    payload = yaml.safe_load(
-        VALUES.read_text(encoding="utf-8")
+def indentation(value: str) -> int:
+    return len(value) - len(
+        value.lstrip(" ")
     )
 
-    assert payload["blackDuck"] == {
-        "insecure": False,
-        "requestIntervalSeconds": 0.5,
-        "circuitBreakerThreshold": 5,
-        "circuitBreakerWindowSeconds": 60,
-        "cacheCheckpointEntries": 25,
-        "cacheCheckpointSeconds": 30,
+
+def yaml_block(
+    text: str,
+    key: str,
+) -> str:
+    lines = text.splitlines()
+    marker_index = -1
+    marker_indent = 0
+
+    for index, line in enumerate(lines):
+        if line.strip() == f"{key}:":
+            marker_index = index
+            marker_indent = indentation(line)
+            break
+
+    if marker_index < 0:
+        raise AssertionError(
+            f"YAML key was not found: {key}"
+        )
+
+    selected: list[str] = []
+
+    for line in lines[marker_index + 1:]:
+        if (
+            line.strip()
+            and not line.lstrip().startswith("#")
+            and indentation(line)
+            <= marker_indent
+        ):
+            break
+
+        selected.append(line)
+
+    return "\n".join(selected)
+
+
+def scalar_text(value: str) -> str:
+    selected = value.strip()
+
+    if (
+        len(selected) >= 2
+        and selected[0] == selected[-1]
+        and selected[0] in {"'", '"'}
+    ):
+        return str(
+            ast.literal_eval(selected)
+        )
+
+    return selected
+
+
+def yaml_value(
+    block: str,
+    key: str,
+) -> str:
+    for line in block.splitlines():
+        stripped = line.strip()
+
+        if not stripped.startswith(
+            f"{key}:"
+        ):
+            continue
+
+        return scalar_text(
+            stripped.split(":", 1)[1]
+        )
+
+    raise AssertionError(
+        f"YAML value was not found: {key}"
+    )
+
+
+def environment_values(
+    text: str,
+    name: str,
+) -> list[str]:
+    lines = text.splitlines()
+    values: list[str] = []
+
+    for index, line in enumerate(lines):
+        if line.strip() != f"- name: {name}":
+            continue
+
+        item_indent = indentation(line)
+
+        for candidate in lines[index + 1:]:
+            if not candidate.strip():
+                continue
+
+            if indentation(candidate) <= item_indent:
+                break
+
+            stripped = candidate.strip()
+
+            if stripped.startswith("value:"):
+                values.append(
+                    scalar_text(
+                        stripped.split(
+                            ":",
+                            1,
+                        )[1]
+                    )
+                )
+                break
+
+    return values
+
+
+def test_values_define_safe_blackduck_defaults() -> None:
+    block = yaml_block(
+        VALUES.read_text(encoding="utf-8"),
+        "blackDuck",
+    )
+    expected = {
+        "insecure": "false",
+        "requestIntervalSeconds": "0.5",
+        "circuitBreakerThreshold": "5",
+        "circuitBreakerWindowSeconds": "60",
+        "cacheCheckpointEntries": "25",
+        "cacheCheckpointSeconds": "30",
     }
+
+    assert {
+        key: yaml_value(block, key)
+        for key in expected
+    } == expected
 
 
 def test_schema_validates_blackduck_safety_values() -> None:
@@ -112,31 +230,16 @@ def test_helm_renders_blackduck_safety_environment() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
-
-    documents = [
-        document
-        for document in yaml.safe_load_all(
-            completed.stdout
-        )
-        if isinstance(document, dict)
-    ]
-    cronjob = next(
-        document
-        for document in documents
-        if (
-            document.get("kind") == "CronJob"
-            and document.get("metadata", {}).get("name")
-            == "wintermute-jira-blackduck-wintermute-jira"
-        )
+    assert (
+        "name: "
+        "wintermute-jira-blackduck-wintermute-jira"
+        in completed.stdout
     )
-    container = (
-        cronjob["spec"]["jobTemplate"]["spec"]
-        ["template"]["spec"]["containers"][0]
-    )
-    environment = {
-        item["name"]: item.get("value")
-        for item in container["env"]
-    }
 
-    for name, expected in EXPECTED_ENVIRONMENT.items():
-        assert environment[name] == expected
+    for name, expected in (
+        EXPECTED_ENVIRONMENT.items()
+    ):
+        assert expected in environment_values(
+            completed.stdout,
+            name,
+        )

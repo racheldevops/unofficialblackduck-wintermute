@@ -1,0 +1,109 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: blackduck-wintermute-cip
+  labels:
+    app.kubernetes.io/name: blackduck-wintermute
+    app.kubernetes.io/component: cip-actions
+spec:
+  schedule: "30 3 * * *"
+  timeZone: Etc/UTC
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 604800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: blackduck-wintermute
+            app.kubernetes.io/component: cip-actions
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          imagePullSecrets:
+            - name: blackduck-wintermute-registry
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: cip-actions
+              image: blackduck-wintermute:local
+              imagePullPolicy: IfNotPresent
+              command:
+                - blackduck-wintermute-cip-job
+              args:
+                - --dry-run
+                - --config
+                - /etc/blackduck-wintermute/cip-remediation.json
+                - --max-occurrences-per-target
+                - "100"
+                - --max-candidates-per-run
+                - "25"
+                - --max-actions
+                - "100"
+                - --max-writes
+                - "10"
+              envFrom:
+                - secretRef:
+                    name: blackduck-wintermute-blackduck-credentials
+                - secretRef:
+                    name: blackduck-wintermute-blackduck-action-credentials
+                    optional: true
+                - secretRef:
+                    name: blackduck-wintermute-gitlab-credentials
+                    optional: true
+                - configMapRef:
+                    name: blackduck-wintermute-cip-targets
+              env:
+                - name: WINTERMUTE_OUTPUT_DIR
+                  value: /var/lib/blackduck-wintermute
+                - name: TMPDIR
+                  value: /tmp
+                - name: WINTERMUTE_BLACKDUCK_REQUEST_INTERVAL_SECONDS
+                  value: "0.5"
+                - name: WINTERMUTE_BLACKDUCK_CIRCUIT_BREAKER_THRESHOLD
+                  value: "5"
+                - name: WINTERMUTE_BLACKDUCK_CIRCUIT_BREAKER_WINDOW_SECONDS
+                  value: "60"
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 512Mi
+                limits:
+                  cpu: "2"
+                  memory: 2Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: data
+                  mountPath: /var/lib/blackduck-wintermute
+                - name: config
+                  mountPath: /etc/blackduck-wintermute/cip-remediation.json
+                  subPath: cip-remediation.json
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: blackduck-wintermute-cip-data
+            - name: config
+              configMap:
+                name: blackduck-wintermute-cip-config
+            - name: tmp
+              emptyDir:
+                sizeLimit: 1Gi
