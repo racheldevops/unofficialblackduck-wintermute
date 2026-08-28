@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "kernel_repository": {
+    "location": "https://gitlab.com/cip-project/cip-kernel/linux-cip.git",
+    "revision": "master"
+  },
+  "security_repository": {
+    "location": "https://gitlab.com/cip-project/cip-kernel/cip-kernel-sec.git",
+    "revision": "master"
+  },
+  "remediation": {
+    "desired_status": "PATCHED",
+    "preserve_existing_decisions": true
+  },
+  "execution": {
+    "read_workers": 2,
+    "evidence_workers": 4,
+    "plan_lifetime_hours": 24,
+    "limits": {
+      "maximum_actions": 100,
+      "maximum_blackduck_reads": 500,
+      "maximum_blackduck_writes": 10
+    }
+  },
+  "metadata": {}
+}

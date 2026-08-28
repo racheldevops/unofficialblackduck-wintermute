@@ -34,6 +34,11 @@ blackduck-wintermute-cohort-finalize = "wintermute.blackduck.cohort_finalize:mai
 blackduck-wintermute-scm-inventory = "wintermute.scm.cli:main"
 blackduck-wintermute-scm-overview = "wintermute.scm.overview:main"
 blackduck-wintermute-coverage = "wintermute.scm.coverage.cli:main"
+blackduck-wintermute-actions = "wintermute.blackduck.actions.cli:main"
+blackduck-wintermute-actions-probe = "wintermute.blackduck.actions.probe:main"
+blackduck-wintermute-cip-discover = "wintermute.blackduck.jobs.cip.discover:main"
+blackduck-wintermute-cip-plan = "wintermute.blackduck.jobs.cip.cli:main"
+blackduck-wintermute-cip-job = "wintermute.blackduck.jobs.cip.job:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -41,3 +46,4 @@ include = ["wintermute*"]
 
 [tool.setuptools.package-data]
 "wintermute.jira" = ["config/*.json"]
+"wintermute.blackduck.jobs.cip" = ["config/*.json"]

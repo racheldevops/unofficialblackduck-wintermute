@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blackduck-wintermute-cip-targets
+data:
+  WINTERMUTE_CIP_TARGETS_JSON: |
+    [
+      {
+        "project_version_href": "/api/projects/PROJECT_ID/versions/VERSION_ID",
+        "component_version_href": "/api/components/COMPONENT_ID/versions/COMPONENT_VERSION_ID",
+        "cip_tag": "v6.1.173-cip56",
+        "cip_branch": "linux-6.1.y-cip"
+      }
+    ]
