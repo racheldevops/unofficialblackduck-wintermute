@@ -1,47 +1,76 @@
 # Project Wintermute
+
 <p align="center">
   <img src="docs/assets/wintermute-logo.png" alt="Wintermute" width="760">
 </p>
 
-
 <p align="center">
   <strong>Black Duck in. Coordinated security workflows out.</strong>
   <br><br>
-  <em>Designed to accelerate Black Duck adoption - from initial visibility to repeatable, automated remediation workflows.</em>
+  <em>Designed to accelerate Black Duck adoption through repeatable security and remediation workflows.</em>
 </p>
 
 ---
-Wintermute turns Black Duck SCA data into one normalized, checksum-protected cohort that can drive Jira, Datadog, and future integrations. It discovers parent and child project lineage, collects each affected project version once, preserves product context, and gives every destination a consistent security snapshot without repeatedly loading Black Duck.
 
-It is built for enterprise engineering teams: concurrent collection, deterministic identities, persistent caching, destination-scoped credentials, dry-run-first publishing, non-root containers, and Kubernetes cohort orchestration using Argo. Jira produces vulnerability-remediation hierarchies, while Datadog produces concise high-risk vulnerability events from the same underlying findings.
+Wintermute collects and normalizes Black Duck SCA data for Jira, Datadog, SCM coverage, and controlled Black Duck remediation actions.
 
-Cut a representative large-instance workflow from 17 minutes to 3 minutes with the same findings, relationships, and hierarchy. Collect once, deliver anywhere.
+The project provides concurrent collection, deterministic identities, persistent caches, checksum-protected artifacts, dry-run-first publishing, non-root containers, and Kubernetes orchestration.
+
+## Workflows
+
+| Workflow | Purpose |
+|---|---|
+| Cohort | Collect Black Duck once and deliver the same immutable snapshot to Jira and Datadog |
+| SCM coverage | Inventory GitHub and GitLab repositories and reconcile them with Black Duck registration and scan evidence |
+| CIP remediation | Prove Linux CIP fixes from GitLab evidence and create controlled Black Duck remediation actions |
+| Compatibility commands | Run standalone Jira, Datadog, parent discovery, and candidate workflows |
 
 ## Quick start
 
-<pre>
-python3.12 -m virtualenv .venv
-source .venv/bin/activate
-python -m pip install -e .
-blackduck-wintermute-pull --help
-</pre>
+    python3.12 -m virtualenv .venv
+    source .venv/bin/activate
+    python -m pip install -e .
+    blackduck-wintermute-pull --help
 
-For production deployment, start with the [cohort deployment guide](READMEs/COHORT_DEPLOYMENT_README.md). Existing Jira and Datadog commands remain available as compatibility workflows.
+## Documentation
+
+- Cohort deployment: READMEs/COHORT_DEPLOYMENT_README.md
+- Black Duck collection: READMEs/BLACKDUCK_COLLECTION_README.md
+- SCM coverage: READMEs/SCM_COVERAGE_README.md
+- CIP remediation: READMEs/CIP_REMEDIATION_README.md
+- Architecture: READMEs/ARCHITECTURE.md
+- Kubernetes deployment: READMEs/KUBERNETES_DEPLOYMENT_README.md
+
+## Validation
+
+Run the local regression suite:
+
+    python -m pytest -q tests
+    python scripts/validate_entrypoints.py
+    python scripts/validate_release.py --skip-docker
+
+Run the read-only pre-merge endpoint smoke:
+
+    python scripts/run_premerge_smoke.py --insecure
+
+Use a customer CA bundle instead of insecure TLS in production.
 
 ## Black Duck validation baseline
 
 Wintermute tracks and is tested against the latest Black Duck SCA release available to the project, including pre-release builds where available.
 
-Older Black Duck releases are outside the tested baseline and may behave differently as APIs evolve. This describes the versions exercised during development, not a compatibility guarantee.
+Older releases are outside the tested baseline and may behave differently as APIs evolve.
 
-## Black Duck SCA Hardware Spec
+## Black Duck SCA hardware
 
-The minimum BDSCA hardware spec to run wintermute at its slowest pace (7,500 api requests/hr) is: <p>
-```"sizes-gen05/250sph.yaml"```
+The minimum Black Duck SCA hardware specification for Wintermute at its slowest request pace is:
 
-The recommended spec is: <p>
-``` "sizes-gen05/500sph.yaml" ```
+    sizes-gen04/250sph.yaml
 
-Please check the official BDSCA Hardware guide [here](https://docs.blackduck.com/r/blackduck/black-duck-compatibility-reference/black-duck-sca-hardware-scaling-guidelines.html)
+The recommended specification is:
 
-> Wintermute is an unofficial personal DevSecOps/GitOps project and is not supported by Black Duck. Validate dry-run output and customer configuration before enabling destination changes. Contribution is welcomed.
+    sizes-gen05/500sph.yaml
+
+See the official Black Duck SCA hardware scaling guidance for production sizing.
+
+> Wintermute is an unofficial DevSecOps and GitOps project and is not supported by Black Duck. Review dry-run output and customer configuration before enabling changes.

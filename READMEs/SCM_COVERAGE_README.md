@@ -1,53 +1,120 @@
 # SCM inventory and Black Duck coverage
 
-Wintermute gathers read-only SCM evidence, normalizes repository identity, and reconciles the SCM estate with Black Duck registration and scan evidence.
+Wintermute gathers read-only GitHub and GitLab evidence, normalizes repository identity, and reconciles repositories with Black Duck registration and scan evidence.
 
 ## Boundaries
 
-The current release is:
+The SCM workflow is:
 
-- GitHub-first
 - Read-only
 - Python standard-library only
 - Provider-neutral after collection
 - Independent from Jira and Datadog delivery
-- Safe to run without changing repositories, properties, workflows, rulesets, or Black Duck
+- Safe to run without changing repositories, workflows, controls or Black Duck
 
-Onboarding execution and scan execution are not part of this release.
+## Provider selection
 
-## GitHub inventory
+The provider is selected from SCM_URL or provider-specific configuration.
 
-Set `GITHUB_ORG` and `GITHUB_TOKEN` through an approved secret source.
+### GitHub
+
+Required:
+
+    GITHUB_ORG
+    GITHUB_TOKEN
+
+Optional:
+
+    GITHUB_GRAPHQL_URL
+    GITHUB_REST_URL
 
 Run:
 
     blackduck-wintermute-scm-inventory
 
-The command gathers:
+### GitLab
 
-- Stable repository node identity
-- Organization identity
-- Repository names and canonical URLs
-- Visibility and lifecycle flags
-- Default branch and exact head SHA when available
-- Complete GitHub language byte observations
-- Custom-property definitions and repository values
-- Organization rulesets and required-workflow references
-- Repository Actions workflow inventories
-- Provider failures and rate-limit statistics
+Required:
 
-It writes an immutable, checksum-protected SCM snapshot under:
+    SCM_URL=https://gitlab.example.com
+    GITLAB_GROUP=group/subgroup
+    GITLAB_TOKEN
+
+Optional:
+
+    GITLAB_REST_URL=https://gitlab.example.com/api/v4
+
+Run:
+
+    blackduck-wintermute-scm-inventory
+
+Nested GitLab subgroups are included.
+
+## GitHub evidence
+
+GitHub collection includes:
+
+- Stable repository and organization identity
+- Visibility and lifecycle state
+- Default branch and head SHA
+- Language byte observations
+- Custom-property definitions and assignments
+- Organization rulesets
+- Required-workflow references
+- Actions workflow inventory
+
+## GitLab evidence
+
+GitLab collection includes:
+
+- Stable project and group identity
+- Nested subgroup projects
+- Visibility, archived and fork state
+- Default branch
+- Language percentages
+- GitLab CI configuration
+- Local CI includes with bounded traversal
+- Recent pipeline summaries
+- Default-branch protection
+
+GitLab uses schema-aware GraphQL bulk discovery. REST is used for repository files, protected branches, and fields unavailable in the installed GraphQL schema.
+
+Pipeline access denials are cached to avoid repeatedly requesting unavailable evidence.
+
+## Multiple providers
+
+Customers using GitHub and GitLab can run both sequentially:
+
+    python scripts/run_scm_multi_provider.py \
+      --insecure \
+      --collect-direct-scan-evidence \
+      --pipeline-limit 3 \
+      --max-projects 2 \
+      --max-versions 5
+
+The providers receive separate immutable snapshots:
+
+    RUN_ID-github
+    RUN_ID-gitlab
+
+They run sequentially and do not query Black Duck concurrently.
+
+## Inventory output
+
+SCM inventory writes immutable, checksum-protected snapshots under:
 
     .wintermute/scm/inventory/snapshots/
 
-Use a customer CA bundle where required:
-
-    blackduck-wintermute-scm-inventory \
-      --ca-bundle /path/to/customer-ca.pem
+Each snapshot contains repository inventory, evidence, controls, failures, metadata and checksums.
 
 ## Coverage reconciliation
 
-Set `BLACKDUCK_URL` and `BLACKDUCK_API_TOKEN`, then run:
+Set:
+
+    BLACKDUCK_URL
+    BLACKDUCK_API_TOKEN
+
+Run:
 
     blackduck-wintermute-coverage \
       --scm-snapshot PATH_TO_SCM_SNAPSHOT
@@ -62,7 +129,7 @@ Coverage keeps these states separate:
 6. Explicit successful scan evidence exists
 7. The latest successful scan is within the freshness SLA
 
-A Black Duck project or version existing does not prove a successful scan.
+A Black Duck project existing does not prove that it was scanned.
 
 ## Repository mapping
 
@@ -76,70 +143,53 @@ Mapping precedence is:
 
 Only the first three are authoritative.
 
-Name-based matches are recommendations. Conflicting evidence is reported and never silently accepted.
-
-Default Black Duck metadata field names are:
+Default Black Duck metadata fields are:
 
     scm_provider
     scm_provider_instance
     scm_repository_id
     scm_repository_url
 
-They can be overridden with coverage command options.
-
-## Scan evidence
-
-Coverage reads Black Duck project-version, BOM-status, code-location, and scan-summary evidence.
-
-A successful scan requires an explicit successful terminal status plus a completion timestamp or provider evidence identity.
-
-If Black Duck does not expose enough evidence, scan state remains unknown. Wintermute does not convert missing evidence into never-scanned.
-
-A validated external evidence file may be supplied with:
-
-    --scan-evidence PATH
-
-Use this only when the file represents a trusted source such as validated scan receipts.
-
-## Outputs
+## Coverage output
 
 A coverage snapshot contains:
 
-- metadata.json
-- repositories.json
-- provider-evidence.json
-- onboarding-controls.json
-- blackduck-projects.json
-- mappings.json
-- coverage-report.json
-- scan-gaps.json
-- failures.json
-- checksums.json
-- READY
-- COMPLETE
+- Repository inventory
+- Provider evidence
+- Onboarding controls
+- Black Duck projects
+- Mapping decisions
+- Coverage report
+- Scan gaps
+- Failures
+- Checksums
+- READY and COMPLETE markers
 
-Snapshots are staged, promoted atomically, checksum-verified, and retained independently from vulnerability cohorts.
+Coverage snapshots are independent from vulnerability cohorts.
 
-## Metrics
+## TLS
 
-Coverage reports:
+Certificate verification is enabled by default.
 
-- Onboarding coverage
-- Authoritative mapping coverage
-- Successful scan coverage
-- Fresh successful scan coverage
+Use a customer CA bundle:
 
-The denominator is eligible repositories. A zero denominator produces an unknown percentage rather than a fabricated zero.
+    blackduck-wintermute-scm-inventory \
+      --ca-bundle /path/to/customer-ca.pem
 
-## Safety
+Use insecure mode only for controlled testing.
 
-The GitHub and Black Duck integrations in this release issue read-only requests.
+## Validation
 
-Do not add mutation endpoints to the inventory or coverage clients.
-
-Before release:
+Run:
 
     python -m pytest -q tests
-    python scripts/validate_entrypoints.py --require-installed
+    python scripts/validate_entrypoints.py
     python scripts/validate_release.py --skip-docker
-    zsh scripts/check_secrets.zsh
+
+Live dual-provider validation:
+
+    python scripts/run_scm_multi_provider.py \
+      --insecure \
+      --collect-direct-scan-evidence
+
+SCM clients must remain read-only.

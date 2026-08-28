@@ -1,11 +1,11 @@
 # Wintermute architecture
 
-Wintermute separates Black Duck collection from destination delivery.
+Wintermute separates source collection, destination delivery, SCM coverage, and controlled Black Duck actions.
 
     Black Duck
         |
         v
-    Shared inventory, lineage, collection and normalization
+    Shared inventory, lineage and normalized findings
         |
         v
     Immutable cohort
@@ -13,21 +13,33 @@ Wintermute separates Black Duck collection from destination delivery.
         +--> Jira
         |
         +--> Datadog
-        |
-        +--> Future destinations
 
-## Shared source layer
+    GitHub / GitLab
+        |
+        v
+    Immutable SCM inventory
+        |
+        v
+    Black Duck coverage reconciliation
+
+    Black Duck + GitLab CIP evidence
+        |
+        v
+    Checksum-protected action plan
+        |
+        v
+    Dry-run or confirmed Black Duck action execution
+
+## Shared Black Duck layer
 
 The wintermute.blackduck package owns:
 
 - Authentication and bearer-token refresh
-- TLS, retry and pagination behavior
+- TLS, retry, request pacing and circuit breaking
 - API and discovery caches
 - Project and project-version inventory
 - Parent and child lineage discovery
-- Candidate discovery
 - Vulnerable component and vulnerability collection
-- Score, exploitability, reachability and policy enrichment
 - Normalized finding identities
 - Collection manifests, checksums and cohorts
 
@@ -39,10 +51,8 @@ Destination packages must not implement independent Black Duck clients or vulner
 |---|---|
 | parent-rollup | Discover or consume parent relationships, then collect each unique child version once |
 | candidate-projects | Collect project versions selected by candidate discovery |
-| all-project-versions | Collect every project version matching optional inventory filters |
-| explicit-project-versions | Collect only project versions supplied in an input file |
-
-The cohort source defaults to parent-rollup because product lineage is the primary customer requirement.
+| all-project-versions | Collect project versions matching inventory filters |
+| explicit-project-versions | Collect project versions supplied in an input file |
 
 ## Identity model
 
@@ -52,31 +62,77 @@ A direct finding is identified by:
 - Component-version identity
 - Vulnerability identity
 
-Parent lineage does not change that direct identity. A child version shared by several products is collected once, then projected into each parent context for Jira.
+Parent lineage does not change direct finding identity. Shared child versions are collected once and projected into each parent context.
 
-## Destination profiles
+SCM repository identity uses:
 
-Jira normally selects findings with score greater than or equal to 7 and retains parent lineage.
+- Provider
+- Provider instance
+- Provider-native immutable repository ID
 
-Datadog normally selects findings with score greater than 8.9 and requires exploit availability.
-
-A cohort can contain a broader source set so each destination can apply its own criteria without reloading Black Duck.
+Names and URLs are descriptive and may change without changing identity.
 
 ## State boundaries
 
-Shared Black Duck state contains source caches and immutable cohorts.
+| State | Contents |
+|---|---|
+| Black Duck source | Collection caches and immutable cohorts |
+| Jira | Issue keys, hierarchy identities and link state |
+| Datadog | Event groups, event identities and resolution state |
+| SCM | Repository, evidence, control and coverage snapshots |
+| Black Duck actions | Plans, checksums, execution receipts and CIP caches |
 
-Jira state contains Jira issue keys, hierarchy identities, links and synchronization state.
+Destination state is not shared between publishers.
 
-Datadog state contains active event groups, event identifiers and resolution state.
+## SCM providers
 
-Destination state is never shared between publishers.
+GitHub uses GraphQL for repository inventory and REST for provider evidence.
+
+GitLab uses schema-aware GraphQL bulk discovery with REST fallback for repository files, protected branches and unsupported fields. Nested GitLab subgroups are included.
+
+GitHub and GitLab can run sequentially in one validation operation. Each provider receives its own immutable inventory and coverage snapshot.
+
+Coverage keeps onboarding, authoritative mapping, registration, successful scan evidence and scan freshness as separate states.
+
+Name-based mappings are recommendations and are never silently accepted.
+
+## Black Duck actions
+
+Actions are separate from normal collection.
+
+An action plan contains:
+
+- Target Black Duck instance
+- Observed state and fingerprint
+- Desired state
+- Evidence
+- Ownership marker
+- Read, write and action limits
+- Expiration
+
+The executor validates checksums, rereads state, rejects stale plans, preserves human decisions, applies allowlisted action kinds, and verifies writes with a final read.
+
+Apply mode requires explicit confirmation. Dry-run performs no writes.
+
+## CIP remediation
+
+The CIP workflow:
+
+1. Finds a vulnerable Linux component occurrence.
+2. Resolves BDSA identifiers to CVEs.
+3. Reads CIP security records from GitLab.
+4. Resolves the configured CIP tag.
+5. Verifies fix-commit containment.
+6. Creates actions only for conclusively fixed CVEs.
+7. Updates the project-scoped Black Duck remediation resource.
+
+Planning uses a read token. Apply can use a separate write-capable token.
 
 ## Compatibility
 
-Existing blackduck-find-parents, blackduck-vuln-rollup, Jira and Datadog commands remain supported as compatibility interfaces over the shared source layer.
+Existing standalone Jira, Datadog, parent discovery and candidate commands remain supported.
 
-The general source command is:
+The general Black Duck source command is:
 
     blackduck-wintermute-pull --help
 
@@ -86,32 +142,4 @@ The production cohort commands are:
     blackduck-wintermute-jira-cohort
     blackduck-wintermute-datadog-cohort
 
-## SCM intelligence and coverage
-
-SCM inventory is an independent read-only source workflow:
-
-    GitHub and future SCM providers
-        |
-        v
-    Provider-specific collection
-        |
-        v
-    Normalized repository and evidence models
-        |
-        v
-    Immutable SCM inventory snapshot
-        |
-        v
-    Black Duck mapping and coverage reconciliation
-
-Stable repository identity uses provider, provider instance and provider-native immutable repository ID. Repository names and URLs remain descriptive attributes and may change without changing identity.
-
-Provider response shapes do not enter coverage logic.
-
-Coverage keeps onboarding, authoritative mapping, Black Duck registration, successful scan evidence and freshness as separate states.
-
-Name-based Black Duck mappings are recommendations. They are never silently accepted.
-
-SCM coverage snapshots are independent from vulnerability cohorts. GitHub or SCM evidence failure must not block Jira or Datadog vulnerability delivery.
-
-The current SCM release is read-only. Future onboarding execution and Harvester scanning remain separate controlled workflows.
+The current SCM workflows are read-only. Repository mutation and scan execution remain separate future workflows.
