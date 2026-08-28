@@ -82,6 +82,24 @@ def repository() -> Repository:
     )
 
 
+@pytest.fixture(autouse=True)
+def isolate_scm_provider_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "SCM_URL",
+        "SCM_PROVIDER",
+        "GITLAB_URL",
+        "GITLAB_GROUP",
+        "GITLAB_REST_URL",
+        "GITLAB_TOKEN",
+    ):
+        monkeypatch.delenv(
+            name,
+            raising=False,
+        )
+
+
 def test_inventory_cli_writes_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
