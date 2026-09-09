@@ -35,7 +35,7 @@ cronJob:
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 2
   failedJobsHistoryLimit: 3
-  activeDeadlineSeconds: 7200
+  activeDeadlineSeconds: 10800
   ttlSecondsAfterFinished: 86400
   backoffLimit: 0
 
@@ -49,7 +49,7 @@ pipeline:
   parentWorkers: 2
   rollupWorkers: 2
   pageLimit: 500
-  lockStaleSeconds: 10800
+  lockStaleSeconds: 14400
   excludeParentProjects: []
   excludeChildProjects: []
   extraArgs: []
@@ -59,7 +59,7 @@ persistence:
   existingClaim: ""
   storageClass: ""
   accessMode: ReadWriteOnce
-  size: 10Gi
+  size: 20Gi
 
 caBundle:
   existingConfigMap: ""
@@ -93,10 +93,10 @@ securityContext:
 resources:
   requests:
     cpu: 500m
-    memory: 512Mi
+    memory: 2Gi
   limits:
     cpu: "2"
-    memory: 2Gi
+    memory: 5Gi
 
 nodeSelector: {}
 tolerations: []
