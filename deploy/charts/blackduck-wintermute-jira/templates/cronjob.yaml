@@ -154,7 +154,7 @@ spec:
               {{- end }}
             - name: tmp
               emptyDir:
-                sizeLimit: 1Gi
+                sizeLimit: 4Gi
             {{- if .Values.caBundle.existingConfigMap }}
             - name: customer-ca
               configMap:
