@@ -67,7 +67,7 @@ For Azure OpenAI, configure:
 - `AZURE_OPENAI_API_KEY`
 
 External source transmission requires `WINTERMUTE_AI_ALLOW_SOURCE=true` and
-`WINTERMUTE_AI_ANONYMIZATION_KEY`.
+`WINTERMUTE_AI_ANONYMIZATION_KEY`. It scrubs your source code of HCI & PCII before it leaves the wintermute enclave
 
 Generate a repository profile from an inventory snapshot:
 
