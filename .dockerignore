@@ -19,3 +19,5 @@ tests
 .env.*
 deploy
 READMEs
+config
+src/wintermute/scm/onboarding/config/*.local.json

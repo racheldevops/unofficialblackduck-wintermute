@@ -96,6 +96,51 @@ def boolean_value(
     return value
 
 
+def validate_group_path(
+    value: str,
+) -> str:
+    selected = str(value or "").strip("/")
+
+    if (
+        not selected
+        or any(
+            not part
+            or part in {".", ".."}
+            for part in selected.split("/")
+        )
+    ):
+        raise ValueError(
+            "GitLab group is invalid"
+        )
+
+    return selected
+
+
+def validate_project_path(
+    value: str,
+) -> str:
+    selected = str(value or "").strip("/")
+    parts = selected.split("/")
+
+    if (
+        len(parts) < 2
+        or any(
+            not part
+            or part in {".", ".."}
+            or any(
+                character.isspace()
+                for character in part
+            )
+            for part in parts
+        )
+    ):
+        raise ValueError(
+            "GitLab project path is invalid"
+        )
+
+    return selected
+
+
 def parse_timestamp(
     value: Any,
 ) -> datetime | None:
@@ -189,9 +234,10 @@ class GitLabClient(GitLabRestClient):
 
     def __init__(
         self,
-        group: str,
-        token: str,
+        group: str = "",
+        token: str = "",
         *,
+        project: str = "",
         page_size: int = 100,
         activity_days: int = 180,
         workers: int = 4,
@@ -202,20 +248,32 @@ class GitLabClient(GitLabRestClient):
         ),
         **kwargs: Any,
     ) -> None:
-        group = str(group or "").strip(
-            "/"
-        )
+        selected_group = str(
+            group or ""
+        ).strip("/")
+        selected_project = str(
+            project or ""
+        ).strip("/")
 
         if (
-            not group
-            or any(
-                not part
-                or part in {".", ".."}
-                for part in group.split("/")
-            )
+            bool(selected_group)
+            == bool(selected_project)
         ):
             raise ValueError(
-                "GitLab group is invalid"
+                "Configure exactly one GitLab "
+                "inventory scope: group or project"
+            )
+
+        if selected_group:
+            selected_group = validate_group_path(
+                selected_group
+            )
+
+        if selected_project:
+            selected_project = (
+                validate_project_path(
+                    selected_project
+                )
             )
 
         if not 1 <= page_size <= 100:
@@ -238,7 +296,8 @@ class GitLabClient(GitLabRestClient):
                 "pipeline_limit must be between 0 and 100"
             )
 
-        self.group = group
+        self.group = selected_group
+        self.project = selected_project
         self.page_size = page_size
         self.activity_days = activity_days
         self.workers = workers
@@ -259,6 +318,12 @@ class GitLabClient(GitLabRestClient):
             str,
             str,
         ] = {}
+        self._exact_project_cache: (
+            dict[str, Any] | None
+        ) = None
+        self._exact_tenant_cache: (
+            ScmTenant | None
+        ) = None
         self.graphql_fallback_error = ""
 
         super().__init__(
@@ -291,6 +356,10 @@ class GitLabClient(GitLabRestClient):
             sleeper=self._sleeper,
         )
 
+    @property
+    def exact_project_mode(self) -> bool:
+        return bool(self.project)
+
     def graphql_stats(self) -> GitLabGraphQLStats:
         return self.graphql.stats()
 
@@ -298,6 +367,12 @@ class GitLabClient(GitLabRestClient):
         self,
         suffix: str = "",
     ) -> str:
+        if not self.group:
+            raise ValueError(
+                "GitLab group endpoint is unavailable "
+                "in exact-project mode"
+            )
+
         path = (
             f"/groups/"
             f"{quote(self.group, safe='')}"
@@ -313,18 +388,23 @@ class GitLabClient(GitLabRestClient):
     def project_path(
         self,
         project_id: str,
-        suffix: str,
+        suffix: str = "",
     ) -> str:
         identifier = required_identifier(
             project_id,
             "project.id",
         )
-
-        return (
+        path = (
             f"/projects/"
-            f"{quote(identifier, safe='')}/"
-            f"{suffix.lstrip('/')}"
+            f"{quote(identifier, safe='')}"
         )
+
+        if suffix:
+            path = (
+                f"{path}/{suffix.lstrip('/')}"
+            )
+
+        return path
 
     def paged_list(
         self,
@@ -414,9 +494,129 @@ class GitLabClient(GitLabRestClient):
             attempts=1,
         )
 
+    def exact_project_payload(
+        self,
+    ) -> dict[str, Any]:
+        if not self.project:
+            raise ValueError(
+                "Exact-project inventory is not configured"
+            )
+
+        if self._exact_project_cache is not None:
+            return dict(
+                self._exact_project_cache
+            )
+
+        payload = self.get_json(
+            self.project_path(self.project)
+        )
+
+        if not isinstance(payload, dict):
+            raise GitLabRestError(
+                "invalid_response",
+                "GitLab project response must be "
+                "an object",
+                attempts=1,
+            )
+
+        project_id = required_identifier(
+            payload.get("id"),
+            "project.id",
+        )
+        full_path = required_string(
+            payload.get("path_with_namespace"),
+            "project.path_with_namespace",
+        )
+
+        if (
+            full_path.casefold()
+            != self.project.casefold()
+        ):
+            raise GitLabRestError(
+                "invalid_response",
+                "GitLab returned a different exact project",
+                attempts=1,
+            )
+
+        namespace_payload = payload.get(
+            "namespace"
+        )
+
+        if not isinstance(
+            namespace_payload,
+            dict,
+        ):
+            raise GitLabRestError(
+                "invalid_response",
+                "GitLab exact project has no namespace",
+                attempts=1,
+            )
+
+        namespace_id = required_identifier(
+            namespace_payload.get("id"),
+            "project.namespace.id",
+        )
+        expected_namespace = full_path.rsplit(
+            "/",
+            1,
+        )[0]
+        namespace = required_string(
+            namespace_payload.get("full_path")
+            or namespace_payload.get("path"),
+            "project.namespace.full_path",
+        )
+
+        if (
+            namespace.casefold()
+            != expected_namespace.casefold()
+        ):
+            raise GitLabRestError(
+                "invalid_response",
+                "GitLab project namespace does not "
+                "match its project path",
+                attempts=1,
+            )
+
+        normalized = dict(payload)
+        normalized["id"] = project_id
+        normalized[
+            "path_with_namespace"
+        ] = full_path
+        normalized[
+            "_wintermute_exact_project"
+        ] = True
+        normalized[
+            "_wintermute_ci_config_path"
+        ] = str(
+            payload.get("ci_config_path")
+            or ""
+        ).strip()
+
+        self._exact_project_cache = normalized
+        self._exact_tenant_cache = ScmTenant(
+            provider=self.provider,
+            provider_instance=(
+                self.provider_instance
+            ),
+            tenant_id=namespace_id,
+            namespace=namespace,
+        )
+
+        return dict(normalized)
+
     def list_tenants(
         self,
     ) -> tuple[ScmTenant, ...]:
+        if self.exact_project_mode:
+            self.exact_project_payload()
+            assert (
+                self._exact_tenant_cache
+                is not None
+            )
+            return (
+                self._exact_tenant_cache,
+            )
+
         payload = self.get_json(
             self.group_path()
         )
@@ -463,32 +663,37 @@ class GitLabClient(GitLabRestClient):
     def group_projects(
         self,
     ) -> list[dict[str, Any]]:
-        try:
-            projects = (
-                self.graphql.group_projects(
-                    self.group,
-                    page_size=self.page_size,
-                    pipeline_limit=(
-                        self.pipeline_limit
-                    ),
+        if self.exact_project_mode:
+            projects = [
+                self.exact_project_payload()
+            ]
+        else:
+            try:
+                projects = (
+                    self.graphql.group_projects(
+                        self.group,
+                        page_size=self.page_size,
+                        pipeline_limit=(
+                            self.pipeline_limit
+                        ),
+                    )
                 )
-            )
-        except (
-            GitLabGraphQLError,
-            RuntimeError,
-            ValueError,
-        ) as error:
-            self.graphql_fallback_error = str(error)
-            projects = self.paged_list(
-                self.group_path("projects"),
-                params={
-                    "include_subgroups": "true",
-                    "with_shared": "false",
-                    "simple": "false",
-                    "order_by": "path",
-                    "sort": "asc",
-                },
-            )
+            except (
+                GitLabGraphQLError,
+                RuntimeError,
+                ValueError,
+            ) as error:
+                self.graphql_fallback_error = str(error)
+                projects = self.paged_list(
+                    self.group_path("projects"),
+                    params={
+                        "include_subgroups": "true",
+                        "with_shared": "false",
+                        "simple": "false",
+                        "order_by": "path",
+                        "sort": "asc",
+                    },
+                )
 
         for project in projects:
             project_id = str(
@@ -530,6 +735,9 @@ class GitLabClient(GitLabRestClient):
             ci_path = str(
                 project.get(
                     "_wintermute_ci_config_path"
+                )
+                or project.get(
+                    "ci_config_path"
                 )
                 or ""
             ).strip()
@@ -896,6 +1104,19 @@ class GitLabClient(GitLabRestClient):
             )
             or ""
         ).casefold()
+        exact_project = bool(
+            project.get(
+                "_wintermute_exact_project"
+            )
+        )
+
+        if exact_project and not default_branch:
+            raise GitLabRestError(
+                "invalid_response",
+                "Exact GitLab project has no "
+                "default branch",
+                attempts=1,
+            )
 
         if (
             default_branch
@@ -913,8 +1134,23 @@ class GitLabClient(GitLabRestClient):
                 )
                 head_sha = reference.commit
             except GitLabRestError as error:
-                if error.category != "not_found":
+                if (
+                    exact_project
+                    or error.category
+                    != "not_found"
+                ):
                     raise
+
+        if (
+            exact_project
+            and not head_sha
+        ):
+            raise GitLabRestError(
+                "invalid_response",
+                "Exact GitLab project default branch "
+                "did not resolve to a full commit SHA",
+                attempts=1,
+            )
 
         languages_payload = (
             self.project_languages(
@@ -978,6 +1214,29 @@ class GitLabClient(GitLabRestClient):
                 "SCM tenant instance does not match "
                 "the GitLab client"
             )
+
+        if self.exact_project_mode:
+            self.exact_project_payload()
+            expected = self._exact_tenant_cache
+
+            if expected is None:
+                raise ValueError(
+                    "Exact GitLab project tenant "
+                    "is unavailable"
+                )
+
+            if (
+                tenant.tenant_id
+                != expected.tenant_id
+                or tenant.namespace.casefold()
+                != expected.namespace.casefold()
+            ):
+                raise ValueError(
+                    "SCM tenant does not match the "
+                    "exact GitLab project namespace"
+                )
+
+            return
 
         if (
             tenant.namespace.casefold()
