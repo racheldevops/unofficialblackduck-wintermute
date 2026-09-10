@@ -26,3 +26,6 @@ k8s_handnotes*.md
 /.cache_ggshield
 .local-k8s/
 /.scm-live-test-output/
+/config/
+/src/wintermute/scm/onboarding/config/*.local.json
+/planning.md
