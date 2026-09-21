@@ -835,59 +835,171 @@ class JiraClient:
         raise RuntimeError(f"{method} {url} failed unexpectedly")
 
     def search_by_labels(
-            self,
-            project_key: str,
-            labels: list[str],
-            batch_size: int,
+        self,
+        project_key: str,
+        labels: list[str],
+        batch_size: int,
     ) -> dict[str, dict[str, Any]]:
+        if type(batch_size) is not int or batch_size < 1:
+            raise RuntimeError("Jira label batch size must be positive")
+
+        if not isinstance(project_key, str) or not project_key.strip():
+            raise RuntimeError("Jira project key must not be empty")
+
+        if not isinstance(labels, list) or not all(
+            isinstance(label, str) and label.strip()
+            for label in labels
+        ):
+            raise RuntimeError("Jira lookup labels must be nonempty strings")
+
+        selected_labels = list(dict.fromkeys(labels))
+        if not selected_labels:
+            return {}
+
+        deployment = detect_jira_deployment(self)
+
+        search_path = (
+            "/rest/api/3/search/jql"
+            if deployment == "cloud"
+            else "/rest/api/2/search"
+        )
+        if self.debug:
+            print(
+                f"Jira search: deployment={deployment}, path={search_path}",
+                file=sys.stderr,
+            )
+
         found_by_label: dict[str, dict[str, Any]] = {}
 
-        for start in range(0, len(labels), batch_size):
-            label_batch = labels[start : start + batch_size]
-
+        for start in range(0, len(selected_labels), batch_size):
+            label_batch = selected_labels[start:start + batch_size]
+            wanted_labels = set(label_batch)
             quoted_labels = ", ".join(json.dumps(label) for label in label_batch)
-            jql = f'project = "{project_key}" AND labels in ({quoted_labels})'
-
-            search_path = "/rest/api/3/search/jql"
             query: dict[str, Any] = {
-                "jql": jql,
+                "jql": (
+                    f"project = {json.dumps(project_key)} "
+                    f"AND labels in ({quoted_labels}) ORDER BY key ASC"
+                ),
                 "fields": "summary,labels,status",
                 "maxResults": 100,
             }
+            if deployment == "datacenter":
+                query["startAt"] = 0
 
-            while True:
+            seen_tokens: set[str] = set()
+            seen_issue_keys: set[str] = set()
+
+            for _ in range(10000):
                 response = self.request_json(
                     "GET",
                     search_path,
-                    query=query,
+                    query=dict(query),
                     expected_statuses={200},
                 )
+                if not isinstance(response, dict):
+                    raise RuntimeError("Jira search response must be an object")
 
-                for issue in response.get("issues", []):
+                issues = response.get("issues")
+                if not isinstance(issues, list):
+                    raise RuntimeError("Jira search response has no issues array")
+
+                for issue in issues:
+                    if not isinstance(issue, dict):
+                        raise RuntimeError("Jira search returned an invalid issue")
                     issue_key = issue.get("key")
-                    fields = issue.get("fields", {})
-                    issue_labels = fields.get("labels", [])
+                    fields = issue.get("fields")
+                    if (
+                        not isinstance(issue_key, str)
+                        or not issue_key
+                        or not isinstance(fields, dict)
+                    ):
+                        raise RuntimeError("Jira search returned invalid issue fields")
 
-                    if not isinstance(issue_labels, list):
-                        continue
+                    if issue_key in seen_issue_keys:
+                        raise RuntimeError(
+                            "Jira search pagination repeated an issue; "
+                            "refusing incomplete duplicate detection"
+                        )
+                    seen_issue_keys.add(issue_key)
 
-                    for label in issue_labels:
-                        if label in label_batch:
-                            found_by_label[label] = {
-                                "key": issue_key,
-                                "summary": fields.get("summary", ""),
-                                "status": (fields.get("status") or {}).get("name", ""),
-                                "labels": issue_labels,
-                            }
+                    issue_labels = fields.get("labels")
+                    if not isinstance(issue_labels, list) or not all(
+                        isinstance(label, str) for label in issue_labels
+                    ):
+                        raise RuntimeError("Jira search returned invalid issue labels")
 
-                next_page_token = response.get("nextPageToken")
+                    issue_status = fields.get("status") or {}
+                    if not isinstance(issue_status, dict):
+                        raise RuntimeError("Jira search returned an invalid issue status")
 
-                if response.get("isLast", True) or not next_page_token:
-                    break
+                    for label in wanted_labels.intersection(issue_labels):
+                        previous = found_by_label.get(label)
+                        if previous is not None and previous["key"] != issue_key:
+                            raise RuntimeError(
+                                "Multiple Jira issues share a Wintermute lookup label: "
+                                + label
+                            )
+                        found_by_label[label] = {
+                            "key": issue_key,
+                            "summary": fields.get("summary", ""),
+                            "status": issue_status.get("name", ""),
+                            "labels": issue_labels,
+                        }
 
-                query["nextPageToken"] = str(next_page_token)
+                if deployment == "cloud":
+                    is_last = response.get("isLast")
+                    if is_last is not None and type(is_last) is not bool:
+                        raise RuntimeError("Jira Cloud isLast must be boolean")
+
+                    next_token = response.get("nextPageToken")
+                    if next_token is not None and not isinstance(next_token, str):
+                        raise RuntimeError("Jira Cloud nextPageToken is invalid")
+
+                    if is_last is True:
+                        break
+                    if not next_token:
+                        if is_last is False:
+                            raise RuntimeError(
+                                "Jira Cloud indicated another page without a token"
+                            )
+                        break
+                    if next_token in seen_tokens:
+                        raise RuntimeError("Jira Cloud pagination token repeated")
+
+                    seen_tokens.add(next_token)
+                    query["nextPageToken"] = next_token
+                else:
+                    offset = query["startAt"]
+                    returned_offset = response.get("startAt")
+                    if returned_offset is not None and (
+                        type(returned_offset) is not int
+                        or returned_offset != offset
+                    ):
+                        raise RuntimeError("Jira Data Center pagination did not advance")
+
+                    total = response.get("total")
+                    if total is not None and (
+                        type(total) is not int or total < 0
+                    ):
+                        raise RuntimeError("Jira Data Center total is invalid")
+
+                    next_offset = offset + len(issues)
+                    if not issues:
+                        if total is not None and offset < total:
+                            raise RuntimeError(
+                                "Jira search returned an empty page before its total"
+                            )
+                        break
+
+                    if total is not None and next_offset >= total:
+                        break
+
+                    query["startAt"] = next_offset
+            else:
+                raise RuntimeError("Jira search exceeded the pagination limit")
 
         return found_by_label
+
 
     def create_issue(
             self,
@@ -1984,6 +2096,278 @@ def write_hierarchy_results_csv(
                 }
             )
 
+
+def detect_jira_deployment(client: JiraClient) -> str:
+    cached = getattr(client, "_search_deployment_cache", None)
+    if cached is not None and cached[0] == client.base_url:
+        return cached[1]
+
+    info = client.request_json(
+        "GET", "/rest/api/2/serverInfo", expected_statuses={200},
+    )
+    reported = info.get("deploymentType") if isinstance(info, dict) else None
+    if not isinstance(reported, str):
+        raise RuntimeError("Jira serverInfo did not report deploymentType")
+
+    normalized = re.sub(r"[\s_-]+", "", reported.strip().casefold())
+    if normalized == "cloud":
+        deployment = "cloud"
+    elif normalized in {"server", "datacenter"}:
+        deployment = "datacenter"
+    else:
+        raise RuntimeError("Unsupported Jira deploymentType: " + json.dumps(reported))
+
+    client._search_deployment_cache = (client.base_url, deployment)
+    return deployment
+
+
+def jira_create_metadata_values(client: JiraClient, path: str) -> list[dict[str, Any]]:
+    values: list[dict[str, Any]] = []
+    offset = 0
+
+    for _ in range(1000):
+        response = client.request_json(
+            "GET",
+            path,
+            query={"startAt": offset, "maxResults": 100},
+            expected_statuses={200},
+        )
+        if not isinstance(response, dict):
+            raise RuntimeError("Jira create metadata is not an object")
+        page = response.get("values")
+        if not isinstance(page, list) or not all(isinstance(v, dict) for v in page):
+            raise RuntimeError("Jira create metadata has no valid values array")
+
+        returned_offset = response.get("startAt", offset)
+        if type(returned_offset) is not int or returned_offset != offset:
+            raise RuntimeError("Jira create metadata pagination did not advance")
+
+        total = response.get("total")
+        if total is not None and (type(total) is not int or total < 0):
+            raise RuntimeError("Jira create metadata total is invalid")
+        is_last = response.get("isLast")
+        if is_last is not None and type(is_last) is not bool:
+            raise RuntimeError("Jira create metadata isLast is invalid")
+
+        if not page:
+            if is_last is False or (total is not None and offset < total):
+                raise RuntimeError("Jira create metadata ended before completion")
+            return values
+
+        values.extend(page)
+        offset += len(page)
+        if is_last is True or (total is not None and offset >= total):
+            return values
+
+    raise RuntimeError("Jira create metadata exceeded the pagination limit")
+
+
+def prepare_datacenter_hierarchy(
+    client: JiraClient,
+    config: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    description_format: str,
+) -> dict[str, Any]:
+    """Validate the entire hierarchy before writes; modify only an in-memory copy."""
+    import copy
+    from urllib.parse import quote
+
+    if not nodes or detect_jira_deployment(client) == "cloud":
+        return config
+
+    if description_format != "wiki":
+        raise RuntimeError("Jira Data Center requires wiki/string descriptions")
+
+    selected = copy.deepcopy(config)
+    selected["jira"]["api_version"] = "2"
+    hierarchy = selected.setdefault("hierarchy", {})
+    project = str(selected["jira"]["project_key"]).strip()
+    root = f"/rest/api/2/issue/createmeta/{quote(project, safe='')}/issuetypes"
+
+    by_external_id = {}
+    for node in nodes:
+        external_id = node_external_id(node)
+        if not external_id or external_id in by_external_id:
+            raise RuntimeError("Jira hierarchy contains invalid or duplicate identities")
+        by_external_id[external_id] = node
+
+    for node in nodes:
+        parent_id = node_parent_external_id(node)
+        if parent_id and parent_id not in by_external_id:
+            raise RuntimeError("Jira hierarchy references a missing parent")
+
+    types = jira_create_metadata_values(client, root)
+    type_names = {
+        hierarchy_issue_type_for_node(node, selected)
+        for node in nodes
+    }
+    metadata_by_type = {}
+    resolved_types = {}
+
+    for type_name in sorted(type_names):
+        matches = [item for item in types if item.get("name") == type_name]
+        if len(matches) != 1 or not str(matches[0].get("id") or ""):
+            raise RuntimeError(
+                f"Jira project {project}: issue type {type_name!r} is unavailable or ambiguous"
+            )
+        resolved_types[type_name] = matches[0]
+        type_id = str(matches[0]["id"])
+        fields = jira_create_metadata_values(
+            client, f"{root}/{quote(type_id, safe='')}",
+        )
+        field_map = {}
+        for field in fields:
+            field_id = field.get("fieldId")
+            if not isinstance(field_id, str) or not field_id or field_id in field_map:
+                raise RuntimeError("Jira create metadata contains invalid field identities")
+            field_map[field_id] = field
+        metadata_by_type[type_name] = field_map
+
+    epics = [node for node in nodes if node.get("node_type") == "epic"]
+    stories_with_epic = [
+        node for node in nodes
+        if node.get("node_type") == "story"
+        and node_parent_external_id(node)
+        and by_external_id[node_parent_external_id(node)].get("node_type") == "epic"
+    ]
+
+    epic_name_id = ""
+    epic_link_id = ""
+    needs_epic_link = bool(stories_with_epic) and hierarchy.get(
+        "story_parent_mode", "jira_parent"
+    ) != "issue_link"
+
+    if epics or needs_epic_link:
+        fields = client.request_json(
+            "GET", "/rest/api/2/field", expected_statuses={200},
+        )
+        if not isinstance(fields, list) or not all(isinstance(v, dict) for v in fields):
+            raise RuntimeError("Jira field catalogue is invalid")
+
+        def schema_field(schema_name: str) -> str:
+            ids = {
+                item.get("id")
+                for item in fields
+                if isinstance(item.get("schema"), dict)
+                and item["schema"].get("custom") == schema_name
+            }
+            if len(ids) != 1:
+                raise RuntimeError(
+                    f"Jira field schema is missing or ambiguous: {schema_name}"
+                )
+            field_id = next(iter(ids))
+            if not isinstance(field_id, str) or re.fullmatch(
+                r"customfield_[0-9]+", field_id
+            ) is None:
+                raise RuntimeError("Jira returned an invalid custom-field ID")
+            return field_id
+
+        if epics:
+            epic_name_id = schema_field("com.pyxis.greenhopper.jira:gh-epic-label")
+            additional = hierarchy.setdefault("additional_fields", {})
+            epic_fields = additional.setdefault("epic", {})
+            # Preserve customer-provided values; use the existing node summary otherwise.
+            epic_fields.setdefault(epic_name_id, "{summary}")
+
+        if needs_epic_link:
+            epic_link_id = schema_field("com.pyxis.greenhopper.jira:gh-epic-link")
+            configured = str(hierarchy.get("epic_link_field") or "").strip()
+            if configured and configured != epic_link_id:
+                raise RuntimeError(
+                    "Configured Epic Link field does not match Jira's Epic Link schema"
+                )
+            mode = hierarchy.get("story_parent_mode", "jira_parent")
+            if mode not in {"jira_parent", "epic_link_field"}:
+                raise RuntimeError("Unsupported Data Center story parent mode")
+            hierarchy["story_parent_mode"] = "epic_link_field"
+            hierarchy["epic_link_field"] = epic_link_id
+
+    for node in nodes:
+        type_name = hierarchy_issue_type_for_node(node, selected)
+        metadata = metadata_by_type[type_name]
+        issue_type = resolved_types[type_name]
+        parent_id = node_parent_external_id(node)
+        if node.get("node_type") in {"epic", "story"} and issue_type.get("subtask") is True:
+            raise RuntimeError(f"Jira issue type {type_name!r} must not be a subtask")
+
+        payload = build_hierarchy_issue_payload(node, selected, description_format)
+        if parent_id:
+            # Validation only. Actual publishing substitutes the real parent issue key.
+            apply_parent_to_hierarchy_payload(
+                payload, node, "PREFLIGHT-1", selected,
+            )
+        payload_fields = payload["fields"]
+
+        if epics and node.get("node_type") == "epic":
+            if not isinstance(payload_fields.get(epic_name_id), str) or not (
+                payload_fields[epic_name_id].strip()
+            ):
+                raise RuntimeError("Jira Epic Name must be a nonempty string")
+
+        if needs_epic_link and node in stories_with_epic:
+            if "parent" in payload_fields:
+                raise RuntimeError(
+                    "Data Center Epic membership conflicts with a configured parent field"
+                )
+
+        if (
+            payload_fields.get("project") != {"key": project}
+            or payload_fields.get("issuetype") != {"name": type_name}
+        ):
+            raise RuntimeError("Configured fields override the planned project or issue type")
+
+        unsupported = set(payload_fields) - set(metadata) - {"project", "issuetype"}
+        if unsupported:
+            raise RuntimeError(
+                f"Jira {type_name}: fields unavailable for creation: "
+                + ", ".join(sorted(unsupported))
+            )
+
+        missing = []
+        for field_id, descriptor in metadata.items():
+            value = payload_fields.get(field_id)
+            empty = value is None or value == "" or value == [] or value == {}
+            if (
+                descriptor.get("required") is True
+                and descriptor.get("hasDefaultValue") is not True
+                and empty
+            ):
+                missing.append(field_id)
+
+            allowed = descriptor.get("allowedValues")
+            if not empty and isinstance(value, dict) and isinstance(allowed, list) and allowed:
+                # Validate explicit option identities when the API enumerates that identity.
+                for identity in ("id", "name", "value"):
+                    if identity in value and all(
+                        isinstance(option, dict) and identity in option
+                        for option in allowed
+                    ):
+                        if str(value[identity]) not in {
+                            str(option[identity]) for option in allowed
+                        }:
+                            raise RuntimeError(
+                                f"Jira {type_name}: configured value is not allowed for {field_id}"
+                            )
+                        break
+
+        if missing:
+            raise RuntimeError(
+                f"Jira {type_name}: required fields have no configured value/default: "
+                + ", ".join(sorted(missing))
+            )
+
+    # Existing request methods use api_version for issue writes.
+    client.api_version = "2"
+    if client.debug:
+        print(
+            "Jira Data Center preflight passed: "
+            f"node_count={len(nodes)}, issue_type_count={len(type_names)}, "
+            f"epic_name_field={epic_name_id or 'not-used'}, "
+            f"epic_link_field={epic_link_id or 'not-used'}",
+            file=sys.stderr,
+        )
+    return selected
+
 def process_hierarchy_plan(
         args: argparse.Namespace,
 ) -> int:
@@ -2030,6 +2414,12 @@ def process_hierarchy_plan(
             "running in dry-run mode.",
             file=sys.stderr,
         )
+
+    if not dry_run:
+        config = prepare_datacenter_hierarchy(
+            jira_client, config, nodes, args.description_format,
+        )
+        hierarchy_config = config.get("hierarchy", {})
 
     node_by_external_id = {
         node_external_id(node): node

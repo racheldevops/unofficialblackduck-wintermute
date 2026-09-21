@@ -17,7 +17,7 @@ jira:
   projectKey: ""
   issueType: Task
   apiVersion: "2"
-  authMode: basic
+  authMode: bearer
   verifyTls: true
 
 blackDuck:

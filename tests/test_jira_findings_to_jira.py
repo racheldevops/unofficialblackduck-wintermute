@@ -424,6 +424,9 @@ def test_search_by_labels_handles_pagination(
         query: dict[str, Any] | None = None,
         expected_statuses: set[int] | None = None,
     ) -> dict[str, Any]:
+        if path == "/rest/api/2/serverInfo":
+            assert method == "GET"
+            return {"deploymentType": "Cloud"}
         del payload, expected_statuses
         assert method == "GET"
         assert path == "/rest/api/3/search/jql"
@@ -744,3 +747,70 @@ def test_load_hierarchy_plan_rejects_invalid_node(
 
     with pytest.raises(RuntimeError, match="unsupported node_type"):
         publisher.load_hierarchy_plan(str(path))
+
+
+@pytest.mark.parametrize("deployment_type", ["Server", "Data Center"])
+def test_search_by_labels_datacenter_pagination_and_detection_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    deployment_type: str,
+) -> None:
+    client = publisher.JiraClient(
+        base_url="https://jira.example.invalid/jira",
+        api_version="2",
+        auth_mode="basic",
+        username="user",
+        api_token="synthetic-token",
+        pat=None,
+        verify_tls=True,
+        timeout=1,
+        retries=0,
+        retry_delay=0,
+        debug=False,
+    )
+    calls = []
+
+    def fake_request(method, path, payload=None, query=None, expected_statuses=None):
+        assert method == "GET"
+        calls.append((path, dict(query or {})))
+
+        if path == "/rest/api/2/serverInfo":
+            return {"deploymentType": deployment_type, "version": "9.12.35"}
+
+        assert path == "/rest/api/2/search"
+        assert query is not None
+        assert "nextPageToken" not in query
+        offset = query["startAt"]
+        assert offset in (0, 1)
+
+        return {
+            "startAt": offset,
+            "maxResults": 1,
+            "total": 2,
+            "issues": [{
+                "key": f"SEC-{offset + 1}",
+                "fields": {
+                    "summary": "Example",
+                    "labels": ["label-a" if offset == 0 else "label-b"],
+                    "status": {"name": "Open"},
+                },
+            }],
+        }
+
+    monkeypatch.setattr(client, "request_json", fake_request)
+
+    for _ in range(2):
+        found = client.search_by_labels(
+            "SEC", ["label-a", "label-b"], batch_size=2,
+        )
+        assert found["label-a"]["key"] == "SEC-1"
+        assert found["label-b"]["key"] == "SEC-2"
+
+    assert sum(
+        path == "/rest/api/2/serverInfo" for path, _ in calls
+    ) == 1
+    assert [
+        query["startAt"]
+        for path, query in calls
+        if path == "/rest/api/2/search"
+    ] == [0, 1, 0, 1]
+
