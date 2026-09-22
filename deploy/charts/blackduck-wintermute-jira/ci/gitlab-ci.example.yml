@@ -31,6 +31,8 @@ variables:
   WINTERMUTE_BLACKDUCK_INSECURE: "false"
   WINTERMUTE_CA_BUNDLE_CONFIGMAP: ""
 
+# Configure WINTERMUTE_HELM_VALUES_FILE as a GitLab CI/CD File variable.
+
 helm:deploy:wintermute-jira:
   stage: deploy
   rules:
@@ -52,6 +54,17 @@ helm:deploy:wintermute-jira:
       : "${JIRA_PROJECT_KEY:?JIRA_PROJECT_KEY is required}"
       : "${WINTERMUTE_IMAGE_PULL_SECRET:?WINTERMUTE_IMAGE_PULL_SECRET is required}"
       : "${WINTERMUTE_RUNTIME_SECRET:?WINTERMUTE_RUNTIME_SECRET is required}"
+      : "${WINTERMUTE_HELM_VALUES_FILE:?Configure WINTERMUTE_HELM_VALUES_FILE as a GitLab CI/CD File variable}"
+
+      if ! test -f "${WINTERMUTE_HELM_VALUES_FILE}" || ! test -r "${WINTERMUTE_HELM_VALUES_FILE}"; then
+        echo "WINTERMUTE_HELM_VALUES_FILE must reference a readable file. Use GitLab variable type File, not Variable." >&2
+        exit 1
+      fi
+
+      if ! test -s "${WINTERMUTE_HELM_VALUES_FILE}"; then
+        echo "WINTERMUTE_HELM_VALUES_FILE must contain a non-empty Helm values YAML document." >&2
+        exit 1
+      fi
 
       if test -z "${IMAGE_TAG:-}"; then
         image_name="${IMAGE_REPOSITORY##*/}"
@@ -83,6 +96,7 @@ helm:deploy:wintermute-jira:
         --atomic \
         --timeout "${HELM_WINTERMUTE_TIMEOUT}" \
         --namespace "${KUBE_NAMESPACE}" \
+        --values "${WINTERMUTE_HELM_VALUES_FILE}" \
         --set-string "fullnameOverride=${WINTERMUTE_CRONJOB_NAME}" \
         --set-string "image.repository=${IMAGE_REPOSITORY}" \
         --set-string "image.tag=${IMAGE_TAG}" \
