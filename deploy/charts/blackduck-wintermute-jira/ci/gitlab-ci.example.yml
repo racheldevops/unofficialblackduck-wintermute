@@ -27,11 +27,22 @@ variables:
   WINTERMUTE_ACTIVE_DEADLINE_SECONDS: "10800"
   WINTERMUTE_LOCK_STALE_SECONDS: "14400"
 
+  WINTERMUTE_JIRA_AUTH_MODE: bearer
+  WINTERMUTE_JIRA_API_VERSION: "2"
   WINTERMUTE_JIRA_VERIFY_TLS: "true"
   WINTERMUTE_BLACKDUCK_INSECURE: "false"
   WINTERMUTE_CA_BUNDLE_CONFIGMAP: ""
 
-# Configure WINTERMUTE_HELM_VALUES_FILE as a GitLab CI/CD File variable.
+  WINTERMUTE_PRODUCT_REPORTING_ENABLED: "true"
+  WINTERMUTE_PRODUCT_POLICY_CUSTOM_FIELD: ""
+  WINTERMUTE_PRODUCT_ENTITY_CUSTOM_FIELD: ""
+  WINTERMUTE_PRODUCT_PHASES_JSON: '["RELEASED","LTS"]'
+  WINTERMUTE_PRODUCT_MINIMUM_SCORE: "7.0"
+  WINTERMUTE_PRODUCT_EXPLOIT_MINIMUM_SCORE: "4.0"
+  WINTERMUTE_PRODUCT_REMEDIATION_STATUSES_JSON: '["NEW"]'
+  WINTERMUTE_PRODUCT_ADDED_PROJECT_DEPTH: "1"
+  WINTERMUTE_PRODUCT_DISPLAY_NAMES_JSON: "{}"
+  WINTERMUTE_PRODUCT_ALLOW_TASK_IDENTITY_MIGRATION: "false"
 
 helm:deploy:wintermute-jira:
   stage: deploy
@@ -91,6 +102,53 @@ helm:deploy:wintermute-jira:
           ;;
       esac
 
+      case "${WINTERMUTE_JIRA_AUTH_MODE}" in
+        basic|bearer) ;;
+        *)
+          echo "WINTERMUTE_JIRA_AUTH_MODE must be basic or bearer" >&2
+          exit 1
+          ;;
+      esac
+
+      case "${WINTERMUTE_JIRA_API_VERSION}" in
+        2|3) ;;
+        *)
+          echo "WINTERMUTE_JIRA_API_VERSION must be 2 or 3" >&2
+          exit 1
+          ;;
+      esac
+
+      case "${WINTERMUTE_PRODUCT_REPORTING_ENABLED}" in
+        true)
+          : "${WINTERMUTE_PRODUCT_POLICY_CUSTOM_FIELD:?Set the product policy custom-field name}"
+          : "${WINTERMUTE_PRODUCT_ENTITY_CUSTOM_FIELD:?Set the product entity custom-field name}"
+          ;;
+        false) ;;
+        *)
+          echo "WINTERMUTE_PRODUCT_REPORTING_ENABLED must be true or false" >&2
+          exit 1
+          ;;
+      esac
+
+      case "${WINTERMUTE_PRODUCT_ALLOW_TASK_IDENTITY_MIGRATION}" in
+        true|false) ;;
+        *)
+          echo "WINTERMUTE_PRODUCT_ALLOW_TASK_IDENTITY_MIGRATION must be true or false" >&2
+          exit 1
+          ;;
+      esac
+
+      umask 077
+      settings_dir="$(mktemp -d)"
+      trap 'rm -rf "$settings_dir"' EXIT
+      trap 'exit 130' INT
+      trap 'exit 143' TERM
+
+      printf '%s' "${WINTERMUTE_PRODUCT_POLICY_CUSTOM_FIELD}" \
+        > "${settings_dir}/policy-field"
+      printf '%s' "${WINTERMUTE_PRODUCT_ENTITY_CUSTOM_FIELD}" \
+        > "${settings_dir}/entity-field"
+
       helm upgrade \
         --install \
         --atomic \
@@ -105,6 +163,8 @@ helm:deploy:wintermute-jira:
         --set-string "credentials.existingSecret=${WINTERMUTE_RUNTIME_SECRET}" \
         --set-string "jira.url=${JIRA_URL}" \
         --set-string "jira.projectKey=${JIRA_PROJECT_KEY}" \
+        --set-string "jira.authMode=${WINTERMUTE_JIRA_AUTH_MODE}" \
+        --set-string "jira.apiVersion=${WINTERMUTE_JIRA_API_VERSION}" \
         --set "jira.verifyTls=${WINTERMUTE_JIRA_VERIFY_TLS}" \
         --set-string "persistence.storageClass=${WINTERMUTE_STORAGE_CLASS}" \
         --set-string "persistence.size=${WINTERMUTE_PVC_SIZE}" \
@@ -124,6 +184,16 @@ helm:deploy:wintermute-jira:
         --set "pipeline.lockStaleSeconds=${WINTERMUTE_LOCK_STALE_SECONDS}" \
         --set "blackDuck.insecure=${WINTERMUTE_BLACKDUCK_INSECURE}" \
         --set-string "caBundle.existingConfigMap=${WINTERMUTE_CA_BUNDLE_CONFIGMAP}" \
+        --set-json "config.product_reporting.enabled=${WINTERMUTE_PRODUCT_REPORTING_ENABLED}" \
+        --set-file "config.product_reporting.policy_custom_field=${settings_dir}/policy-field" \
+        --set-file "config.product_reporting.entity_custom_field=${settings_dir}/entity-field" \
+        --set-json "config.product_reporting.phases=${WINTERMUTE_PRODUCT_PHASES_JSON}" \
+        --set-json "config.product_reporting.minimum_score=${WINTERMUTE_PRODUCT_MINIMUM_SCORE}" \
+        --set-json "config.product_reporting.exploit_minimum_score=${WINTERMUTE_PRODUCT_EXPLOIT_MINIMUM_SCORE}" \
+        --set-json "config.product_reporting.remediation_statuses=${WINTERMUTE_PRODUCT_REMEDIATION_STATUSES_JSON}" \
+        --set-json "config.product_reporting.added_project_depth=${WINTERMUTE_PRODUCT_ADDED_PROJECT_DEPTH}" \
+        --set-json "config.product_reporting.product_display_names=${WINTERMUTE_PRODUCT_DISPLAY_NAMES_JSON}" \
+        --set-json "config.product_reporting.allow_task_identity_migration=${WINTERMUTE_PRODUCT_ALLOW_TASK_IDENTITY_MIGRATION}" \
         "${HELM_WINTERMUTE_NAME}" \
         "${HELM_WINTERMUTE_CHART}"
   environment:

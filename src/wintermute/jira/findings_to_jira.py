@@ -1933,6 +1933,25 @@ def build_hierarchy_issue_payload(
         )
     )
 
+    product_report = node.get("product_report")
+    if product_report is not None:
+        from wintermute.jira.product_document import render_product_description
+
+        mapping = config.get("hierarchy", {}).get("field_mappings", {}).get("entity")
+        if not isinstance(mapping, dict):
+            raise RuntimeError("Product reporting requires an Entity field mapping")
+        entity_field = str(mapping.get("field_id") or "").strip()
+        if re.fullmatch(r"customfield_[0-9]+", entity_field) is None:
+            raise RuntimeError("Configure the Jira Entity custom-field ID")
+        if mapping.get("source") not in {"entity", "context.entity"}:
+            raise RuntimeError("Entity mapping must use the product entity source")
+        if entity_field not in fields or fields[entity_field] in (None, "", [], {}):
+            raise RuntimeError("Product Entity was not populated in the issue payload")
+
+        fields["description"] = render_product_description(
+            product_report, description_format,
+        )
+
     return {
         "fields": fields,
     }

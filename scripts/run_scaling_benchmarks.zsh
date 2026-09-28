@@ -1,31 +1,21 @@
 #!/bin/zsh
 emulate -L zsh
-exec >/dev/null 2>&1
+setopt ERR_EXIT NO_UNSET PIPE_FAIL
 
 root="${0:A:h:h}"
-results_dir="${root}/.benchmark-results"
-mkdir -p "${results_dir}"
+cd "${root}"
 
-timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-launcher_log="${results_dir}/launcher-${timestamp}.log"
-status_file="${results_dir}/last-launch-exit-code.txt"
-
-if ! source "${root}/scripts/load_blackduck_env.zsh"; then
-  printf '%s\n' "2" >"${status_file}"
-  exit 0
-fi
-
-if [[ -x "${root}/.venv/bin/python" ]]; then
+if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+  python_bin="${VIRTUAL_ENV}/bin/python"
+elif [[ -x "${root}/.venv/bin/python" ]]; then
   python_bin="${root}/.venv/bin/python"
+elif command -v python3.12 >/dev/null 2>&1; then
+  python_bin="$(command -v python3.12)"
+elif command -v python3 >/dev/null 2>&1; then
+  python_bin="$(command -v python3)"
 else
-  python_bin="python3"
+  print -u2 "Activate your Python 3.12 virtualenv first."
+  exit 2
 fi
 
-"${python_bin}" \
-  "${root}/scripts/scaling_benchmark.py" \
-  --config "${root}/scripts/scaling_benchmark.json" \
-  "$@" >"${launcher_log}" 2>&1
-
-benchmark_exit=$?
-printf '%s\n' "${benchmark_exit}" >"${status_file}"
-exit 0
+exec "${python_bin}" "${root}/scripts/run_product_benchmark.py" "$@"
