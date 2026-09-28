@@ -103,8 +103,23 @@ tolerations: []
 affinity: {}
 
 config:
+  product_reporting:
+    enabled: false
+    policy_custom_field: ""
+    entity_custom_field: ""
+    phases:
+      - RELEASED
+      - LTS
+    minimum_score: 7.0
+    exploit_minimum_score: 4.0
+    remediation_statuses:
+      - NEW
+    added_project_depth: 1
+    product_display_names: {}
+    allow_task_identity_migration: false
+
   issue:
-    summary_template: "Black Duck: {alert_severity} Alert - {subproject} - version {subproject_version} - {component} version {component_version}"
+    summary_template: "Black Duck: {alert_severity} Alert - {subproject} - version {subproject_version}"
     labels:
       - blackduck
       - subproject_rollup
@@ -132,12 +147,12 @@ config:
     epic_link_field: ""
     sync_existing_fields: false
     summary_templates:
-      story: "Black Duck: {alert_severity} Alert - {affected_project} - version {affected_version} - {component_summary}"
+      story: "Black Duck: {alert_severity} Alert - {affected_project} - version {affected_version}"
     labels:
       epic:
         - bd_rollup_cve
       story:
-        - bd_rollup_project_version
+        - bd_rollup_product_version
       vulnerability:
         - bd_rollup_vuln
     additional_fields:

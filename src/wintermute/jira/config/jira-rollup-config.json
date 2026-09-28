@@ -5,7 +5,7 @@
     "issue_type": "Task",
     "api_version": "2",
     "auth_mode": "basic",
-    "verify_tls": false
+    "verify_tls": true
   },
   "issue": {
     "summary_template": "Black Duck: {alert_severity} Alert - {subproject} - version {subproject_version} - {component} version {component_version}",
@@ -68,41 +68,31 @@
       "project_name": {
         "field_id": "",
         "source": "affected_project",
-        "node_types": [
-          "story"
-        ],
+        "node_types": ["story"],
         "value_type": "text"
       },
       "project_version": {
         "field_id": "",
         "source": "affected_version",
-        "node_types": [
-          "story"
-        ],
+        "node_types": ["story"],
         "value_type": "text"
       },
       "cvss_vector": {
         "field_id": "",
         "source": "cvss_vector",
-        "node_types": [
-          "story"
-        ],
+        "node_types": ["story"],
         "value_type": "text"
       },
       "cvss_score": {
         "field_id": "",
         "source": "stats.max_score",
-        "node_types": [
-          "story"
-        ],
+        "node_types": ["story"],
         "value_type": "number"
       },
       "entity": {
         "field_id": "",
         "source": "entity",
-        "node_types": [
-          "story"
-        ],
+        "node_types": ["story"],
         "value_type": "text"
       }
     },

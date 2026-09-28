@@ -1,18 +1,16 @@
 from __future__ import annotations
 
+import copy
+import json
 import threading
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
-from wintermute.blackduck.criteria import (
-    CollectionCriteria,
-)
-from wintermute.blackduck.models import (
-    CollectionTarget,
-    NormalizedFinding,
-)
+from wintermute.blackduck.criteria import CollectionCriteria
+from wintermute.blackduck.models import CollectionTarget, NormalizedFinding
+from wintermute.blackduck.occurrences import matched_occurrence_advisory
 from wintermute.blackduck.resources import (
     canonical_href,
     first_value_by_key,
@@ -49,10 +47,7 @@ from wintermute.concurrency import (
 )
 
 
-EntityResolver = Callable[
-    [Any, CollectionTarget],
-    str,
-]
+EntityResolver = Callable[[Any, CollectionTarget], str]
 
 
 @dataclass(frozen=True)
@@ -78,43 +73,71 @@ class TargetCollectionResult:
     def status(self) -> str:
         if self.failures and self.findings:
             return "partial"
-
         if self.failures:
             return "failed"
-
         return "ok"
+
+
+def merge_occurrence_findings(
+    first: NormalizedFinding,
+    second: NormalizedFinding,
+) -> NormalizedFinding:
+    left = first.attributes.get("blackduck_occurrences")
+    right = second.attributes.get("blackduck_occurrences")
+    if not isinstance(left, list) or not isinstance(right, list):
+        return first
+
+    occurrences = {}
+    for item in left + right:
+        if not isinstance(item, dict):
+            raise RuntimeError("Normalized occurrence evidence must contain objects")
+        key = json.dumps(item, sort_keys=True, separators=(",", ":"))
+        occurrences[key] = copy.deepcopy(item)
+
+    attributes = dict(first.attributes)
+    attributes["blackduck_occurrences"] = [
+        occurrences[key] for key in sorted(occurrences)
+    ]
+    contexts = {
+        context.external_id: context
+        for context in first.lineage_contexts + second.lineage_contexts
+    }
+
+    return replace(
+        first,
+        attributes=attributes,
+        lineage_contexts=tuple(contexts[key] for key in sorted(contexts)),
+    )
+
+
+def dedupe_normalized_findings(
+    findings: Iterable[NormalizedFinding],
+) -> tuple[NormalizedFinding, ...]:
+    unique: dict[str, NormalizedFinding] = {}
+    for finding in findings:
+        previous = unique.get(finding.external_id)
+        unique[finding.external_id] = (
+            finding
+            if previous is None
+            else merge_occurrence_findings(previous, finding)
+        )
+    return tuple(unique.values())
 
 
 @dataclass(frozen=True)
 class CollectionRunResult:
-    target_results: tuple[
-        TargetCollectionResult,
-        ...
-    ]
+    target_results: tuple[TargetCollectionResult, ...]
 
     @property
-    def findings(self) -> tuple[
-        NormalizedFinding,
-        ...
-    ]:
-        findings: list[NormalizedFinding] = []
-        seen: set[str] = set()
-
-        for result in self.target_results:
-            for finding in result.findings:
-                if finding.external_id in seen:
-                    continue
-
-                seen.add(finding.external_id)
-                findings.append(finding)
-
-        return tuple(findings)
+    def findings(self) -> tuple[NormalizedFinding, ...]:
+        return dedupe_normalized_findings(
+            finding
+            for result in self.target_results
+            for finding in result.findings
+        )
 
     @property
-    def failures(self) -> tuple[
-        CollectionFailure,
-        ...
-    ]:
+    def failures(self) -> tuple[CollectionFailure, ...]:
         return tuple(
             failure
             for result in self.target_results
@@ -123,24 +146,15 @@ class CollectionRunResult:
 
     @property
     def succeeded_target_count(self) -> int:
-        return sum(
-            result.status == "ok"
-            for result in self.target_results
-        )
+        return sum(result.status == "ok" for result in self.target_results)
 
     @property
     def partial_target_count(self) -> int:
-        return sum(
-            result.status == "partial"
-            for result in self.target_results
-        )
+        return sum(result.status == "partial" for result in self.target_results)
 
     @property
     def failed_target_count(self) -> int:
-        return sum(
-            result.status == "failed"
-            for result in self.target_results
-        )
+        return sum(result.status == "failed" for result in self.target_results)
 
 
 def get_vulnerable_components(
@@ -148,19 +162,15 @@ def get_vulnerable_components(
     project_version_href: str,
 ) -> list[dict[str, Any]]:
     direct_url = (
-        f"{canonical_href(project_version_href)}"
-        "/vulnerable-bom-components"
+        f"{canonical_href(project_version_href)}/vulnerable-bom-components"
     )
-
     try:
         return client.paged_get(direct_url)
     except BlackDuckCircuitOpenError:
         raise
     except RuntimeError as direct_error:
         try:
-            version = client.get(
-                project_version_href
-            )
+            version = client.get(project_version_href)
         except BlackDuckCircuitOpenError:
             raise
         except RuntimeError:
@@ -174,22 +184,17 @@ def get_vulnerable_components(
                 "vulnerable-components",
             ),
         )
-
         if not linked_url:
             raise direct_error
-
         return client.paged_get(linked_url)
 
 
-def component_version_href(
-    component: dict[str, Any],
-) -> str:
+def component_version_href(component: dict[str, Any]) -> str:
     candidates = [
         component.get("componentVersionHref"),
         component.get("componentVersionUrl"),
         component.get("componentVersion"),
     ]
-
     for candidate in candidates:
         if (
             isinstance(candidate, str)
@@ -198,34 +203,21 @@ def component_version_href(
             and "/versions/" in candidate
         ):
             return canonical_href(candidate)
-
         if isinstance(candidate, dict):
             for href in iter_hrefs(candidate):
-                if (
-                    "/api/components/" in href
-                    and "/versions/" in href
-                ):
+                if "/api/components/" in href and "/versions/" in href:
                     return canonical_href(href)
 
     linked = get_link(
         component,
-        (
-            "component-version",
-            "componentVersion",
-            "component_version",
-        ),
+        ("component-version", "componentVersion", "component_version"),
     )
-
     if linked:
         return canonical_href(linked)
 
     for href in iter_hrefs(component):
-        if (
-            "/api/components/" in href
-            and "/versions/" in href
-        ):
+        if "/api/components/" in href and "/versions/" in href:
             return canonical_href(href)
-
     return ""
 
 
@@ -234,57 +226,28 @@ def component_details(
     component: dict[str, Any],
 ) -> tuple[str, str, str, str]:
     name = str(
-        first_value_by_key(
-            component,
-            (
-                "componentName",
-                "name",
-            ),
-        )
-        or ""
+        first_value_by_key(component, ("componentName", "name")) or ""
     )
     version = str(
         first_value_by_key(
             component,
-            (
-                "componentVersionName",
-                "versionName",
-            ),
-        )
-        or ""
+            ("componentVersionName", "versionName"),
+        ) or ""
     ).strip()
-    direct_version = component.get(
-        "componentVersion"
-    )
+    direct_version = component.get("componentVersion")
 
-    if (
-        not version
-        and isinstance(
-            direct_version,
-            (str, int, float),
-        )
-    ):
-        direct_text = str(
-            direct_version
-        ).strip()
-
-        if not looks_like_resource_url(
-            direct_text
-        ):
+    if not version and isinstance(direct_version, (str, int, float)):
+        direct_text = str(direct_version).strip()
+        if not looks_like_resource_url(direct_text):
             version = direct_text
 
     if looks_like_resource_url(version):
         version = ""
 
-    version_href = component_version_href(
-        component
-    )
-
+    version_href = component_version_href(component)
     if version_href and not version:
         try:
-            version_resource = client.get(
-                version_href
-            )
+            version_resource = client.get(version_href)
         except BlackDuckCircuitOpenError:
             raise
         except RuntimeError:
@@ -295,45 +258,23 @@ def component_details(
                 or version_resource.get("name")
                 or first_value_by_key(
                     version_resource,
-                    (
-                        "componentVersionName",
-                        "versionName",
-                    ),
+                    ("componentVersionName", "versionName"),
                 )
                 or ""
             ).strip()
-
             if looks_like_resource_url(version):
                 version = ""
 
-    bom_component_href = canonical_href(
-        get_self_href(component)
-    )
-
-    return (
-        name,
-        version,
-        version_href,
-        bom_component_href,
-    )
+    return name, version, version_href, canonical_href(get_self_href(component))
 
 
 def get_policy_rules(
     client: Any,
     component: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    url = get_link(
-        component,
-        (
-            "policy-rules",
-            "policyRules",
-            "policy-rule",
-        ),
-    )
-
+    url = get_link(component, ("policy-rules", "policyRules", "policy-rule"))
     if not url:
         return []
-
     try:
         return client.paged_get(url)
     except BlackDuckCircuitOpenError:
@@ -350,70 +291,36 @@ def policy_match(
     needs_rules = (
         not criteria.skip_policy_rules
         and (
-            bool(
-                criteria.policy_name
-                or criteria.policy_rule_id
-            )
+            bool(criteria.policy_name or criteria.policy_rule_id)
             or criteria.include_policy_rule_details
         )
     )
-
     if not needs_rules:
         return True, "", ""
 
-    rules = get_policy_rules(
-        client,
-        component,
-    )
-    names: list[str] = []
-    hrefs: list[str] = []
-
+    rules = get_policy_rules(client, component)
+    names = []
+    hrefs = []
     for rule in rules:
         name = str(
             first_value_by_key(
                 rule,
-                (
-                    "name",
-                    "policyName",
-                    "policyRuleName",
-                ),
-            )
-            or ""
+                ("name", "policyName", "policyRuleName"),
+            ) or ""
         )
-        href = canonical_href(
-            get_self_href(rule)
-            or get_link(rule, ("self",))
-        )
-
+        href = canonical_href(get_self_href(rule) or get_link(rule, ("self",)))
         if name:
             names.append(name)
-
         if href:
             hrefs.append(href)
-
-        if (
-            criteria.policy_name
-            and name == criteria.policy_name
-        ):
+        if criteria.policy_name and name == criteria.policy_name:
+            return True, name, href
+        if criteria.policy_rule_id and criteria.policy_rule_id in href:
             return True, name, href
 
-        if (
-            criteria.policy_rule_id
-            and criteria.policy_rule_id in href
-        ):
-            return True, name, href
-
-    if (
-        criteria.policy_name
-        or criteria.policy_rule_id
-    ):
+    if criteria.policy_name or criteria.policy_rule_id:
         return False, "", ""
-
-    return (
-        True,
-        ";".join(sorted_unique(names)),
-        ";".join(sorted_unique(hrefs)),
-    )
+    return True, ";".join(sorted_unique(names)), ";".join(sorted_unique(hrefs))
 
 
 def collect_component_findings(
@@ -424,187 +331,109 @@ def collect_component_findings(
     *,
     entity: str = "",
 ) -> list[NormalizedFinding]:
-    (
-        name,
-        version,
-        version_href,
-        bom_component_href,
-    ) = component_details(
-        client,
-        component,
+    name, version, version_href, bom_component_href = component_details(
+        client, component
     )
-    matched_policy, policy_name, policy_href = (
-        policy_match(
-            client,
-            component,
-            criteria,
-        )
+    matched_policy, policy_name, policy_href = policy_match(
+        client, component, criteria
     )
-
     if not matched_policy:
         return []
 
-    vulnerabilities_url = get_link(
-        component,
-        (
-            "vulnerabilities",
-            "vulnerability",
-        ),
-    )
-    vulnerability_items: list[dict[str, Any]] = []
     score_fields = (
         criteria.score_field,
         "overallScore",
         "baseScore",
         "cvssScore",
     )
-
-    if vulnerabilities_url:
-        for item in client.paged_get(
-            vulnerabilities_url
-        ):
-            extracted = (
-                extract_vulnerability_candidates(
+    matched = matched_occurrence_advisory(
+        client,
+        component,
+        target.project_version.version_href,
+    )
+    evidence = None
+    if matched is not None:
+        advisory, evidence = matched
+        vulnerability_items = [advisory]
+    else:
+        vulnerability_items = []
+        vulnerabilities_url = get_link(
+            component, ("vulnerabilities", "vulnerability")
+        )
+        if vulnerabilities_url:
+            for item in client.paged_get(vulnerabilities_url):
+                extracted = extract_vulnerability_candidates(
                     item,
                     score_fields=score_fields,
-                    dedupe_score_fields=(
-                        criteria.score_field,
-                        "overallScore",
-                    ),
+                    dedupe_score_fields=(criteria.score_field, "overallScore"),
+                )
+                vulnerability_items.extend(extracted or [item])
+        else:
+            vulnerability_items.extend(
+                extract_vulnerability_candidates(
+                    component,
+                    score_fields=score_fields,
+                    dedupe_score_fields=(criteria.score_field, "overallScore"),
                 )
             )
-            vulnerability_items.extend(
-                extracted or [item]
-            )
-    else:
-        vulnerability_items.extend(
-            extract_vulnerability_candidates(
-                component,
-                score_fields=score_fields,
-                dedupe_score_fields=(
-                    criteria.score_field,
-                    "overallScore",
-                ),
-            )
-        )
 
-    findings: list[NormalizedFinding] = []
-
+    findings = []
     for vulnerability in vulnerability_items:
-        score = vulnerability_score(
-            vulnerability,
-            score_fields,
-        )
-
+        score = vulnerability_score(vulnerability, score_fields)
         if not criteria.score_passes(score):
             continue
 
-        (
-            exploit_available,
-            exploitable,
-        ) = extract_exploit_available(
-            vulnerability
-        )
-
-        if (
-            criteria.require_exploit_available
-            and not exploit_available
-        ):
+        exploit_available, exploitable = extract_exploit_available(vulnerability)
+        if criteria.require_exploit_available and not exploit_available:
             continue
 
-        (
-            reachable,
-            reachability,
-            reachability_source,
-        ) = extract_reachability(
+        reachable, reachability, reachability_source = extract_reachability(
             vulnerability
         )
-
-        if (
-            criteria.require_reachable
-            and not reachable
-        ):
+        if criteria.require_reachable and not reachable:
             continue
-
-        if (
-            criteria.reachability_mode == "ai"
-            and not reachability_source
-        ):
+        if criteria.reachability_mode == "ai" and not reachability_source:
             reachability_source = "ai-reserved"
+
+        attributes = {
+            "bom_component_url": bom_component_href,
+            "component_version_href": version_href,
+            "component_origin_id": str(
+                first_value_by_key(
+                    component,
+                    ("componentOriginId", "originId", "externalId"),
+                ) or ""
+            ),
+            "policy_matched": matched_policy,
+        }
+        if evidence is not None:
+            attributes["blackduck_occurrences"] = [copy.deepcopy(evidence)]
+            identifier = evidence["vulnerability"]
+        else:
+            identifier = vulnerability_identifier(vulnerability)
 
         findings.append(
             NormalizedFinding(
-                project_version=(
-                    target.project_version
-                ),
+                project_version=target.project_version,
                 component=name,
                 component_version=version,
-                component_href=(
-                    version_href
-                    or bom_component_href
-                ),
-                vulnerability=(
-                    vulnerability_identifier(
-                        vulnerability
-                    )
-                ),
-                severity=(
-                    vulnerability_severity(
-                        vulnerability,
-                        uppercase=True,
-                    )
-                ),
-                score_field=(
-                    criteria.score_field
-                ),
+                component_href=version_href or bom_component_href,
+                vulnerability=identifier,
+                severity=vulnerability_severity(vulnerability, uppercase=True),
+                score_field=criteria.score_field,
                 score=score,
-                vulnerability_href=(
-                    vulnerability_href(
-                        vulnerability
-                    )
-                ),
-                cvss_vector=(
-                    vulnerability_cvss_vector(
-                        vulnerability
-                    )
-                ),
-                exploit_available=(
-                    exploit_available
-                ),
+                vulnerability_href=vulnerability_href(vulnerability),
+                cvss_vector=vulnerability_cvss_vector(vulnerability),
+                exploit_available=exploit_available,
                 exploitable=exploitable,
                 reachable=reachable,
                 reachability=reachability,
-                reachability_source=(
-                    reachability_source
-                ),
+                reachability_source=reachability_source,
                 policy_name=policy_name,
                 policy_rule_href=policy_href,
                 entity=entity,
-                lineage_contexts=(
-                    target.lineage_contexts
-                ),
-                attributes={
-                    "bom_component_url": (
-                        bom_component_href
-                    ),
-                    "component_version_href": (
-                        version_href
-                    ),
-                    "component_origin_id": str(
-                        first_value_by_key(
-                            component,
-                            (
-                                "componentOriginId",
-                                "originId",
-                                "externalId",
-                            ),
-                        )
-                        or ""
-                    ),
-                    "policy_matched": (
-                        matched_policy
-                    ),
-                },
+                lineage_contexts=target.lineage_contexts,
+                attributes=attributes,
             )
         )
 
@@ -614,74 +443,43 @@ def collect_component_findings(
 def vulnerable_component_identity(
     component: dict[str, Any],
 ) -> tuple[str, str, str] | None:
-    vulnerabilities_url = canonical_href(
-        get_link(
-            component,
-            (
-                "vulnerabilities",
-                "vulnerability",
-            ),
-        )
-    )
+    if isinstance(component.get("vulnerability"), dict):
+        return None
 
+    vulnerabilities_url = canonical_href(
+        get_link(component, ("vulnerabilities", "vulnerability"))
+    )
     if not vulnerabilities_url:
         return None
 
-    name = str(
-        first_value_by_key(
-            component,
-            (
-                "componentName",
-                "name",
-            ),
-        )
-        or ""
-    )
+    name = str(first_value_by_key(component, ("componentName", "name")) or "")
     version = str(
         first_value_by_key(
             component,
-            (
-                "componentVersionName",
-                "versionName",
-            ),
-        )
-        or ""
+            ("componentVersionName", "versionName"),
+        ) or ""
     ).strip()
-
     if not version or looks_like_resource_url(version):
-        version = component_version_href(
-            component
-        )
-
-    return (
-        name,
-        version,
-        vulnerabilities_url,
-    )
+        version = component_version_href(component)
+    return name, version, vulnerabilities_url
 
 
 def dedupe_vulnerable_components(
     components: Iterable[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    unique: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
-
+    unique = []
+    seen = set()
     for component in components:
-        identity = vulnerable_component_identity(
-            component
-        )
-
+        identity = vulnerable_component_identity(component)
         if identity is None:
             unique.append(component)
             continue
-
         if identity in seen:
             continue
-
         seen.add(identity)
         unique.append(component)
-
     return unique
+
 
 def collect_target(
     client: Any,
@@ -694,161 +492,77 @@ def collect_target(
     started = time.monotonic()
     project_version = target.project_version
 
-    if not project_version.version_href:
-        failure = CollectionFailure(
-            target_external_id=(
-                project_version.external_id
-            ),
-            project=project_version.project,
-            project_version=project_version.version,
-            project_version_href="",
-            stage="validate-target",
-            error=(
-                "Collection target has no "
-                "project-version href"
-            ),
-        )
-
+    def failed(stage: str, error: str) -> TargetCollectionResult:
         return TargetCollectionResult(
             target=target,
             findings=(),
-            failures=(failure,),
-            elapsed_seconds=(
-                time.monotonic() - started
+            failures=(
+                CollectionFailure(
+                    target_external_id=project_version.external_id,
+                    project=project_version.project,
+                    project_version=project_version.version,
+                    project_version_href=project_version.version_href,
+                    stage=stage,
+                    error=error,
+                ),
             ),
+            elapsed_seconds=time.monotonic() - started,
+        )
+
+    if not project_version.version_href:
+        return failed(
+            "validate-target",
+            "Collection target has no project-version href",
         )
 
     entity = ""
-
     if entity_resolver is not None:
         try:
-            entity = str(
-                entity_resolver(
-                    client,
-                    target,
-                )
-                or ""
-            )
+            entity = str(entity_resolver(client, target) or "")
         except BlackDuckCircuitOpenError:
             raise
         except Exception as error:
-            failure = CollectionFailure(
-                target_external_id=(
-                    project_version.external_id
-                ),
-                project=project_version.project,
-                project_version=(
-                    project_version.version
-                ),
-                project_version_href=(
-                    project_version.version_href
-                ),
-                stage="resolve-entity",
-                error=str(error),
-            )
+            return failed("resolve-entity", str(error))
 
-            return TargetCollectionResult(
-                target=target,
-                findings=(),
-                failures=(failure,),
-                elapsed_seconds=(
-                    time.monotonic() - started
-                ),
-            )
-
-    if (
-        criteria.require_entity
-        and not entity
-    ):
-        failure = CollectionFailure(
-            target_external_id=(
-                project_version.external_id
-            ),
-            project=project_version.project,
-            project_version=project_version.version,
-            project_version_href=(
-                project_version.version_href
-            ),
-            stage="resolve-entity",
-            error=(
-                f"Project does not have a populated "
-                f"{criteria.entity_custom_field!r} "
-                "custom field"
-            ),
+    if criteria.require_entity and not entity:
+        return failed(
+            "resolve-entity",
+            f"Project does not have a populated "
+            f"{criteria.entity_custom_field!r} custom field",
         )
 
-        return TargetCollectionResult(
-            target=target,
-            findings=(),
-            failures=(failure,),
-            elapsed_seconds=(
-                time.monotonic() - started
-            ),
-        )
+    parent_projects = ";".join(sorted({
+        context.parent.project
+        for context in target.lineage_contexts
+        if context.parent.project
+    }))
 
     with blackduck_request_context(
         child_project=project_version.project,
         child_version=project_version.version,
         child_version_href=project_version.version_href,
-        parent_projects=";".join(
-            sorted(
-                {
-                    context.parent.project
-                    for context in target.lineage_contexts
-                    if context.parent.project
-                }
-            )
-        ),
+        parent_projects=parent_projects,
         stage="load-vulnerable-components",
     ):
         try:
-            components = get_vulnerable_components(
-                client,
-                project_version.version_href,
-            )
             components = dedupe_vulnerable_components(
-                components
+                get_vulnerable_components(client, project_version.version_href)
             )
         except BlackDuckCircuitOpenError:
             raise
         except Exception as error:
-            failure = CollectionFailure(
-                target_external_id=(
-                    project_version.external_id
-                ),
-                project=project_version.project,
-                project_version=project_version.version,
-                project_version_href=(
-                    project_version.version_href
-                ),
-                stage="load-vulnerable-components",
-                error=str(error),
-            )
-
-            return TargetCollectionResult(
-                target=target,
-                findings=(),
-                failures=(failure,),
-                elapsed_seconds=(
-                    time.monotonic() - started
-                ),
-            )
+            return failed("load-vulnerable-components", str(error))
 
     if not components:
         return TargetCollectionResult(
             target=target,
             findings=(),
             failures=(),
-            elapsed_seconds=(
-                time.monotonic() - started
-            ),
+            elapsed_seconds=time.monotonic() - started,
         )
 
     worker_count = min(
-        bounded_worker_count(
-            component_workers,
-            maximum=MAX_COMPONENT_WORKERS,
-        ),
+        bounded_worker_count(component_workers, maximum=MAX_COMPONENT_WORKERS),
         len(components),
     )
     worker_local = threading.local()
@@ -856,47 +570,25 @@ def collect_target(
     def worker_client() -> Any:
         if worker_count == 1:
             return client
-
-        local_client = getattr(
-            worker_local,
-            "blackduck_client",
-            None,
-        )
-
+        local_client = getattr(worker_local, "blackduck_client", None)
         if local_client is None:
             local_client = client.clone_for_worker()
             worker_local.blackduck_client = local_client
-
         return local_client
 
     def collect_component(
         item: tuple[int, dict[str, Any]],
-    ) -> tuple[
-        list[NormalizedFinding],
-        CollectionFailure | None,
-    ]:
+    ) -> tuple[list[NormalizedFinding], CollectionFailure | None]:
         _, component = item
-
+        component_name = str(
+            first_value_by_key(component, ("componentName", "name")) or ""
+        )
         with blackduck_request_context(
             child_project=project_version.project,
             child_version=project_version.version,
             child_version_href=project_version.version_href,
-            parent_projects=";".join(
-                sorted(
-                    {
-                        context.parent.project
-                        for context in target.lineage_contexts
-                        if context.parent.project
-                    }
-                )
-            ),
-            component=str(
-                first_value_by_key(
-                    component,
-                    ("componentName", "name"),
-                )
-                or ""
-            ),
+            parent_projects=parent_projects,
+            component=component_name,
             stage="component-vulnerabilities",
         ):
             try:
@@ -913,39 +605,17 @@ def collect_target(
             except BlackDuckCircuitOpenError:
                 raise
             except Exception as error:
-                name = str(
-                    first_value_by_key(
-                        component,
-                        (
-                            "componentName",
-                            "name",
-                        ),
-                    )
-                    or ""
-                )
-                href = canonical_href(
-                    get_self_href(component)
-                )
-
                 return (
                     [],
                     CollectionFailure(
-                        target_external_id=(
-                            project_version.external_id
-                        ),
-                        project=(
-                            project_version.project
-                        ),
-                        project_version=(
-                            project_version.version
-                        ),
-                        project_version_href=(
-                            project_version.version_href
-                        ),
+                        target_external_id=project_version.external_id,
+                        project=project_version.project,
+                        project_version=project_version.version,
+                        project_version_href=project_version.version_href,
                         stage="component-details",
                         error=str(error),
-                        component=name,
-                        component_href=href,
+                        component=component_name,
+                        component_href=canonical_href(get_self_href(component)),
                     ),
                 )
 
@@ -955,31 +625,19 @@ def collect_target(
         workers=worker_count,
         maximum=MAX_COMPONENT_WORKERS,
     )
-    findings: list[NormalizedFinding] = []
-    failures: list[CollectionFailure] = []
-    seen_findings: set[str] = set()
-
+    findings = []
+    failures = []
     for component_findings, failure in component_results:
         if failure is not None:
             failures.append(failure)
-            continue
-
-        for finding in component_findings:
-            if finding.external_id in seen_findings:
-                continue
-
-            seen_findings.add(
-                finding.external_id
-            )
-            findings.append(finding)
+        else:
+            findings.extend(component_findings)
 
     return TargetCollectionResult(
         target=target,
-        findings=tuple(findings),
+        findings=dedupe_normalized_findings(findings),
         failures=tuple(failures),
-        elapsed_seconds=(
-            time.monotonic() - started
-        ),
+        elapsed_seconds=time.monotonic() - started,
     )
 
 
@@ -993,44 +651,29 @@ def collect_targets(
     entity_resolver: EntityResolver | None = None,
 ) -> CollectionRunResult:
     target_list = list(targets)
-    quarantined_results: list[TargetCollectionResult] = []
-    quarantine = load_active_quarantine(
-        default_quarantine_path()
-    )
+    quarantined_results = []
+    quarantine = load_active_quarantine(default_quarantine_path())
 
     if quarantine is not None:
-        active_targets: list[CollectionTarget] = []
-
+        active_targets = []
         for target in target_list:
             project_version = target.project_version
-
-            if (
-                project_version.version_href
-                != quarantine.child_version_href
-            ):
+            if project_version.version_href != quarantine.child_version_href:
                 active_targets.append(target)
                 continue
-
             quarantined_results.append(
                 TargetCollectionResult(
                     target=target,
                     findings=(),
                     failures=(
                         CollectionFailure(
-                            target_external_id=(
-                                project_version.external_id
-                            ),
+                            target_external_id=project_version.external_id,
                             project=project_version.project,
-                            project_version=(
-                                project_version.version
-                            ),
-                            project_version_href=(
-                                project_version.version_href
-                            ),
+                            project_version=project_version.version,
+                            project_version_href=project_version.version_href,
                             stage="temporary-quarantine",
                             error=(
-                                "Black Duck target is temporarily "
-                                "quarantined until "
+                                "Black Duck target is temporarily quarantined until "
                                 f"{quarantine.retry_after}"
                             ),
                         ),
@@ -1038,21 +681,13 @@ def collect_targets(
                     elapsed_seconds=0.0,
                 )
             )
-
         target_list = active_targets
 
     if not target_list:
-        return CollectionRunResult(
-            target_results=tuple(
-                quarantined_results
-            ),
-        )
+        return CollectionRunResult(target_results=tuple(quarantined_results))
 
     worker_count = min(
-        bounded_worker_count(
-            workers,
-            maximum=MAX_IO_WORKERS,
-        ),
+        bounded_worker_count(workers, maximum=MAX_IO_WORKERS),
         len(target_list),
     )
     worker_local = threading.local()
@@ -1060,35 +695,22 @@ def collect_targets(
     def worker_client() -> Any:
         if worker_count == 1:
             return client
-
-        local_client = getattr(
-            worker_local,
-            "blackduck_client",
-            None,
-        )
-
+        local_client = getattr(worker_local, "blackduck_client", None)
         if local_client is None:
             local_client = client.clone_for_worker()
             worker_local.blackduck_client = local_client
-
         return local_client
 
-    def collect(
-        target: CollectionTarget,
-    ) -> TargetCollectionResult:
+    def collect(target: CollectionTarget) -> TargetCollectionResult:
         with blackduck_request_context(
             child_project=target.project_version.project,
             child_version=target.project_version.version,
             child_version_href=target.project_version.version_href,
-            parent_projects=";".join(
-                sorted(
-                    {
-                        context.parent.project
-                        for context in target.lineage_contexts
-                        if context.parent.project
-                    }
-                )
-            ),
+            parent_projects=";".join(sorted({
+                context.parent.project
+                for context in target.lineage_contexts
+                if context.parent.project
+            })),
             stage="collect-target",
         ):
             return collect_target(
@@ -1105,10 +727,6 @@ def collect_targets(
         workers=worker_count,
         maximum=MAX_IO_WORKERS,
     )
-
     return CollectionRunResult(
-        target_results=(
-            tuple(results)
-            + tuple(quarantined_results)
-        ),
+        target_results=tuple(results) + tuple(quarantined_results)
     )

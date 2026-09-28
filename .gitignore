@@ -26,3 +26,7 @@ k8s_handnotes*.md
 /.cache_ggshield
 .local-k8s/
 /.scm-live-test-output/
+/planning.md
+/skunkworks.kubeconfig
+/config/wintermute-onboard.json
+/src/wintermute/scm/onboarding/config/wintermute-onboard.local.json
