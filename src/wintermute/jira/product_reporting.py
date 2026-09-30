@@ -639,8 +639,6 @@ def validate_run_options(args):
         raise RuntimeError("Remove --hierarchy-limit for complete product aggregation")
     if args.only_subproject:
         raise RuntimeError("Select product scope rather than --only-subproject")
-    if not args.strict:
-        raise RuntimeError("Product reporting requires strict collection")
     if args.threshold != 7.0 or args.score_field != "overallScore":
         raise RuntimeError("Configure product thresholds in product_reporting")
     if args.entity_custom_field or args.require_entity:
@@ -750,14 +748,49 @@ def run(args, config):
                 normalized_finding_payload(finding)
                 for finding in collection.findings
             ])
+            failures = list(collection.failures)
             save(run_dir / "collection-failures.json", [
-                vars(failure) for failure in collection.failures
+                vars(failure) for failure in failures
             ])
-            if collection.failures:
+            report["collection_failure_count"] = len(failures)
+            report["collection_partial"] = bool(failures)
+
+            if failures and args.strict:
                 raise RuntimeError("Black Duck collection is incomplete")
 
+            target_hrefs = {
+                target.project_version.version_href
+                for target in targets
+            }
+            failed_hrefs = {
+                failure.project_version_href
+                for failure in failures
+            }
+            if failures and (
+                not all(failed_hrefs)
+                or not failed_hrefs.issubset(target_hrefs)
+            ):
+                raise RuntimeError(
+                    "Cannot safely exclude failed Black Duck targets "
+                    "without valid project-version URLs"
+                )
+
+            selected_findings = [
+                finding for finding in collection.findings
+                if finding.project_version.version_href not in failed_hrefs
+            ]
+            report["excluded_failed_source_versions"] = sorted(failed_hrefs)
+            if failures:
+                print(
+                    f"PARTIAL COLLECTION: excluded {len(failed_hrefs)} "
+                    "failed source version(s); details are in "
+                    f"{run_dir / 'collection-failures.json'}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
             rows, legacy_labels = project_findings(
-                collection.findings, products, args, settings, report
+                selected_findings, products, args, settings, report
             )
             save(run_dir / "product-findings.json", rows)
             nodes = build_nodes(rows, prepared)
@@ -775,28 +808,28 @@ def run(args, config):
             report["source_counts"] = {
                 "products": len(products),
                 "targets": len(targets),
-                "findings": len(collection.findings),
+                "findings": len(selected_findings),
                 "hierarchy_nodes": len(nodes),
             }
 
-            incomplete = bool(report["unresolved_product_evidence"])
-            report["evidence_complete"] = not incomplete
+            unresolved = bool(report["unresolved_product_evidence"])
+            report["evidence_complete"] = not unresolved and not failures
             report["unresolved_occurrence_count"] = len(
                 report["unresolved_product_evidence"]
             )
-            if incomplete and args.apply and not args.dry_run:
+            if unresolved and args.apply and not args.dry_run:
                 raise RuntimeError(
                     "Apply blocked: decision-critical evidence is incomplete; "
                     "see product-selection.json"
                 )
-            if incomplete:
+            if unresolved:
                 print(
                     "INCOMPLETE DRY RUN: unresolved occurrences are excluded "
                     "from the preview. Apply remains blocked.",
                     file=sys.stderr,
                     flush=True,
                 )
-            if not nodes and not args.allow_empty and not incomplete:
+            if not nodes and not args.allow_empty and not unresolved:
                 raise RuntimeError("No eligible product findings")
 
             results = publish(
@@ -812,16 +845,18 @@ def run(args, config):
             with publish_plan_path.open(encoding="utf-8") as input_file:
                 publish_plan = json.load(input_file)
             publish_plan.update({
-                "evidence_complete": not incomplete,
+                "evidence_complete": report["evidence_complete"],
+                "collection_partial": bool(failures),
+                "collection_failure_count": len(failures),
                 "unresolved_occurrence_count": len(
                     report["unresolved_product_evidence"]
                 ),
                 "selection_report": "product-selection.json",
-                "excluded_unresolved_occurrences": incomplete,
+                "excluded_unresolved_occurrences": unresolved,
             })
             save(publish_plan_path, publish_plan)
 
-            if incomplete:
+            if unresolved:
                 report["status"] = "planned-incomplete"
                 report["promoted_outputs"] = []
                 report["exit_code"] = 2
@@ -829,7 +864,9 @@ def run(args, config):
                 return 2
 
             report["status"] = (
-                "succeeded" if args.apply and not args.dry_run else "planned"
+                "partial" if failures
+                else "succeeded" if args.apply and not args.dry_run
+                else "planned"
             )
             report["promoted_outputs"] = workflow.promote_outputs(run_dir, root)
             report["exit_code"] = 0

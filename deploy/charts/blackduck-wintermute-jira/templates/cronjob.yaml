@@ -55,6 +55,8 @@ spec:
                 - {{ printf "--%s" $mode | quote }}
                 {{- if .Values.pipeline.strict }}
                 - --strict
+                {{- else }}
+                - --allow-partial
                 {{- end }}
                 {{- if .Values.pipeline.resolveBomNames }}
                 - --resolve-bom-names

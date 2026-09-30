@@ -2,9 +2,6 @@
 {{- $projectKey := required "jira.projectKey is required" .Values.jira.projectKey -}}
 {{- $product := .Values.config.product_reporting | default dict -}}
 {{- if $product.enabled -}}
-{{- if not .Values.pipeline.strict -}}
-{{- fail "Product reporting requires pipeline.strict=true" -}}
-{{- end -}}
 {{- $policy := required "Product policy_custom_field is required" $product.policy_custom_field -}}
 {{- $entity := required "Product entity_custom_field is required" $product.entity_custom_field -}}
 {{- if or (eq (trim $policy) "") (eq (trim $entity) "") -}}

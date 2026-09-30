@@ -43,7 +43,7 @@ pipeline:
   mode: dry-run
   confirmApply: false
   maxCreate: 10
-  strict: true
+  strict: false
   resolveBomNames: true
   workers: 2
   parentWorkers: 2
@@ -93,10 +93,10 @@ securityContext:
 resources:
   requests:
     cpu: 500m
-    memory: 2Gi
+    memory: 4Gi
   limits:
     cpu: "2"
-    memory: 5Gi
+    memory: 6Gi
 
 nodeSelector: {}
 tolerations: []

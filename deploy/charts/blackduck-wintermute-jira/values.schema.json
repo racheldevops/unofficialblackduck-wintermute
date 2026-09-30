@@ -315,29 +315,6 @@
           }
         }
       }
-    },
-    {
-      "if": {
-        "required": ["config"],
-        "properties": {
-          "config": {
-            "required": ["product_reporting"],
-            "properties": {
-              "product_reporting": {
-                "required": ["enabled"],
-                "properties": {"enabled": {"const": true}}
-              }
-            }
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "pipeline": {
-            "properties": {"strict": {"const": true}}
-          }
-        }
-      }
     }
   ]
 }
