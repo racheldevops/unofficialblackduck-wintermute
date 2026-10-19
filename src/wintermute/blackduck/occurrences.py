@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import copy
 import math
+import re
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from wintermute.blackduck.resources import canonical_href, get_link, get_self_href
 
@@ -19,6 +20,17 @@ EXPLICIT_EXPLOIT_FIELDS = (
     "exploit_available",
     "hasExploit",
 )
+ADVISORY_IDENTIFIER = re.compile(r"(?:CVE-\d{4}-\d{4,}|BDSA-\d{4}-\d+)", re.I)
+CVE_IDENTIFIER = re.compile(r"CVE-\d{4}-\d{4,}")
+BDSA_IDENTIFIER = re.compile(r"BDSA-\d{4}-\d+")
+CVE_TO_BDSA_RELS = frozenset({
+    "related-vulnerabilities",
+    "related-bdsa-vulnerability",
+})
+BDSA_TO_CVE_RELS = frozenset({
+    "related-vulnerability",
+    "related-nvd-vulnerability",
+})
 
 
 def direct_identifier(value: dict[str, Any]) -> str:
@@ -27,6 +39,22 @@ def direct_identifier(value: dict[str, Any]) -> str:
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
     return ""
+
+
+def advisory_identifiers(value: dict[str, Any]) -> set[str]:
+    return {
+        candidate.strip()
+        for field in IDENTIFIER_FIELDS
+        if isinstance(candidate := value.get(field), str) and candidate.strip()
+    }
+
+
+def exact_advisory_match(value: dict[str, Any], identifier: str) -> bool:
+    identifiers = advisory_identifiers(value)
+    return identifier in identifiers and not any(
+        ADVISORY_IDENTIFIER.fullmatch(candidate) and candidate != identifier
+        for candidate in identifiers
+    )
 
 
 def same_instance_url(client: Any, value: str) -> str:
@@ -45,6 +73,94 @@ def same_instance_url(client: Any, value: str) -> str:
     ):
         raise RuntimeError("Black Duck evidence URL belongs to another instance")
     return value
+
+
+def direct_vulnerability_url(client: Any, identifier: str) -> str:
+    return same_instance_url(
+        client,
+        f"/api/vulnerabilities/{quote(identifier, safe='')}",
+    )
+
+
+def verified_vulnerability_resource(
+    client: Any,
+    value: Any,
+    identifier: str,
+    source: str,
+    expected_url: str,
+) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("source") != source or value.get("name") != identifier:
+        return False
+    if not exact_advisory_match(value, identifier):
+        return False
+    href = get_self_href(value)
+    if not isinstance(href, str) or not href:
+        return False
+    return href == expected_url
+
+
+def has_exact_related_link(
+    client: Any,
+    resource: dict[str, Any],
+    expected_url: str,
+    relations: frozenset[str],
+) -> bool:
+    meta = resource.get("_meta")
+    links = meta.get("links") if isinstance(meta, dict) else None
+    if not isinstance(links, list):
+        return False
+
+    for link in links:
+        if not isinstance(link, dict) or link.get("rel") not in relations:
+            continue
+        href = link.get("href")
+        if not isinstance(href, str) or not href:
+            continue
+        # Do not follow, normalize, or accept query-bearing alias links.
+        if urlsplit(href).query:
+            continue
+        try:
+            validated = same_instance_url(client, href)
+        except RuntimeError:
+            continue
+        if validated == expected_url:
+            return True
+    return False
+
+
+def reciprocal_cve_advisory(
+    client: Any,
+    cve_id: str,
+    candidate: dict[str, Any],
+) -> tuple[dict[str, Any], str] | None:
+    bdsa_id = direct_identifier(candidate)
+    if (
+        CVE_IDENTIFIER.fullmatch(cve_id) is None
+        or BDSA_IDENTIFIER.fullmatch(bdsa_id) is None
+        or not exact_advisory_match(candidate, bdsa_id)
+    ):
+        return None
+
+    cve_url = direct_vulnerability_url(client, cve_id)
+    bdsa_url = direct_vulnerability_url(client, bdsa_id)
+    cve = client.get(cve_url)
+    bdsa = client.get(bdsa_url)
+
+    if not verified_vulnerability_resource(
+        client, cve, cve_id, "NVD", cve_url
+    ):
+        return None
+    if not verified_vulnerability_resource(
+        client, bdsa, bdsa_id, "BDSA", bdsa_url
+    ):
+        return None
+    if not has_exact_related_link(client, cve, bdsa_url, CVE_TO_BDSA_RELS):
+        return None
+    if not has_exact_related_link(client, bdsa, cve_url, BDSA_TO_CVE_RELS):
+        return None
+    return cve, bdsa_url
 
 
 def overall_score_evidence(advisory: dict[str, Any]) -> dict[str, Any]:
@@ -223,6 +339,9 @@ def matched_occurrence_advisory(
 
     linked = get_link(component, ("vulnerabilities", "vulnerability"))
     details_url = same_instance_url(client, linked) if linked else ""
+    related_bdsa_url = ""
+    match_method = "exact-advisory-id"
+
     if details_url:
         candidates = client.paged_get(details_url)
         if not isinstance(candidates, list) or not all(
@@ -231,19 +350,45 @@ def matched_occurrence_advisory(
             raise RuntimeError("Advisory collection must contain objects")
         matches = [
             item for item in candidates
-            if direct_identifier(item) == identifier
+            if exact_advisory_match(item, identifier)
         ]
+
+        # A related BDSA is not itself the CVE advisory. Verify both direct
+        # resources and both directions of the relationship before using
+        # the direct CVE's own score, severity, and exploit evidence.
+        if not matches and len(candidates) == 1:
+            verified = reciprocal_cve_advisory(client, identifier, candidates[0])
+            if verified is not None:
+                cve_advisory, related_bdsa_url = verified
+                matches = [cve_advisory]
+                match_method = "reciprocal-vulnerability-links"
+
         if not matches:
-            raise RuntimeError(f"Advisory collection has no exact match for {identifier}")
+            candidate_ids = sorted({
+                candidate
+                for item in candidates
+                for candidate in advisory_identifiers(item)
+                if ADVISORY_IDENTIFIER.fullmatch(candidate)
+            })
+            raise RuntimeError(
+                f"Advisory collection has no exact match for {identifier}; "
+                f"returned {len(candidates)} candidate(s); "
+                f"advisory identifiers: {candidate_ids[:10]!r}"
+            )
         advisory = matches[0]
         if any(item != advisory for item in matches[1:]):
             raise RuntimeError(f"Conflicting advisory records for {identifier}")
     else:
         advisory = nested
+        match_method = "embedded-occurrence-advisory"
 
     evidence = occurrence_evidence(
         component, advisory, project_version_href, identifier, details_url
     )
+    evidence["advisory_match_method"] = match_method
+    if related_bdsa_url:
+        evidence["verified_related_bdsa_href"] = related_bdsa_url
+
     merged = copy.deepcopy(advisory)
     merged["vulnerabilityId"] = identifier
     merged["remediationStatus"] = evidence["remediation_status"]

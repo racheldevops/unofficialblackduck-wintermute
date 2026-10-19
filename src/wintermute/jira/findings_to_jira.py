@@ -1945,8 +1945,20 @@ def build_hierarchy_issue_payload(
             raise RuntimeError("Configure the Jira Entity custom-field ID")
         if mapping.get("source") not in {"entity", "context.entity"}:
             raise RuntimeError("Entity mapping must use the product entity source")
-        if entity_field not in fields or fields[entity_field] in (None, "", [], {}):
-            raise RuntimeError("Product Entity was not populated in the issue payload")
+
+        entity_value = fields.get(entity_field)
+        if entity_value in (None, "", [], {}):
+            fields.pop(entity_field, None)
+        elif any(
+            isinstance(value, str)
+            and "/api/custom-fields/objects/" in value
+            for value in (
+                entity_value
+                if isinstance(entity_value, list)
+                else [entity_value]
+            )
+        ):
+            raise RuntimeError("Black Duck Entity option URL cannot be sent to Jira")
 
         fields["description"] = render_product_description(
             product_report, description_format,

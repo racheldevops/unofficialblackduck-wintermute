@@ -16,7 +16,7 @@ from wintermute.blackduck.circuit_recovery import run_with_circuit_recovery
 from wintermute.blackduck.client import BlackDuckClient
 from wintermute.blackduck.collector import collect_targets
 from wintermute.blackduck.criteria import CollectionCriteria
-from wintermute.blackduck.custom_fields import find_named_custom_field
+from wintermute.blackduck.custom_fields import find_named_custom_field_resolved
 from wintermute.blackduck.inventory import build_project_version_inventory
 from wintermute.blackduck.models import CollectionTarget, LineageContext
 from wintermute.blackduck.occurrences import same_instance_url
@@ -229,15 +229,11 @@ class ProductLock(PipelineLock):
         return workflow.PipelineFailure(message, workflow.EXIT_LOCKED)
 
 
-def field_value(fields, name):
-    matches = []
-    for field in fields:
-        found, value = find_named_custom_field(field, name)
-        if found:
-            matches.append(value)
-    if len(matches) > 1:
-        raise RuntimeError(f"Ambiguous custom field: {name}")
-    return matches[0] if matches else ""
+def field_value(client, fields, name):
+    found, value = find_named_custom_field_resolved(client, fields, name)
+    if not found or "/api/custom-fields/objects/" in value:
+        return ""
+    return value
 
 
 def select_products(client, inventory, args, settings, report):
@@ -266,8 +262,8 @@ def select_products(client, inventory, args, settings, report):
                 raise RuntimeError("Project metadata does not match inventory")
             fields = client.paged_get(ref.project_href + "/custom-fields")
             metadata[ref.project_href] = {
-                "policy": field_value(fields, settings["policy_custom_field"]),
-                "entity": field_value(fields, settings["entity_custom_field"]),
+                "policy": field_value(client, fields, settings["policy_custom_field"]),
+                "entity": field_value(client, fields, settings["entity_custom_field"]),
                 "people": responsibility_metadata(project.get("description")),
             }
             report["responsibility_metadata"].append({
@@ -277,14 +273,20 @@ def select_products(client, inventory, args, settings, report):
 
         data = metadata[ref.project_href]
         policy_active = data["policy"].strip().casefold() == "true"
-        if not policy_active or not data["entity"].strip():
+        if not policy_active:
             if ref.project_href not in excluded_projects:
                 report["excluded_products"].append({
                     "project": ref.project,
-                    "reason": "policy-not-active" if not policy_active else "entity-missing",
+                    "reason": "policy-not-active",
                 })
                 excluded_projects.add(ref.project_href)
             continue
+        if not data["entity"].strip() and ref.project_href not in excluded_projects:
+            report.setdefault("entity_warnings", []).append({
+                "project": ref.project,
+                "reason": "entity-missing-or-unresolved",
+            })
+            excluded_projects.add(ref.project_href)
         if not ref.phase:
             raise RuntimeError(f"Version phase is missing: {ref.project} / {ref.version}")
         phase = normalize_phase(ref.phase)
@@ -634,6 +636,115 @@ def build_nodes(rows, config):
     return sorted(nodes, key=publisher.hierarchy_node_sort_key)
 
 
+def select_collected_findings(collection, targets, report):
+    target_hrefs = {
+        target.project_version.version_href
+        for target in targets
+    }
+    failed_hrefs = {
+        failure.project_version_href
+        for failure in collection.failures
+    }
+    if collection.failures and (
+        not all(failed_hrefs)
+        or not failed_hrefs.issubset(target_hrefs)
+    ):
+        raise RuntimeError(
+            "Cannot safely exclude failed Black Duck targets "
+            "without valid project-version URLs"
+        )
+
+    excluded_hrefs = {
+        failure.project_version_href
+        for failure in collection.failures
+        if failure.stage != "component-details"
+    }
+    partial_hrefs = failed_hrefs - excluded_hrefs
+    report["excluded_failed_source_versions"] = sorted(excluded_hrefs)
+    report["partially_collected_source_versions"] = sorted(partial_hrefs)
+    return [
+        finding for finding in collection.findings
+        if finding.project_version.version_href not in excluded_hrefs
+    ]
+
+
+def validate_publishable_nodes(nodes):
+    for node in nodes:
+        if node.get("node_type") != "story":
+            continue
+        report = node.get("product_report")
+        rows = report.get("rows") if isinstance(report, dict) else None
+        if not isinstance(rows, list) or not rows:
+            raise RuntimeError("Product Task has no qualified occurrences")
+        for row in rows:
+            evidence = row.get("evidence") if isinstance(row, dict) else None
+            score = evidence.get("overall_score") if isinstance(evidence, dict) else None
+            if (
+                not isinstance(evidence, dict)
+                or not isinstance(score, dict)
+                or score.get("status") != "known"
+                or type(score.get("value")) not in (float, int)
+                or not math.isfinite(score["value"])
+                or evidence.get("remediation_evidence_status") != "known"
+                or not isinstance(evidence.get("remediation_status"), str)
+                or not evidence["remediation_status"].strip()
+                or not isinstance(evidence.get("occurrence_href"), str)
+                or not evidence["occurrence_href"]
+                or row.get("vulnerability") != evidence.get("vulnerability")
+                or row.get("remediation_status") != normalize(evidence["remediation_status"])
+                or row.get("score") != score["value"]
+            ):
+                raise RuntimeError("Product Task contains unresolved occurrence evidence")
+
+
+def publish_qualified_nodes(
+    args, prepared, nodes, state_path, run_dir, legacy_labels, settings, report,
+):
+    unresolved = bool(report["unresolved_product_evidence"])
+    if unresolved and args.apply and not args.dry_run and not nodes:
+        raise RuntimeError(
+            "Apply blocked: no fully evidenced product findings; "
+            "see product-selection.json"
+        )
+    validate_publishable_nodes(nodes)
+    return publish(
+        args, prepared, nodes, state_path, run_dir, legacy_labels, settings
+    )
+
+
+def warning_summary(report, failures):
+    return {
+        "collection_failures_by_stage": dict(sorted(
+            Counter(failure.stage for failure in failures).items()
+        )),
+        "unresolved_occurrences_by_reason": dict(sorted(
+            Counter(
+                str(item.get("reason") or "unknown")
+                for item in report["unresolved_product_evidence"]
+            ).items()
+        )),
+        "partially_collected_source_versions": len(
+            report["partially_collected_source_versions"]
+        ),
+        "excluded_failed_source_versions": len(
+            report["excluded_failed_source_versions"]
+        ),
+    }
+
+
+def publish_outcome(args, *, unresolved, failures):
+    if unresolved:
+        if getattr(args, "strict", True):
+            return (
+                "partial" if args.apply and not args.dry_run
+                else "planned-incomplete"
+            ), 2, False
+        return "partial", 0, False
+    if failures:
+        return "partial", 0, False
+    return ("succeeded" if args.apply and not args.dry_run else "planned"), 0, True
+
+
 def validate_run_options(args):
     if args.hierarchy_limit is not None:
         raise RuntimeError("Remove --hierarchy-limit for complete product aggregation")
@@ -742,6 +853,7 @@ def run(args, config):
                 lambda: collect_targets(
                     client, targets, EvidenceCriteria(),
                     workers=args.rollup_workers, component_workers=1,
+                    vulnerability_id=args.only_vulnerability or "",
                 )
             )
             save(run_dir / "normalized-findings.json", [
@@ -758,37 +870,9 @@ def run(args, config):
             if failures and args.strict:
                 raise RuntimeError("Black Duck collection is incomplete")
 
-            target_hrefs = {
-                target.project_version.version_href
-                for target in targets
-            }
-            failed_hrefs = {
-                failure.project_version_href
-                for failure in failures
-            }
-            if failures and (
-                not all(failed_hrefs)
-                or not failed_hrefs.issubset(target_hrefs)
-            ):
-                raise RuntimeError(
-                    "Cannot safely exclude failed Black Duck targets "
-                    "without valid project-version URLs"
-                )
-
-            selected_findings = [
-                finding for finding in collection.findings
-                if finding.project_version.version_href not in failed_hrefs
-            ]
-            report["excluded_failed_source_versions"] = sorted(failed_hrefs)
-            if failures:
-                print(
-                    f"PARTIAL COLLECTION: excluded {len(failed_hrefs)} "
-                    "failed source version(s); details are in "
-                    f"{run_dir / 'collection-failures.json'}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-
+            selected_findings = select_collected_findings(
+                collection, targets, report
+            )
             rows, legacy_labels = project_findings(
                 selected_findings, products, args, settings, report
             )
@@ -817,25 +901,36 @@ def run(args, config):
             report["unresolved_occurrence_count"] = len(
                 report["unresolved_product_evidence"]
             )
-            if unresolved and args.apply and not args.dry_run:
+            report["warning_summary"] = warning_summary(report, failures)
+            if failures or unresolved:
+                print(
+                    "WARNING: partial Black Duck evidence; "
+                    f"summary={json.dumps(report['warning_summary'], sort_keys=True)}. "
+                    f"Details: {run_dir}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+            if not nodes and (failures or unresolved):
+                raise RuntimeError(
+                    "No fully evidenced product findings remain; "
+                    "nothing can be published"
+                )
+            if not nodes and not args.allow_empty:
+                raise RuntimeError("No eligible product findings")
+            if unresolved and args.strict and args.apply and not args.dry_run:
                 raise RuntimeError(
                     "Apply blocked: decision-critical evidence is incomplete; "
                     "see product-selection.json"
                 )
-            if unresolved:
-                print(
-                    "INCOMPLETE DRY RUN: unresolved occurrences are excluded "
-                    "from the preview. Apply remains blocked.",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            if not nodes and not args.allow_empty and not unresolved:
-                raise RuntimeError("No eligible product findings")
 
-            results = publish(
+            results = publish_qualified_nodes(
                 args, prepared, nodes,
                 root / "state" / "jira-rollup-state.json",
-                run_dir, legacy_labels, settings,
+                run_dir, legacy_labels, settings, report,
+            )
+            report["published_with_unresolved_evidence"] = bool(
+                unresolved and args.apply and not args.dry_run
             )
             report["created"] = sum(row["action"] == "created" for row in results)
             report["creation_cap_reached"] = any(
@@ -856,22 +951,16 @@ def run(args, config):
             })
             save(publish_plan_path, publish_plan)
 
-            if unresolved:
-                report["status"] = "planned-incomplete"
-                report["promoted_outputs"] = []
-                report["exit_code"] = 2
-                successful = False
-                return 2
-
-            report["status"] = (
-                "partial" if failures
-                else "succeeded" if args.apply and not args.dry_run
-                else "planned"
+            status, exit_code, promote = publish_outcome(
+                args, unresolved=unresolved, failures=bool(failures)
             )
-            report["promoted_outputs"] = workflow.promote_outputs(run_dir, root)
-            report["exit_code"] = 0
-            successful = True
-            return 0
+            report["status"] = status
+            report["promoted_outputs"] = (
+                workflow.promote_outputs(run_dir, root) if promote else []
+            )
+            report["exit_code"] = exit_code
+            successful = exit_code == 0
+            return exit_code
         except BaseException as error:
             primary_error = error
             report["status"] = "interrupted" if isinstance(error, KeyboardInterrupt) else "failed"

@@ -319,6 +319,13 @@ def publish(args, config, nodes, state_path, run_dir, legacy_labels, settings):
                 managed_fields = publisher.hierarchy_managed_fields_for_node(
                     node, prepared
                 )
+                if node.get("product_report") is not None:
+                    entity_field = prepared["hierarchy"]["field_mappings"]["entity"]["field_id"]
+                    managed_fields.pop(entity_field, None)
+                    if entity_field in payloads[external_id]["fields"]:
+                        managed_fields[entity_field] = copy.deepcopy(
+                            payloads[external_id]["fields"][entity_field]
+                        )
                 sync = bool(
                     args.sync_existing_fields
                     or prepared["hierarchy"].get("sync_existing_fields")

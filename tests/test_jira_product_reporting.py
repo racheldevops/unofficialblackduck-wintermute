@@ -341,10 +341,14 @@ def test_security_policy_other_values_are_excluded(policy):
     assert report["excluded_products"][0]["reason"] == "policy-not-active"
 
 
-def test_empty_entity_is_excluded():
+def test_empty_entity_is_optional_and_warned():
     selected, report = select_inventory(["RELEASED"], entity=" ")
-    assert selected == []
-    assert report["excluded_products"][0]["reason"] == "entity-missing"
+    assert len(selected) == 1
+    assert selected[0]["entity"] == ""
+    assert report["entity_warnings"] == [
+        {"project": "Example Product", "reason": "entity-missing-or-unresolved"}
+    ]
+    assert report["excluded_products"] == []
 
 
 def test_lts_phase_alias_is_accepted():
