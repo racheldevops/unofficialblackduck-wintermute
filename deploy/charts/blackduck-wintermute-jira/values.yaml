@@ -189,4 +189,4 @@ config:
         source: entity
         node_types:
           - story
-        value_type: text
+        value_type: array
