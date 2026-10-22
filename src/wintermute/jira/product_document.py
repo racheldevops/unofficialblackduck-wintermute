@@ -7,6 +7,8 @@ from urllib.parse import urlsplit, urlunsplit
 ROLES = ("maintainer", "owner", "supporter", "securitymanager")
 ALERT_JOB_NAME = "Vulnerability_Management_JIRA"
 ALERT_SEPARATOR = "---------------------------"
+CVE_ID = re.compile(r"CVE-[0-9]{4}-[0-9]{4,}", re.ASCII)
+SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
 
 
 def plain(value):
@@ -18,6 +20,19 @@ def paragraph(value):
     return {
         "type": "paragraph",
         "content": [{"type": "text", "text": value}] if value else [],
+    }
+
+
+def linked_paragraph(label, url):
+    return {
+        "type": "paragraph",
+        "content": [
+            {
+                "type": "text",
+                "text": label,
+                "marks": [{"type": "link", "attrs": {"href": url}}],
+            },
+        ],
     }
 
 
@@ -67,6 +82,23 @@ def valid_url(value):
 
 def wiki_text(value):
     return re.sub(r"[{}\[\]|*]", " ", " ".join(plain(value).splitlines()))
+
+
+def wiki_link(label, url):
+    return (
+        f"[{wiki_text(label)}|"
+        + url.replace("[", "%5B").replace("]", "%5D").replace("|", "%7C")
+        + "]"
+    )
+
+
+def reported_vectors(rows):
+    return sorted({
+        value.strip()
+        for row in rows
+        for value in row["evidence"]["cvss_vectors"].values()
+        if isinstance(value, str) and value.strip()
+    })
 
 
 def alert_project_links(first):
@@ -142,6 +174,88 @@ def alert_wiki_header(first):
     ]
 
 
+def render_product_epic_create_description(node, rows, description_format):
+    """Render new product-reporting Epics using only qualified Task evidence."""
+    context = node.get("context")
+    if node.get("node_type") != "epic" or not isinstance(context, dict):
+        raise RuntimeError("Expected a product vulnerability Epic")
+    vulnerability = context.get("vulnerability")
+    if not isinstance(vulnerability, str) or not vulnerability.strip():
+        raise RuntimeError("Product Epic has no advisory identity")
+    if not isinstance(rows, list) or not rows or any(
+        not isinstance(row, dict) or row.get("vulnerability") != vulnerability
+        for row in rows
+    ):
+        raise RuntimeError("Product Epic has no matching qualified occurrences")
+
+    severity = next(
+        (level for level in SEVERITIES
+         if any(row["severity"] == level for row in rows)),
+        "UNKNOWN",
+    )
+    score = max(row["score"] for row in rows)
+    vectors = "; ".join(reported_vectors(rows)) or "Not provided"
+    advisories = sorted({
+        valid_url(row["evidence"]["advisory_href"])
+        for row in rows if row["evidence"].get("advisory_href")
+    })
+    products = sorted({
+        (row["product_display_name"], row["product_version"])
+        for row in rows
+    })
+    nvd_url = (
+        f"https://nvd.nist.gov/vuln/detail/{vulnerability}"
+        if CVE_ID.fullmatch(vulnerability) else None
+    )
+    summary = [
+        ["Vulnerability", vulnerability],
+        ["Severity (highest reported)", severity],
+        ["CVSS Score (maximum overallScore)", str(score)],
+        ["CVSS Vector (reported)", vectors],
+        ["NVD link", nvd_url or "Not available"],
+    ]
+    product_labels = [
+        f"{name} / {version}" for name, version in products
+    ]
+
+    if description_format == "adf":
+        content = [
+            heading("Vulnerability overview"),
+            adf_table(["Field", "Value"], summary),
+        ]
+        if nvd_url:
+            content.append(linked_paragraph("NVD record", nvd_url))
+        content.extend([
+            heading("Affected parent product versions"),
+            *[paragraph(value) for value in product_labels],
+            heading("Black Duck advisories"),
+            *[linked_paragraph(url, url) for url in advisories],
+        ])
+        if not advisories:
+            content.append(paragraph("Not provided"))
+        return {"type": "doc", "version": 1, "content": content}
+
+    if description_format != "wiki":
+        raise RuntimeError("Unsupported product description format")
+
+    def wiki_row(values):
+        return "|" + "|".join(wiki_text(value) for value in values) + "|"
+
+    return "\n".join([
+        "h2. Vulnerability overview",
+        "||Field||Value||",
+        *[wiki_row(values) for values in summary],
+        *([wiki_link("NVD record", nvd_url)] if nvd_url else []),
+        "",
+        "h2. Affected parent product versions",
+        *[f"* {wiki_text(value)}" for value in product_labels],
+        "",
+        "h2. Black Duck advisories",
+        *([f"* {wiki_link('Black Duck advisory', url)}" for url in advisories]
+          if advisories else ["Not provided"]),
+    ])
+
+
 def render_product_description(report, description_format):
     if not isinstance(report, dict) or report.get("schema_version") != 1:
         raise RuntimeError("Unsupported structured product report")
@@ -154,20 +268,23 @@ def render_product_description(report, description_format):
     if any((row["product_href"], row["vulnerability"]) != identity for row in rows):
         raise RuntimeError("Product report mixes product/advisory identities")
 
-    vectors = sorted({
-        vector.strip()
-        for row in rows
-        for vector in row["evidence"]["cvss_vectors"].values()
-        if isinstance(vector, str) and vector.strip()
+    subprojects = sorted({
+        (row["source_project"], row["source_version"])
+        for row in rows if row["source_href"] != first["product_href"]
     })
+    subproject_text = (
+        "; ".join(f"{name} / {version}" for name, version in subprojects)
+        or "None; qualifying findings are direct on the parent"
+    )
     summary = [
         ["Product", first["product_display_name"]],
-        ["Black Duck project", first["product"]],
-        ["Version", first["product_version"]],
+        ["Parent project", first["product"]],
+        ["Parent version", first["product_version"]],
+        ["Affected subproject versions", subproject_text],
         ["Phase", first["phase"]],
         ["Vulnerability", first["vulnerability"]],
         ["CVSS Score (maximum overallScore)", str(max(row["score"] for row in rows))],
-        ["CVSS Vector (reported)", "; ".join(vectors) or "Not provided"],
+        ["CVSS Vector (reported)", "; ".join(reported_vectors(rows)) or "Not provided"],
     ]
     evidence_rows = []
     references = [
@@ -211,7 +328,7 @@ def render_product_description(report, description_format):
             "type": "doc",
             "version": 1,
             "content": [
-                heading("Affected product"),
+                heading("Affected parent product"),
                 adf_table(["Field", "Value"], summary),
                 heading("Affected components"),
                 adf_table(headers, evidence_rows),
@@ -255,7 +372,7 @@ def render_product_description(report, description_format):
         return "|" + "|".join(wiki_text(value) for value in values) + "|"
 
     return "\n".join([
-        "h2. Affected product",
+        "h2. Affected parent product",
         "||Field||Value||",
         *[wiki_row(row) for row in summary],
         "",
@@ -268,12 +385,7 @@ def render_product_description(report, description_format):
         *["* " + wiki_text(value) for value in responsibilities],
         "",
         "h2. Evidence references",
-        *[
-            f"* [{wiki_text(label)}|"
-            + url.replace("[", "%5B").replace("]", "%5D").replace("|", "%7C")
-            + "]"
-            for label, url in references
-        ],
+        *[f"* {wiki_link(label, url)}" for label, url in references],
     ])
 
 

@@ -9,7 +9,10 @@ from urllib.parse import quote
 
 from wintermute.jira import findings_to_jira as publisher
 from wintermute.jira.lookup_identity import own_lookup_labels, search_by_labels
-from wintermute.jira.product_document import render_product_create_description
+from wintermute.jira.product_document import (
+    render_product_create_description,
+    render_product_epic_create_description,
+)
 
 
 def save(path: Path, payload) -> None:
@@ -197,6 +200,16 @@ def publish(args, config, nodes, state_path, run_dir, legacy_labels, settings):
             "allow_task_identity_migration permits coexistence, not automatic migration."
         )
 
+    epic_rows = {}
+    for node in nodes:
+        if node["node_type"] != "story":
+            continue
+        structured = node.get("product_report")
+        rows = structured.get("rows") if isinstance(structured, dict) else None
+        if not isinstance(rows, list) or not rows:
+            raise RuntimeError("Product Task has no qualified occurrences")
+        epic_rows.setdefault(node["parent_external_id"], []).extend(rows)
+
     payloads = {}
     create_payloads = {}
     for node in nodes:
@@ -227,6 +240,12 @@ def publish(args, config, nodes, state_path, run_dir, legacy_labels, settings):
         payloads[node["external_id"]] = payload
 
         create_payload = copy.deepcopy(payload)
+        if node["node_type"] == "epic":
+            create_payload["fields"]["description"] = (
+                render_product_epic_create_description(
+                    node, epic_rows.get(node["external_id"], []), description_format
+                )
+            )
         if node.get("product_report") is not None:
             create_payload["fields"]["description"] = (
                 render_product_create_description(
