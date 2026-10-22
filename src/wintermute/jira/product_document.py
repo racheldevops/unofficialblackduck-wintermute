@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 
 ROLES = ("maintainer", "owner", "supporter", "securitymanager")
+ALERT_JOB_NAME = "Vulnerability_Management_JIRA"
+ALERT_SEPARATOR = "---------------------------"
 
 
 def plain(value):
@@ -65,6 +67,79 @@ def valid_url(value):
 
 def wiki_text(value):
     return re.sub(r"[{}\[\]|*]", " ", " ".join(plain(value).splitlines()))
+
+
+def alert_project_links(first):
+    project = first.get("product")
+    version = first.get("product_version")
+    if (
+        not isinstance(project, str)
+        or not project.strip()
+        or any(ord(character) < 32 for character in project)
+        or not isinstance(version, str)
+        or not version.strip()
+        or any(ord(character) < 32 for character in version)
+    ):
+        raise RuntimeError("Product alert header requires project and version names")
+
+    version_href = valid_url(first.get("product_href"))
+    parsed = urlsplit(version_href)
+    match = re.fullmatch(
+        r"(/api/projects/[^/]+)/versions/[^/]+",
+        parsed.path,
+    )
+    if match is None or parsed.query or parsed.fragment:
+        raise RuntimeError(
+            "Product alert header requires a Black Duck project-version URL"
+        )
+    project_href = urlunsplit(
+        (parsed.scheme, parsed.netloc, match.group(1), "", "")
+    )
+    return project, project_href, version, version_href
+
+
+def alert_adf_paragraph(label, value, href=None, *, bold_value=False):
+    marks = []
+    if bold_value:
+        marks.append({"type": "strong"})
+    if href is not None:
+        marks.append({"type": "link", "attrs": {"href": href}})
+    return {
+        "type": "paragraph",
+        "content": [
+            {
+                "type": "text",
+                "text": label + " ",
+                "marks": [{"type": "strong"}],
+            },
+            {
+                "type": "text",
+                "text": value,
+                **({"marks": marks} if marks else {}),
+            },
+        ],
+    }
+
+
+def alert_adf_header(first):
+    project, project_href, version, version_href = alert_project_links(first)
+    return [
+        alert_adf_paragraph("Job name:", ALERT_JOB_NAME, bold_value=True),
+        alert_adf_paragraph("Project:", project, project_href),
+        alert_adf_paragraph("Project Version:", version, version_href),
+        paragraph(ALERT_SEPARATOR),
+    ]
+
+
+def alert_wiki_header(first):
+    project, project_href, version, version_href = alert_project_links(first)
+    return [
+        f"*Job name:* *{ALERT_JOB_NAME}*",
+        f"*Project:* [{wiki_text(project)}|{project_href}]",
+        f"*Project Version:* [{wiki_text(version)}|{version_href}]",
+        ALERT_SEPARATOR,
+        "",
+    ]
 
 
 def render_product_description(report, description_format):
@@ -192,3 +267,25 @@ def render_product_description(report, description_format):
             for label, url in references
         ],
     ])
+
+
+def render_product_create_description(report, description_format):
+    """Add the alert-compatible header only to a new Task's description."""
+    rows = report.get("rows") if isinstance(report, dict) else None
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("Structured product report has no occurrences")
+    first = rows[0]
+    if any(
+        row.get("product") != first.get("product")
+        or row.get("product_version") != first.get("product_version")
+        for row in rows
+    ):
+        raise RuntimeError("Product report mixes project/version names")
+
+    ordinary = render_product_description(report, description_format)
+    if description_format == "adf":
+        return {
+            **ordinary,
+            "content": alert_adf_header(first) + ordinary["content"],
+        }
+    return "\n".join(alert_wiki_header(first)) + ordinary

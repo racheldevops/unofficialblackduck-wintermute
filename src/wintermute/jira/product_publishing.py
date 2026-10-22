@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 from wintermute.jira import findings_to_jira as publisher
 from wintermute.jira.lookup_identity import own_lookup_labels, search_by_labels
+from wintermute.jira.product_document import render_product_create_description
 
 
 def save(path: Path, payload) -> None:
@@ -197,6 +198,7 @@ def publish(args, config, nodes, state_path, run_dir, legacy_labels, settings):
         )
 
     payloads = {}
+    create_payloads = {}
     for node in nodes:
         payload = publisher.build_hierarchy_issue_payload(
             node, prepared, description_format
@@ -223,6 +225,19 @@ def publish(args, config, nodes, state_path, run_dir, legacy_labels, settings):
                 validation, node, "PREFLIGHT-1", prepared
             )
         payloads[node["external_id"]] = payload
+
+        create_payload = copy.deepcopy(payload)
+        if node.get("product_report") is not None:
+            create_payload["fields"]["description"] = (
+                render_product_create_description(
+                    node["product_report"], description_format
+                )
+            )
+            create_payload["fields"]["labels"] = sorted(
+                set(issue_labels) | {"BDAlert"},
+                key=str.lower,
+            )
+        create_payloads[node["external_id"]] = create_payload
 
     keys = {}
     remote_fields = {}
@@ -373,7 +388,7 @@ def publish(args, config, nodes, state_path, run_dir, legacy_labels, settings):
                 checkpoint_results()
                 continue
 
-            payload = copy.deepcopy(payloads[external_id])
+            payload = copy.deepcopy(create_payloads[external_id])
             if parent_id:
                 parent_key = keys.get(parent_id)
                 if not parent_key:
