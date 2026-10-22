@@ -154,12 +154,20 @@ def render_product_description(report, description_format):
     if any((row["product_href"], row["vulnerability"]) != identity for row in rows):
         raise RuntimeError("Product report mixes product/advisory identities")
 
+    vectors = sorted({
+        vector.strip()
+        for row in rows
+        for vector in row["evidence"]["cvss_vectors"].values()
+        if isinstance(vector, str) and vector.strip()
+    })
     summary = [
         ["Product", first["product_display_name"]],
         ["Black Duck project", first["product"]],
         ["Version", first["product_version"]],
         ["Phase", first["phase"]],
         ["Vulnerability", first["vulnerability"]],
+        ["CVSS Score (maximum overallScore)", str(max(row["score"] for row in rows))],
+        ["CVSS Vector (reported)", "; ".join(vectors) or "Not provided"],
     ]
     evidence_rows = []
     references = [

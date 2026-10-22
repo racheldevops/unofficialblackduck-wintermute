@@ -87,9 +87,14 @@ def settings_from(config):
         raise RuntimeError("Exploit threshold exceeds ordinary threshold")
 
     depth = settings.get("added_project_depth", 1)
-    if type(depth) is not int or not 0 <= depth <= 10:
-        raise RuntimeError("added_project_depth must be between 0 and 10")
+    if type(depth) is not int or not 1 <= depth <= 10:
+        raise RuntimeError("added_project_depth must be between 1 and 10")
     settings["added_project_depth"] = depth
+    settings.setdefault("include_direct_product_findings", True)
+    if type(settings["include_direct_product_findings"]) is not bool:
+        raise RuntimeError(
+            "product_reporting.include_direct_product_findings must be boolean"
+        )
     settings.setdefault("allow_task_identity_migration", False)
     if type(settings["allow_task_identity_migration"]) is not bool:
         raise RuntimeError("allow_task_identity_migration must be boolean")
@@ -313,8 +318,28 @@ def select_products(client, inventory, args, settings, report):
 
 def collection_targets(lineage, products, args, settings, report):
     targets = {}
+    eligible_hrefs = set()
     for product in products:
         root = product["ref"]
+        direct_children = [
+            context.child
+            for context in lineage.load(root)
+            if context.child.version_href
+            and context.child.version_href != root.version_href
+            and context.child.project_href
+            and context.child.project_href != root.project_href
+            and context.child.project not in args.exclude_child_project
+        ]
+        if not direct_children:
+            report.setdefault("excluded_non_parent_versions", []).append({
+                "project": root.project,
+                "version": root.version,
+                "version_href": root.version_href,
+                "reason": "no-distinct-added-project",
+            })
+            continue
+
+        eligible_hrefs.add(root.version_href)
         queue = [(root, 0)]
         seen = set()
         while queue:
@@ -341,10 +366,12 @@ def collection_targets(lineage, products, args, settings, report):
                 "depth": depth,
             })
             if depth < settings["added_project_depth"]:
-                queue.extend(
-                    (context.child, depth + 1)
-                    for context in lineage.load(ref)
+                children = (
+                    direct_children if depth == 0
+                    else [context.child for context in lineage.load(ref)]
                 )
+                queue.extend((child, depth + 1) for child in children)
+    report["eligible_product_hrefs"] = sorted(eligible_hrefs)
     report["lineage_cache"] = {
         "reused": lineage.reused,
         "scanned": lineage.scanned,
@@ -450,6 +477,11 @@ def project_findings(findings, products, args, settings, report):
             for context in finding.lineage_contexts:
                 product = products_by_href.get(context.parent.version_href)
                 if product is None:
+                    continue
+                if (
+                    not settings.get("include_direct_product_findings", True)
+                    and finding.project_version.version_href == product["href"]
+                ):
                     continue
                 rows.append({
                     "product": product["project"],
@@ -848,6 +880,10 @@ def run(args, config):
             targets = collection_targets(
                 lineage, products, args, settings, report
             )
+            eligible_hrefs = set(report["eligible_product_hrefs"])
+            eligible_products = [
+                product for product in products if product["href"] in eligible_hrefs
+            ]
             lineage.save()
             collection = run_with_circuit_recovery(
                 lambda: collect_targets(
@@ -874,7 +910,7 @@ def run(args, config):
                 collection, targets, report
             )
             rows, legacy_labels = project_findings(
-                selected_findings, products, args, settings, report
+                selected_findings, eligible_products, args, settings, report
             )
             save(run_dir / "product-findings.json", rows)
             nodes = build_nodes(rows, prepared)
@@ -886,11 +922,11 @@ def run(args, config):
             })
             hierarchy.write_summary_csv(str(run_dir / "jira-hierarchy-summary.csv"), nodes)
             hierarchy.write_nodes_csv(str(run_dir / "jira-hierarchy-nodes.csv"), nodes)
-            report["selected_product_versions"] = len(products)
+            report["selected_product_versions"] = len(eligible_products)
             report["qualified_occurrences"] = len(rows)
             report["node_counts"] = hierarchy.count_nodes(nodes)
             report["source_counts"] = {
-                "products": len(products),
+                "products": len(eligible_products),
                 "targets": len(targets),
                 "findings": len(selected_findings),
                 "hierarchy_nodes": len(nodes),

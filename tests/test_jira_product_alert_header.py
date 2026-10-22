@@ -5,7 +5,6 @@ import json
 
 import pytest
 
-from wintermute.jira import findings_to_jira as publisher
 from wintermute.jira import product_reporting as product
 from wintermute.jira.product_document import render_product_create_description
 
