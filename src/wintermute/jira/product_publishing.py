@@ -101,6 +101,115 @@ def read_existing(client, project, node, key, config):
     return fields
 
 
+def reconcile_missing_state(
+    client, project, nodes, found, state, state_path, run_dir, pending,
+    *, apply, enabled,
+):
+    """Require explicit approval before replacing missing saved identities."""
+    if type(enabled) is not bool:
+        raise RuntimeError(
+            "product_reporting.reconcile_missing_jira_issues must be boolean"
+        )
+
+    missing = []
+    for node in nodes:
+        external_id = node["external_id"]
+        cached = publisher.state_issue_for_external_id(state, external_id)
+        key = str((cached or {}).get("issue_key") or "")
+        remote = found.get(node["lookup_label"])
+        remote_key = str((remote or {}).get("key") or "")
+
+        if key and remote_key and key != remote_key:
+            raise RuntimeError("Cached and searched Jira identities disagree")
+        if key and not remote_key:
+            missing.append({
+                "external_id": external_id,
+                "lookup_label": node["lookup_label"],
+                "issue_key": key,
+                "node_type": node["node_type"],
+            })
+
+    review = {
+        "project_key": project,
+        "jira_url": client.base_url,
+        "missing_from_label_search": missing,
+        "recovery_enabled": enabled,
+        "state_changed": False,
+    }
+    save(run_dir / "jira-missing-issue-review.json", review)
+
+    if not missing:
+        return
+
+    if not enabled or not apply:
+        raise RuntimeError(
+            f"{len(missing)} saved Jira issue(s) were not found by their own "
+            "lookup labels. See jira-missing-issue-review.json. No issues were "
+            "created. A missing search result can also mean lost visibility; "
+            "recreation requires explicit reconcile_missing_jira_issues=true "
+            "in an apply run."
+        )
+
+    if pending:
+        raise RuntimeError(
+            "Cannot reconcile missing Jira issues while product_pending_creates "
+            "contains uncertain creations. No issues were created."
+        )
+
+    # Project visibility alone cannot prove that individual issues were deleted.
+    # The operator's explicit opt-in acknowledges issue-security restrictions.
+    visible_project = client.request_json(
+        "GET",
+        f"/rest/api/2/project/{quote(project, safe='')}",
+        expected_statuses={200},
+    )
+    if (
+        not isinstance(visible_project, dict)
+        or visible_project.get("key") != project
+    ):
+        raise RuntimeError(
+            "Jira project visibility check did not return the expected project"
+        )
+
+    if not state_path.is_file():
+        raise RuntimeError(
+            "Missing Jira mappings were loaded without a state file; "
+            "refusing recovery"
+        )
+
+    issues = state["issues_by_external_id"]
+    for item in missing:
+        existing = issues.get(item["external_id"])
+        if (
+            not isinstance(existing, dict)
+            or existing.get("issue_key") != item["issue_key"]
+            or existing.get("rollup_label") != item["lookup_label"]
+        ):
+            raise RuntimeError(
+                "Saved Jira identity changed during reconciliation"
+            )
+
+    backup = state_path.with_name(
+        f"{state_path.name}.before-reconciliation-{uuid.uuid4().hex}.bak"
+    )
+    with state_path.open("rb") as source, backup.open("xb") as destination:
+        while chunk := source.read(1024 * 1024):
+            destination.write(chunk)
+        destination.flush()
+        os.fsync(destination.fileno())
+
+    review["backup_path"] = str(backup)
+    save(run_dir / "jira-missing-issue-review.json", review)
+
+    for item in missing:
+        issues.pop(item["external_id"])
+
+    # The complete previous state remains in the backup if this write fails.
+    save(state_path, state)
+    review["state_changed"] = True
+    save(run_dir / "jira-missing-issue-review.json", review)
+
+
 def publish(args, config, nodes, state_path, run_dir, legacy_labels, settings):
     validate_nodes(nodes)
     state_path = Path(state_path)
@@ -260,21 +369,10 @@ def publish(args, config, nodes, state_path, run_dir, legacy_labels, settings):
 
     keys = {}
     remote_fields = {}
-    results = []
-    created_count = 0
 
-    def checkpoint_results():
-        save(run_dir / "jira-rollup-plan.json", {
-            "dry_run": not apply,
-            "remote_lookup_performed": remote_lookup,
-            "description_format": description_format,
-            "migration": migration,
-            "results": results,
-        })
-        publisher.write_hierarchy_results_csv(
-            str(run_dir / "jira-rollup-results.csv"), results
-        )
-
+    # Complete the read-only identity preflight for EVERY node first.
+    # In particular, a missing Task must not cause its state to be removed
+    # before a different Epic's key conflict or GET failure is discovered.
     for node in nodes:
         external_id = node["external_id"]
         remote = found.get(node["lookup_label"])
@@ -286,8 +384,13 @@ def publish(args, config, nodes, state_path, run_dir, legacy_labels, settings):
         pending_record = pending.get(external_id)
         if pending_record and pending_record["lookup_label"] != node["lookup_label"]:
             raise RuntimeError("Pending creation label differs from planned identity")
-        key = remote_key or cached_key
 
+        # A cached key missing from the complete label search is handled only
+        # after all other existing issues and relationships have been verified.
+        if cached_key and not remote_key and remote_lookup:
+            continue
+
+        key = remote_key or cached_key
         if pending_record and not key and apply:
             raise RuntimeError(
                 f"Uncertain previous creation for {external_id}; no issue was found. "
@@ -319,6 +422,29 @@ def publish(args, config, nodes, state_path, run_dir, legacy_labels, settings):
             raise RuntimeError(
                 f"Existing Task {keys[external_id]} is not under Epic {parent_key}"
             )
+
+    # This is the FIRST place reconciliation may change saved Jira state.
+    if remote_lookup:
+        reconcile_missing_state(
+            client, project, nodes, found, state, state_path, run_dir, pending,
+            apply=apply,
+            enabled=settings.get("reconcile_missing_jira_issues", False),
+        )
+
+    results = []
+    created_count = 0
+
+    def checkpoint_results():
+        save(run_dir / "jira-rollup-plan.json", {
+            "dry_run": not apply,
+            "remote_lookup_performed": remote_lookup,
+            "description_format": description_format,
+            "migration": migration,
+            "results": results,
+        })
+        publisher.write_hierarchy_results_csv(
+            str(run_dir / "jira-rollup-results.csv"), results
+        )
 
     if apply:
         state["product_reporting_destination"] = destination

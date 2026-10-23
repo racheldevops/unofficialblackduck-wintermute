@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 import sys
 from pathlib import Path
@@ -32,6 +33,34 @@ _workflow.PipelineLock = PipelineLock
 if not hasattr(_workflow, "_wintermute_legacy_run_pipeline"):
     _workflow._wintermute_legacy_run_pipeline = _workflow.run_pipeline
 
+if not hasattr(_workflow, "_wintermute_legacy_parse_args"):
+    _workflow._wintermute_legacy_parse_args = _workflow.parse_args
+
+
+def parse_args():
+    """Accept the product-only recovery switch for this invocation."""
+    flag = "--reconcile-missing-jira-issues"
+    arguments = sys.argv[1:]
+
+    if arguments.count(flag) > 1:
+        raise _workflow.PipelineFailure(
+            f"{flag} may be specified only once",
+            _workflow.EXIT_ARGUMENT_ERROR,
+        )
+
+    previous_argv = sys.argv
+    try:
+        sys.argv = [
+            previous_argv[0],
+            *(argument for argument in arguments if argument != flag),
+        ]
+        args = _workflow._wintermute_legacy_parse_args()
+    finally:
+        sys.argv = previous_argv
+
+    args.reconcile_missing_jira_issues = flag in arguments
+    return args
+
 
 def run_pipeline(args):
     config = _workflow.load_config(Path(args.config))
@@ -41,9 +70,31 @@ def run_pipeline(args):
             "product_reporting.enabled must be boolean",
             _workflow.EXIT_ARGUMENT_ERROR,
         )
+
+    reconcile = bool(getattr(args, "reconcile_missing_jira_issues", False))
+    if reconcile and (
+        not raw.get("enabled", False)
+        or not getattr(args, "apply", False)
+        or getattr(args, "dry_run", False)
+        or getattr(args, "preflight_only", False)
+    ):
+        raise _workflow.PipelineFailure(
+            "--reconcile-missing-jira-issues requires an applying "
+            "product-reporting run (not dry-run or preflight-only)",
+            _workflow.EXIT_ARGUMENT_ERROR,
+        )
+
     if raw.get("enabled", False):
         from wintermute.jira import product_reporting
-        return product_reporting.run(args, config)
+
+        # Recovery is controlled by this run's flag, not by persistent
+        # configuration left enabled for future scheduled runs.
+        selected_config = copy.deepcopy(config)
+        selected_config["product_reporting"][
+            "reconcile_missing_jira_issues"
+        ] = reconcile
+        return product_reporting.run(args, selected_config)
+
     return _workflow._wintermute_legacy_run_pipeline(args)
 
 
@@ -60,6 +111,7 @@ def main():
         return 2
 
 
+_workflow.parse_args = parse_args
 _workflow.run_pipeline = run_pipeline
 _workflow.main = main
 
