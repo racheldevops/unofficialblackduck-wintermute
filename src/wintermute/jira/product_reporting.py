@@ -32,6 +32,7 @@ from wintermute.paths import output_root
 
 ROLES = ("maintainer", "owner", "supporter", "securitymanager")
 DEFAULT_STATUSES = ("NEW",)
+IDENTIFIER_YEAR = re.compile(r"(?:CVE|BDSA)-([0-9]{4})-[0-9]+", re.IGNORECASE)
 
 
 def normalize(value):
@@ -407,6 +408,24 @@ def qualifies(score, exploit, settings):
     return score >= settings["minimum_score"] or (
         score >= settings["exploit_minimum_score"] and exploit is True
     )
+
+
+def filter_findings_by_identifier_year(findings, years, report):
+    """Select by the year written in a CVE/BDSA ID, not a discovery date."""
+    findings = list(findings)
+    chosen = set(years)
+    report["vulnerability_years"] = sorted(chosen)
+    if not chosen:
+        report["excluded_by_vulnerability_year"] = 0
+        return findings
+
+    selected = []
+    for finding in findings:
+        match = IDENTIFIER_YEAR.fullmatch(str(finding.vulnerability or "").strip())
+        if match and int(match.group(1)) in chosen:
+            selected.append(finding)
+    report["excluded_by_vulnerability_year"] = len(findings) - len(selected)
+    return selected
 
 
 def project_findings(findings, products, args, settings, report):
@@ -798,6 +817,16 @@ def run(args, config):
         raise RuntimeError("Product reporting is not enabled")
     workflow.validate_args(args)
     validate_run_options(args)
+    years = getattr(args, "vulnerability_year", [])
+    if not isinstance(years, list) or any(
+        type(year) is not int or not 1000 <= year <= 9999
+        for year in years
+    ):
+        raise workflow.PipelineFailure(
+            "--vulnerability-year requires a four-digit year",
+            workflow.EXIT_ARGUMENT_ERROR,
+        )
+    years = sorted(set(years))
     root = output_root() / "jira"
     run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8]
     run_dir = root / "runs" / run_id
@@ -810,6 +839,8 @@ def run(args, config):
         "mode": "apply" if args.apply and not args.dry_run else "dry-run",
         "remediation_policy": "originating-occurrence",
         "exploit_maturity_field": settings["exploit_maturity_field"],
+        "vulnerability_years": years,
+        "excluded_by_vulnerability_year": 0,
         "excluded_products": [],
         "excluded_versions": [],
         "responsibility_metadata": [],
@@ -908,6 +939,9 @@ def run(args, config):
 
             selected_findings = select_collected_findings(
                 collection, targets, report
+            )
+            selected_findings = filter_findings_by_identifier_year(
+                selected_findings, years, report
             )
             rows, legacy_labels = project_findings(
                 selected_findings, eligible_products, args, settings, report

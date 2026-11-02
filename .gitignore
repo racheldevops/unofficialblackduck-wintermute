@@ -30,3 +30,4 @@ k8s_handnotes*.md
 /skunkworks.kubeconfig
 /config/wintermute-onboard.json
 /src/wintermute/scm/onboarding/config/wintermute-onboard.local.json
+/.year-smoke.u1pomD/

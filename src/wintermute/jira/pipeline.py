@@ -37,28 +37,70 @@ if not hasattr(_workflow, "_wintermute_legacy_parse_args"):
     _workflow._wintermute_legacy_parse_args = _workflow.parse_args
 
 
+def validated_years(values):
+    if not isinstance(values, list) or any(
+        type(value) is not int or not 1000 <= value <= 9999
+        for value in values
+    ):
+        raise _workflow.PipelineFailure(
+            "--vulnerability-year requires a four-digit year",
+            _workflow.EXIT_ARGUMENT_ERROR,
+        )
+    return sorted(set(values))
+
+
 def parse_args():
-    """Accept the product-only recovery switch for this invocation."""
-    flag = "--reconcile-missing-jira-issues"
+    """Accept per-run product options without changing persistent config."""
+    recovery_flag = "--reconcile-missing-jira-issues"
+    year_flag = "--vulnerability-year"
     arguments = sys.argv[1:]
 
-    if arguments.count(flag) > 1:
+    if arguments.count(recovery_flag) > 1:
         raise _workflow.PipelineFailure(
-            f"{flag} may be specified only once",
+            f"{recovery_flag} may be specified only once",
             _workflow.EXIT_ARGUMENT_ERROR,
         )
 
+    remaining = []
+    years = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == recovery_flag:
+            index += 1
+            continue
+        if argument == year_flag:
+            if index + 1 >= len(arguments):
+                raise _workflow.PipelineFailure(
+                    f"{year_flag} requires a four-digit year",
+                    _workflow.EXIT_ARGUMENT_ERROR,
+                )
+            value = arguments[index + 1]
+            index += 2
+        elif argument.startswith(year_flag + "="):
+            value = argument[len(year_flag) + 1:]
+            index += 1
+        else:
+            remaining.append(argument)
+            index += 1
+            continue
+
+        if len(value) != 4 or not value.isascii() or not value.isdecimal():
+            raise _workflow.PipelineFailure(
+                f"{year_flag} requires a four-digit year",
+                _workflow.EXIT_ARGUMENT_ERROR,
+            )
+        years.append(int(value))
+
     previous_argv = sys.argv
     try:
-        sys.argv = [
-            previous_argv[0],
-            *(argument for argument in arguments if argument != flag),
-        ]
+        sys.argv = [previous_argv[0], *remaining]
         args = _workflow._wintermute_legacy_parse_args()
     finally:
         sys.argv = previous_argv
 
-    args.reconcile_missing_jira_issues = flag in arguments
+    args.reconcile_missing_jira_issues = recovery_flag in arguments
+    args.vulnerability_year = validated_years(years)
     return args
 
 
@@ -71,6 +113,8 @@ def run_pipeline(args):
             _workflow.EXIT_ARGUMENT_ERROR,
         )
 
+    years = validated_years(getattr(args, "vulnerability_year", []))
+    args.vulnerability_year = years
     reconcile = bool(getattr(args, "reconcile_missing_jira_issues", False))
     if reconcile and (
         not raw.get("enabled", False)
@@ -95,6 +139,11 @@ def run_pipeline(args):
         ] = reconcile
         return product_reporting.run(args, selected_config)
 
+    if years:
+        raise _workflow.PipelineFailure(
+            "--vulnerability-year requires product reporting",
+            _workflow.EXIT_ARGUMENT_ERROR,
+        )
     return _workflow._wintermute_legacy_run_pipeline(args)
 
 
