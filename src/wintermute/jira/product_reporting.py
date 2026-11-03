@@ -27,6 +27,7 @@ from wintermute.jira import findings_to_jira as publisher
 from wintermute.jira import pipeline_workflow as workflow
 from wintermute.jira.pipeline_lock import PipelineLock
 from wintermute.jira.product_digest_recency import filter_recent_findings
+from wintermute.jira.product_published_recency import filter_published_findings
 from wintermute.jira.product_publishing import publish, save
 from wintermute.paths import output_root
 
@@ -836,6 +837,14 @@ def run(args, config):
             "--first-detected-within-days requires an integer from 1 to 3650",
             workflow.EXIT_ARGUMENT_ERROR,
         )
+    published_days = getattr(args, "published_within_days", None)
+    if published_days is not None and (
+        type(published_days) is not int or not 1 <= published_days <= 3650
+    ):
+        raise workflow.PipelineFailure(
+            "--published-within-days requires an integer from 1 to 3650",
+            workflow.EXIT_ARGUMENT_ERROR,
+        )
 
     root = output_root() / "jira"
     run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8]
@@ -852,6 +861,7 @@ def run(args, config):
         "vulnerability_years": years,
         "excluded_by_vulnerability_year": 0,
         "first_detected_within_days": days,
+        "published_within_days": published_days,
         "excluded_products": [],
         "excluded_versions": [],
         "responsibility_metadata": [],
@@ -959,6 +969,12 @@ def run(args, config):
                     client, selected_findings, days, report
                 )
             )
+            selected_findings = run_with_circuit_recovery(
+                lambda: filter_published_findings(
+                    client, selected_findings, published_days, report,
+                    strict=args.strict,
+                )
+            )
             rows, legacy_labels = project_findings(
                 selected_findings, eligible_products, args, settings, report
             )
@@ -1034,11 +1050,17 @@ def run(args, config):
                 ),
                 "selection_report": "product-selection.json",
                 "excluded_unresolved_occurrences": unresolved,
+                "published_filter": report.get("published_filter"),
             })
             save(publish_plan_path, publish_plan)
 
+            published_errors = bool(
+                report.get("published_filter", {}).get("read_failed")
+            )
             status, exit_code, promote = publish_outcome(
-                args, unresolved=unresolved, failures=bool(failures)
+                args,
+                unresolved=unresolved,
+                failures=bool(failures) or published_errors,
             )
             report["status"] = status
             report["promoted_outputs"] = (

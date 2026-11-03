@@ -49,12 +49,12 @@ def validated_years(values):
     return sorted(set(values))
 
 
-def validated_days(value):
+def validated_days(value, flag="--first-detected-within-days"):
     if value is None:
         return None
     if type(value) is not int or not 1 <= value <= 3650:
         raise _workflow.PipelineFailure(
-            "--first-detected-within-days requires an integer from 1 to 3650",
+            f"{flag} requires an integer from 1 to 3650",
             _workflow.EXIT_ARGUMENT_ERROR,
         )
     return value
@@ -64,7 +64,9 @@ def parse_args():
     """Accept per-run product options without changing persistent config."""
     recovery_flag = "--reconcile-missing-jira-issues"
     year_flag = "--vulnerability-year"
-    days_flag = "--first-detected-within-days"
+    detected_flag = "--first-detected-within-days"
+    published_flag = "--published-within-days"
+    value_flags = (year_flag, detected_flag, published_flag)
     arguments = sys.argv[1:]
 
     if arguments.count(recovery_flag) > 1:
@@ -75,7 +77,9 @@ def parse_args():
 
     remaining = []
     years = []
-    days = None
+    detected_days = None
+    published_days = None
+    seen_days = set()
     index = 0
 
     while index < len(arguments):
@@ -84,7 +88,7 @@ def parse_args():
             index += 1
             continue
 
-        if argument in (year_flag, days_flag):
+        if argument in value_flags:
             if index + 1 >= len(arguments):
                 raise _workflow.PipelineFailure(
                     f"{argument} requires a value",
@@ -93,24 +97,25 @@ def parse_args():
             flag = argument
             value = arguments[index + 1]
             index += 2
-        elif argument.startswith(year_flag + "="):
-            flag = year_flag
-            value = argument[len(year_flag) + 1:]
-            index += 1
-        elif argument.startswith(days_flag + "="):
-            flag = days_flag
-            value = argument[len(days_flag) + 1:]
-            index += 1
         else:
-            remaining.append(argument)
+            flag = next(
+                (candidate for candidate in value_flags
+                 if argument.startswith(candidate + "=")),
+                None,
+            )
+            if flag is None:
+                remaining.append(argument)
+                index += 1
+                continue
+            value = argument[len(flag) + 1:]
             index += 1
-            continue
 
         if not value.isascii() or not value.isdecimal():
             raise _workflow.PipelineFailure(
                 f"{flag} requires decimal digits",
                 _workflow.EXIT_ARGUMENT_ERROR,
             )
+
         if flag == year_flag:
             if len(value) != 4:
                 raise _workflow.PipelineFailure(
@@ -119,12 +124,17 @@ def parse_args():
                 )
             years.append(int(value))
         else:
-            if days is not None:
+            if flag in seen_days:
                 raise _workflow.PipelineFailure(
-                    f"{days_flag} may be specified only once",
+                    f"{flag} may be specified only once",
                     _workflow.EXIT_ARGUMENT_ERROR,
                 )
-            days = validated_days(int(value))
+            seen_days.add(flag)
+            days = validated_days(int(value), flag)
+            if flag == detected_flag:
+                detected_days = days
+            else:
+                published_days = days
 
     previous_argv = sys.argv
     try:
@@ -135,7 +145,8 @@ def parse_args():
 
     args.reconcile_missing_jira_issues = recovery_flag in arguments
     args.vulnerability_year = validated_years(years)
-    args.first_detected_within_days = days
+    args.first_detected_within_days = detected_days
+    args.published_within_days = published_days
     return args
 
 
@@ -149,9 +160,16 @@ def run_pipeline(args):
         )
 
     years = validated_years(getattr(args, "vulnerability_year", []))
-    days = validated_days(getattr(args, "first_detected_within_days", None))
+    detected_days = validated_days(
+        getattr(args, "first_detected_within_days", None)
+    )
+    published_days = validated_days(
+        getattr(args, "published_within_days", None),
+        "--published-within-days",
+    )
     args.vulnerability_year = years
-    args.first_detected_within_days = days
+    args.first_detected_within_days = detected_days
+    args.published_within_days = published_days
 
     reconcile = bool(getattr(args, "reconcile_missing_jira_issues", False))
     if reconcile and (
@@ -180,9 +198,14 @@ def run_pipeline(args):
             "--vulnerability-year requires product reporting",
             _workflow.EXIT_ARGUMENT_ERROR,
         )
-    if days is not None:
+    if detected_days is not None:
         raise _workflow.PipelineFailure(
             "--first-detected-within-days requires product reporting",
+            _workflow.EXIT_ARGUMENT_ERROR,
+        )
+    if published_days is not None:
+        raise _workflow.PipelineFailure(
+            "--published-within-days requires product reporting",
             _workflow.EXIT_ARGUMENT_ERROR,
         )
     return _workflow._wintermute_legacy_run_pipeline(args)
