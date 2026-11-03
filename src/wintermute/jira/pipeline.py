@@ -49,10 +49,22 @@ def validated_years(values):
     return sorted(set(values))
 
 
+def validated_days(value):
+    if value is None:
+        return None
+    if type(value) is not int or not 1 <= value <= 3650:
+        raise _workflow.PipelineFailure(
+            "--first-detected-within-days requires an integer from 1 to 3650",
+            _workflow.EXIT_ARGUMENT_ERROR,
+        )
+    return value
+
+
 def parse_args():
     """Accept per-run product options without changing persistent config."""
     recovery_flag = "--reconcile-missing-jira-issues"
     year_flag = "--vulnerability-year"
+    days_flag = "--first-detected-within-days"
     arguments = sys.argv[1:]
 
     if arguments.count(recovery_flag) > 1:
@@ -63,34 +75,56 @@ def parse_args():
 
     remaining = []
     years = []
+    days = None
     index = 0
+
     while index < len(arguments):
         argument = arguments[index]
         if argument == recovery_flag:
             index += 1
             continue
-        if argument == year_flag:
+
+        if argument in (year_flag, days_flag):
             if index + 1 >= len(arguments):
                 raise _workflow.PipelineFailure(
-                    f"{year_flag} requires a four-digit year",
+                    f"{argument} requires a value",
                     _workflow.EXIT_ARGUMENT_ERROR,
                 )
+            flag = argument
             value = arguments[index + 1]
             index += 2
         elif argument.startswith(year_flag + "="):
+            flag = year_flag
             value = argument[len(year_flag) + 1:]
+            index += 1
+        elif argument.startswith(days_flag + "="):
+            flag = days_flag
+            value = argument[len(days_flag) + 1:]
             index += 1
         else:
             remaining.append(argument)
             index += 1
             continue
 
-        if len(value) != 4 or not value.isascii() or not value.isdecimal():
+        if not value.isascii() or not value.isdecimal():
             raise _workflow.PipelineFailure(
-                f"{year_flag} requires a four-digit year",
+                f"{flag} requires decimal digits",
                 _workflow.EXIT_ARGUMENT_ERROR,
             )
-        years.append(int(value))
+        if flag == year_flag:
+            if len(value) != 4:
+                raise _workflow.PipelineFailure(
+                    f"{year_flag} requires a four-digit year",
+                    _workflow.EXIT_ARGUMENT_ERROR,
+                )
+            years.append(int(value))
+        else:
+            if days is not None:
+                raise _workflow.PipelineFailure(
+                    f"{days_flag} may be specified only once",
+                    _workflow.EXIT_ARGUMENT_ERROR,
+                )
+            days = validated_days(int(value))
 
     previous_argv = sys.argv
     try:
@@ -101,6 +135,7 @@ def parse_args():
 
     args.reconcile_missing_jira_issues = recovery_flag in arguments
     args.vulnerability_year = validated_years(years)
+    args.first_detected_within_days = days
     return args
 
 
@@ -114,7 +149,10 @@ def run_pipeline(args):
         )
 
     years = validated_years(getattr(args, "vulnerability_year", []))
+    days = validated_days(getattr(args, "first_detected_within_days", None))
     args.vulnerability_year = years
+    args.first_detected_within_days = days
+
     reconcile = bool(getattr(args, "reconcile_missing_jira_issues", False))
     if reconcile and (
         not raw.get("enabled", False)
@@ -131,8 +169,6 @@ def run_pipeline(args):
     if raw.get("enabled", False):
         from wintermute.jira import product_reporting
 
-        # Recovery is controlled by this run's flag, not by persistent
-        # configuration left enabled for future scheduled runs.
         selected_config = copy.deepcopy(config)
         selected_config["product_reporting"][
             "reconcile_missing_jira_issues"
@@ -142,6 +178,11 @@ def run_pipeline(args):
     if years:
         raise _workflow.PipelineFailure(
             "--vulnerability-year requires product reporting",
+            _workflow.EXIT_ARGUMENT_ERROR,
+        )
+    if days is not None:
+        raise _workflow.PipelineFailure(
+            "--first-detected-within-days requires product reporting",
             _workflow.EXIT_ARGUMENT_ERROR,
         )
     return _workflow._wintermute_legacy_run_pipeline(args)

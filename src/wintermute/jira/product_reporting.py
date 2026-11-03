@@ -26,6 +26,7 @@ from wintermute.jira import findings_hierarchy_plan as hierarchy
 from wintermute.jira import findings_to_jira as publisher
 from wintermute.jira import pipeline_workflow as workflow
 from wintermute.jira.pipeline_lock import PipelineLock
+from wintermute.jira.product_digest_recency import filter_recent_findings
 from wintermute.jira.product_publishing import publish, save
 from wintermute.paths import output_root
 
@@ -827,6 +828,15 @@ def run(args, config):
             workflow.EXIT_ARGUMENT_ERROR,
         )
     years = sorted(set(years))
+    days = getattr(args, "first_detected_within_days", None)
+    if days is not None and (
+        type(days) is not int or not 1 <= days <= 3650
+    ):
+        raise workflow.PipelineFailure(
+            "--first-detected-within-days requires an integer from 1 to 3650",
+            workflow.EXIT_ARGUMENT_ERROR,
+        )
+
     root = output_root() / "jira"
     run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8]
     run_dir = root / "runs" / run_id
@@ -841,6 +851,7 @@ def run(args, config):
         "exploit_maturity_field": settings["exploit_maturity_field"],
         "vulnerability_years": years,
         "excluded_by_vulnerability_year": 0,
+        "first_detected_within_days": days,
         "excluded_products": [],
         "excluded_versions": [],
         "responsibility_metadata": [],
@@ -942,6 +953,11 @@ def run(args, config):
             )
             selected_findings = filter_findings_by_identifier_year(
                 selected_findings, years, report
+            )
+            selected_findings = run_with_circuit_recovery(
+                lambda: filter_recent_findings(
+                    client, selected_findings, days, report
+                )
             )
             rows, legacy_labels = project_findings(
                 selected_findings, eligible_products, args, settings, report
