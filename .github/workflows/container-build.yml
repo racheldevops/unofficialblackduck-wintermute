@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   test-build-push:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     env:
       REGISTRY_HOST: ${{ vars.REGISTRY_HOST }}

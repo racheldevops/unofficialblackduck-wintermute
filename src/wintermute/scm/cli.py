@@ -103,6 +103,11 @@ def empty_observations() -> ScmObservationResult:
 def provider_name(
     args: argparse.Namespace,
 ) -> str:
+    if str(
+        args.project or ""
+    ).strip():
+        return "gitlab"
+
     return select_provider(
         args.scm_url,
         gitlab_group=args.group or "",
@@ -119,8 +124,20 @@ def validate_args(
     args: argparse.Namespace,
 ) -> None:
     provider = provider_name(args)
+    project = str(
+        args.project or ""
+    ).strip("/")
+    group = str(
+        args.group or ""
+    ).strip("/")
 
     if provider == "github":
+        if project:
+            raise RuntimeError(
+                "--project is supported only "
+                "for GitLab inventory"
+            )
+
         if not str(
             args.organization or ""
         ).strip():
@@ -128,18 +145,38 @@ def validate_args(
                 "GitHub organization must be supplied "
                 "with --organization or GITHUB_ORG"
             )
-    elif not str(
-        args.group or ""
-    ).strip():
-        derived = gitlab_group_from_url(
-            args.scm_url
-        )
+    else:
+        if project:
+            parts = project.split("/")
 
-        if not derived:
-            raise RuntimeError(
-                "GitLab group must be supplied with "
-                "--group or GITLAB_GROUP"
+            if (
+                len(parts) < 2
+                or any(
+                    not part
+                    or part in {".", ".."}
+                    or any(
+                        character.isspace()
+                        for character in part
+                    )
+                    for part in parts
+                )
+            ):
+                raise RuntimeError(
+                    "GitLab project must use an exact "
+                    "namespace/project path"
+                )
+        elif not group:
+            derived = gitlab_group_from_url(
+                args.scm_url
             )
+
+            if not derived:
+                raise RuntimeError(
+                    "GitLab group or exact project "
+                    "must be supplied with --group, "
+                    "--project, GITLAB_GROUP, or "
+                    "GITLAB_PROJECT"
+                )
 
     if args.timeout <= 0:
         raise RuntimeError(
@@ -285,6 +322,8 @@ def github_run(
         {
             "graphql": client.stats(),
             "rest": rest_stats,
+            "selection_mode": "organization",
+            "selected_project": "",
         },
     )
 
@@ -308,20 +347,32 @@ def gitlab_run(
             "GITLAB_TOKEN must be set"
         )
 
-    group = str(
-        args.group
-        or gitlab_group_from_url(
-            args.scm_url
-        )
-        or ""
-    ).strip()
+    project = str(
+        args.project or ""
+    ).strip("/")
+    group = (
+        ""
+        if project
+        else str(
+            args.group
+            or gitlab_group_from_url(
+                args.scm_url
+            )
+            or ""
+        ).strip("/")
+    )
     source_url = (
         args.scm_url
         or args.gitlab_rest_url
+        or os.getenv(
+            "GITLAB_URL",
+            "",
+        ).strip()
         or DEFAULT_GITLAB_REST_URL
     )
     client = GitLabClient(
         group=group,
+        project=project,
         token=token,
         base_url=gitlab_rest_url(
             source_url
@@ -332,6 +383,7 @@ def gitlab_run(
         page_size=args.page_size,
         activity_days=args.activity_days,
         workers=args.workers,
+        pipeline_limit=args.pipeline_limit,
         insecure=args.insecure,
         ca_bundle=args.ca_bundle,
         deadline=deadline,
@@ -369,6 +421,12 @@ def gitlab_run(
         {
             "graphql": client.graphql_stats(),
             "rest": client.stats(),
+            "selection_mode": (
+                "project"
+                if project
+                else "group"
+            ),
+            "selected_project": project,
         },
     )
 
@@ -437,6 +495,14 @@ def run(
         ),
         "tenant_id": tenant.tenant_id,
         "namespace": tenant.namespace,
+        "selection_mode": stats.get(
+            "selection_mode",
+            "",
+        ),
+        "selected_project": stats.get(
+            "selected_project",
+            "",
+        ),
         "discovered_repository_count": (
             inventory.discovered_count
         ),
@@ -561,6 +627,17 @@ def parse_args(
     parser.add_argument(
         "--group",
         default=os.getenv("GITLAB_GROUP"),
+    )
+    parser.add_argument(
+        "--project",
+        default=os.getenv(
+            "GITLAB_PROJECT",
+            "",
+        ),
+        help=(
+            "Inventory one exact GitLab project path "
+            "without listing its namespace."
+        ),
     )
     parser.add_argument(
         "--graphql-endpoint",

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "unofficialblackduck-wintermute"
 version = "0.2.0"
-description = "Utility scripts for Black Duck vulnerability rollups, Jira, and Datadog workflows."
+description = "Utility scripts for Black Duck vulnerability rollups, Jira, Datadog, SCM, AI analysis, and controlled remediation workflows."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
@@ -40,6 +40,11 @@ blackduck-wintermute-cip-discover = "wintermute.blackduck.jobs.cip.discover:main
 blackduck-wintermute-cip-plan = "wintermute.blackduck.jobs.cip.cli:main"
 blackduck-wintermute-cip-job = "wintermute.blackduck.jobs.cip.job:main"
 
+# Public AI and central scanning commands.
+blackduck-wintermute-ai = "wintermute.ai.cli:main"
+blackduck-wintermute-scan = "wintermute.scan.cli:main"
+blackduck-wintermute-onboard = "wintermute.scm.onboarding.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["wintermute*"]
@@ -47,3 +52,7 @@ include = ["wintermute*"]
 [tool.setuptools.package-data]
 "wintermute.jira" = ["config/*.json"]
 "wintermute.blackduck.jobs.cip" = ["config/*.json"]
+"wintermute.scm.onboarding" = ["config/wintermute-onboard.example.json"]
+
+[tool.setuptools.exclude-package-data]
+"wintermute.scm.onboarding" = ["config/*.local.json"]

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "gitlab": {
+    "url": "https://gitlab.example.invalid",
+    "central_project": "example/security-scans",
+    "central_branch": "main",
+    "image_project": "example/scan-image"
+  },
+  "target_projects": [
+    "example/application"
+  ],
+  "reuse": {
+    "merged_template_plan": ".wintermute/scm/onboarding/template-plans/REPLACE_WITH_VERIFIED_PLAN",
+    "merged_template_plan_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "expected_counts": {},
+  "scan_image": {
+    "docker": "docker",
+    "digest_reference": "registry.example.invalid/example/scan@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "timeout_seconds": 1800
+  },
+  "provision_blackduck_variables": false,
+  "tls": {
+    "insecure": false,
+    "ca_bundle": ""
+  },
+  "transport": {
+    "timeout_seconds": 30,
+    "retries": 2,
+    "retry_delay_seconds": 1,
+    "request_interval_seconds": 0.5
+  }
+}
