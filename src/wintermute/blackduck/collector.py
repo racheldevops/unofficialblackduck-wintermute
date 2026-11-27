@@ -10,7 +10,10 @@ from typing import Any
 
 from wintermute.blackduck.criteria import CollectionCriteria
 from wintermute.blackduck.models import CollectionTarget, NormalizedFinding
-from wintermute.blackduck.occurrences import matched_occurrence_advisory
+from wintermute.blackduck.occurrences import (
+    direct_identifier,
+    matched_occurrence_advisory,
+)
 from wintermute.blackduck.resources import (
     canonical_href,
     first_value_by_key,
@@ -330,7 +333,14 @@ def collect_component_findings(
     criteria: CollectionCriteria,
     *,
     entity: str = "",
+    vulnerability_id: str = "",
 ) -> list[NormalizedFinding]:
+    if vulnerability_id and getattr(client, "product_occurrence_evidence", False):
+        nested = component.get("vulnerability")
+        identifier = direct_identifier(nested) if isinstance(nested, dict) else ""
+        if identifier and identifier != vulnerability_id:
+            return []
+
     name, version, version_href, bom_component_href = component_details(
         client, component
     )
@@ -488,6 +498,7 @@ def collect_target(
     *,
     component_workers: int = 1,
     entity_resolver: EntityResolver | None = None,
+    vulnerability_id: str = "",
 ) -> TargetCollectionResult:
     started = time.monotonic()
     project_version = target.project_version
@@ -599,6 +610,7 @@ def collect_target(
                         component,
                         criteria,
                         entity=entity,
+                        vulnerability_id=vulnerability_id,
                     ),
                     None,
                 )
@@ -649,6 +661,7 @@ def collect_targets(
     workers: int = DEFAULT_IO_WORKERS,
     component_workers: int = 1,
     entity_resolver: EntityResolver | None = None,
+    vulnerability_id: str = "",
 ) -> CollectionRunResult:
     target_list = list(targets)
     quarantined_results = []
@@ -719,6 +732,7 @@ def collect_targets(
                 criteria,
                 component_workers=component_workers,
                 entity_resolver=entity_resolver,
+                vulnerability_id=vulnerability_id,
             )
 
     results = ordered_parallel_map(

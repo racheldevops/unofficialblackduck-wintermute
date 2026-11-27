@@ -6,6 +6,10 @@ from urllib.parse import quote
 
 
 TEXT_FIELD = "com.atlassian.jira.plugin.system.customfieldtypes:textfield"
+SQL_FEED_FIELD = (
+    "com.valiantys.jira.plugins.SQLFeed:"
+    "nfeed-standard-customfield-type"
+)
 
 
 def metadata_items(client, path, collection_keys):
@@ -93,15 +97,22 @@ def resolve_entity_mapping(client, config, nodes, deployment):
 
     configured_id = str(mapping.get("field_id") or "").strip()
     wanted_name = str(mapping.get("field_name") or "Entity").strip()
+    configured_type = str(mapping.get("value_type") or "array").strip().lower()
 
     if configured_id and re.fullmatch(r"customfield_[0-9]+", configured_id) is None:
         raise RuntimeError("Invalid configured Jira Entity field ID")
     if mapping.get("source", "entity") not in {"entity", "context.entity"}:
         raise RuntimeError("Entity mapping must use the product entity source")
-    if mapping.get("value_type", "text") != "text":
-        raise RuntimeError("Entity discovery currently supports text mappings only")
+    if configured_type not in {"text", "array"}:
+        raise RuntimeError("Entity mapping must use text or array")
 
-    mapping.update(source="entity", node_types=["story"], value_type="text")
+    # Live Jira metadata determines the payload shape. The chart's default
+    # is array for the Data Center SQL Feed Entity field.
+    mapping.update(
+        source="entity",
+        node_types=["story"],
+        value_type=configured_type,
+    )
 
     if not deployment:
         if not configured_id:
@@ -128,6 +139,7 @@ def resolve_entity_mapping(client, config, nodes, deployment):
         for node in tasks
     }
     resolved_ids = set()
+    resolved_types = set()
 
     for type_name in sorted(names):
         matching_types = [item for item in types if item.get("name") == type_name]
@@ -172,12 +184,29 @@ def resolve_entity_mapping(client, config, nodes, deployment):
             )
 
         field_id, descriptor = matches[0]
-        schema = descriptor.get("schema") or {}
-        if schema.get("type") != "string" or schema.get("custom") != TEXT_FIELD:
+        schema = descriptor.get("schema")
+        if not isinstance(schema, dict):
+            raise RuntimeError(f"Jira Entity field {field_id} has no valid schema")
+
+        if (
+            schema.get("type") == "string"
+            and schema.get("custom") == TEXT_FIELD
+        ):
+            value_type = "text"
+        elif (
+            deployment == "datacenter"
+            and schema.get("type") == "array"
+            and schema.get("items") == "string"
+            and schema.get("custom") == SQL_FEED_FIELD
+        ):
+            value_type = "array"
+        else:
             raise RuntimeError(
-                f"Jira Entity field {field_id} is not a single-line text field. "
+                f"Jira Entity field {field_id} is not a supported single-line "
+                "text or SQL Feed string-array field. "
                 "No issues were created by Entity discovery."
             )
+
         operations = descriptor.get("operations")
         if operations is not None and (
             not isinstance(operations, list) or "set" not in operations
@@ -185,15 +214,19 @@ def resolve_entity_mapping(client, config, nodes, deployment):
             raise RuntimeError(f"Jira Entity field {field_id} cannot be set")
 
         resolved_ids.add(field_id)
+        resolved_types.add(value_type)
 
     if len(resolved_ids) != 1:
         raise RuntimeError("Product Task issue types resolve to different Entity fields")
+    if len(resolved_types) != 1:
+        raise RuntimeError("Product Task issue types resolve to different Entity field types")
 
     mapping["field_id"] = resolved_ids.pop()
+    mapping["value_type"] = resolved_types.pop()
     mappings["entity"] = mapping
     print(
         f"Jira Entity mapping: {project} / {', '.join(sorted(names))} "
-        f"-> {mapping['field_id']}",
+        f"-> {mapping['field_id']} ({mapping['value_type']})",
         flush=True,
     )
     return prepared

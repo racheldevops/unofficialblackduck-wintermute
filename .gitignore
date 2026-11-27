@@ -35,3 +35,4 @@ k8s_handnotes*.md
 /config/
 /src/wintermute/scm/onboarding/config/*.local.json
 /planning.md
+/.year-smoke.u1pomD/

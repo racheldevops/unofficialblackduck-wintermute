@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from typing import Any
+from urllib.parse import urlsplit
 
 from wintermute.blackduck.lineage import (
     project_href_from_version_href,
@@ -12,6 +13,9 @@ from wintermute.blackduck.resources import (
     get_link,
 )
 from wintermute.concurrency import SingleFlight
+
+
+OPTION_TYPES = {"DROPDOWN", "RADIO", "MULTISELECT"}
 
 
 def custom_field_value_text(value: Any) -> str:
@@ -171,6 +175,213 @@ def find_named_custom_field(
     return False, ""
 
 
+def _option_href(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+
+    path = urlsplit(value).path
+    return (
+        path.startswith("/api/custom-fields/objects/")
+        and "/options/" in path
+    )
+
+
+def _same_instance_option_url(
+    client: Any,
+    value: Any,
+) -> str:
+    if not isinstance(value, str):
+        return ""
+
+    base = urlsplit(
+        str(getattr(client, "base_url", "")).rstrip("/")
+    )
+    candidate = urlsplit(value)
+
+    if (
+        base.scheme not in {"https", "http"}
+        or candidate.scheme != base.scheme
+        or candidate.netloc != base.netloc
+        or candidate.username is not None
+        or candidate.password is not None
+        or candidate.query
+        or candidate.fragment
+        or not candidate.path.startswith(
+            "/api/custom-fields/objects/"
+        )
+        or any(ord(character) < 32 for character in value)
+    ):
+        return ""
+
+    return canonical_href(value)
+
+
+def resolved_field_value(
+    client: Any,
+    field: dict[str, Any],
+) -> str:
+    field_type = str(
+        field.get("type") or ""
+    ).strip().upper()
+    raw = field.get(
+        "values",
+        field.get("value"),
+    )
+
+    if raw in (None, "", []):
+        return ""
+
+    if field_type not in OPTION_TYPES:
+        rendered = custom_field_candidate_value(field)
+
+        if any(
+            _option_href(part)
+            for part in rendered.split(";")
+        ):
+            return ""
+
+        return rendered
+
+    if not isinstance(raw, list) or not all(
+        isinstance(value, str) and value.strip()
+        for value in raw
+    ):
+        return ""
+
+    selected = [
+        _same_instance_option_url(client, value)
+        for value in raw
+    ]
+
+    if not all(
+        value and _option_href(value)
+        for value in selected
+    ):
+        return ""
+
+    metadata = field.get("_meta")
+    links = (
+        metadata.get("links")
+        if isinstance(metadata, dict)
+        else None
+    )
+    links = links if isinstance(links, list) else []
+    option_lists = [
+        _same_instance_option_url(
+            client,
+            link.get("href"),
+        )
+        for link in links
+        if isinstance(link, dict)
+        and link.get("rel") == "custom-field-option-list"
+    ]
+    option_lists = [
+        value for value in option_lists if value
+    ]
+
+    if len(option_lists) != 1:
+        return ""
+
+    try:
+        options = client.paged_get(option_lists[0])
+    except RuntimeError:
+        return ""
+
+    if not isinstance(options, list):
+        return ""
+
+    labels: list[str] = []
+
+    for selected_href in selected:
+        matches = [
+            option
+            for option in options
+            if isinstance(option, dict)
+            and isinstance(option.get("_meta"), dict)
+            and _same_instance_option_url(
+                client,
+                option["_meta"].get("href"),
+            ) == selected_href
+        ]
+
+        if len(matches) != 1:
+            return ""
+
+        option = matches[0]
+        label = next(
+            (
+                option[key].strip()
+                for key in (
+                    "label",
+                    "displayValue",
+                    "displayName",
+                    "value",
+                    "name",
+                )
+                if isinstance(option.get(key), str)
+                and option[key].strip()
+            ),
+            "",
+        )
+
+        if (
+            not label
+            or _option_href(label)
+            or urlsplit(label).scheme
+        ):
+            return ""
+
+        labels.append(label)
+
+    return ";".join(sorted(set(labels)))
+
+
+def find_named_custom_field_resolved(
+    client: Any,
+    fields: Any,
+    field_name: str,
+) -> tuple[bool, str]:
+    wanted = str(
+        field_name or ""
+    ).strip().casefold()
+
+    if not wanted:
+        return False, ""
+
+    if isinstance(fields, list):
+        matches = [
+            field
+            for field in fields
+            if isinstance(field, dict)
+            and custom_field_candidate_name(
+                field
+            ).casefold() == wanted
+        ]
+
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"Ambiguous custom field: {field_name}"
+            )
+
+        if matches:
+            return True, resolved_field_value(
+                client,
+                matches[0],
+            )
+
+        return False, ""
+
+    found, rendered = find_named_custom_field(
+        fields,
+        field_name,
+    )
+
+    if found and _option_href(rendered):
+        return True, ""
+
+    return found, rendered
+
+
 class ProjectCustomFieldResolver:
     def __init__(self, field_name: str) -> None:
         self.field_name = str(
@@ -258,7 +469,9 @@ class ProjectCustomFieldResolver:
                 self.field_name,
             )
 
-            if found:
+            if found and rendered and not _option_href(
+                rendered
+            ):
                 return rendered
 
         linked_url = get_link(
@@ -285,9 +498,12 @@ class ProjectCustomFieldResolver:
             except RuntimeError:
                 continue
 
-            found, rendered = find_named_custom_field(
-                fields,
-                self.field_name,
+            found, rendered = (
+                find_named_custom_field_resolved(
+                    client,
+                    fields,
+                    self.field_name,
+                )
             )
 
             if found:
